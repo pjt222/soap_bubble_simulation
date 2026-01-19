@@ -1,0 +1,22 @@
+{
+  "bubble": {
+    "diameter": 0.05,
+    "film_thickness_nm": 500.0,
+    "critical_thickness_nm": 10.0,
+    "refractive_index": 1.33
+  },
+  "fluid": {
+    "viscosity": 0.001,
+    "surface_tension": 0.025,
+    "density": 1000.0,
+    "surfactant_diffusion": 1e-9,
+    "surfactant_concentration": 0.5
+  },
+  "environment": {
+    "gravity": 9.81,
+    "temperature": 293.15,
+    "pressure": 101325.0
+  },
+  "dt": 0.001,
+  "resolution": 128
+}

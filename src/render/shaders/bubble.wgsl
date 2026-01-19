@@ -1,0 +1,127 @@
+// Soap Bubble Thin-Film Interference Shader
+// Renders iridescent colors based on film thickness and viewing angle
+
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    _padding: f32,
+};
+
+struct BubbleUniform {
+    refractive_index: f32,
+    base_thickness_nm: f32,
+    time: f32,
+    _padding: f32,
+};
+
+@group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(0) @binding(1) var<uniform> bubble: BubbleUniform;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.world_pos = in.position;
+    out.normal = normalize(in.normal);
+    out.uv = in.uv;
+    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+// Calculate film thickness with drainage effect
+// Film is thinner at top (UV.y close to 0) due to gravity
+fn get_film_thickness(uv: vec2<f32>, time: f32) -> f32 {
+    let base = bubble.base_thickness_nm;
+
+    // Drainage: film collects at bottom
+    // uv.v goes from 0 (top) to 1 (bottom)
+    let drainage_factor = 0.3 * (1.0 - cos(uv.y * 3.14159265));
+
+    // Small noise-like variation for realism
+    let noise = sin(uv.x * 20.0 + time * 0.5) * sin(uv.y * 20.0 + time * 0.3) * 0.1;
+
+    return base * (1.0 - drainage_factor * 0.5 + noise);
+}
+
+// Snell's law: calculate transmission angle cosine
+fn snells_law(cos_theta_i: f32, n_film: f32) -> f32 {
+    let n_air = 1.0;
+    let sin_theta_i = sqrt(max(0.0, 1.0 - cos_theta_i * cos_theta_i));
+    let sin_theta_t = sin_theta_i * n_air / n_film;
+    return sqrt(max(0.0, 1.0 - sin_theta_t * sin_theta_t));
+}
+
+// Fresnel reflectance (Schlick approximation)
+fn fresnel_schlick(cos_theta: f32, n_film: f32) -> f32 {
+    let n_air = 1.0;
+    let r0 = pow((n_film - n_air) / (n_film + n_air), 2.0);
+    return r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// Calculate thin-film interference color
+fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec3<f32> {
+    // RGB wavelengths in nanometers
+    let wavelengths = vec3<f32>(650.0, 532.0, 450.0);
+
+    // Transmission angle from Snell's law
+    let cos_theta_t = snells_law(cos_theta, n_film);
+
+    // Optical path difference for each wavelength
+    // δ = 2 * n * d * cos(θt) + λ/2 (phase shift at interface)
+    let optical_path = 2.0 * n_film * thickness_nm * cos_theta_t;
+
+    // Phase difference (including π phase shift from reflection)
+    let phase = 2.0 * 3.14159265 * optical_path / wavelengths + 3.14159265;
+
+    // Interference intensity: I = (1 + cos(phase)) / 2
+    let intensity = 0.5 * (vec3<f32>(1.0) + cos(phase));
+
+    // Fresnel reflection coefficient
+    let fresnel = fresnel_schlick(cos_theta, n_film);
+
+    // Combine interference with Fresnel reflection
+    // Scale for visibility (thin films are weakly reflecting)
+    return intensity * fresnel * 4.0;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // View direction
+    let view_dir = normalize(camera.camera_pos - in.world_pos);
+
+    // Angle between view and surface normal
+    let cos_theta = abs(dot(view_dir, in.normal));
+
+    // Get film thickness at this point
+    let thickness = get_film_thickness(in.uv, bubble.time);
+
+    // Calculate interference color
+    let interference_color = thin_film_interference(
+        thickness,
+        cos_theta,
+        bubble.refractive_index
+    );
+
+    // Base bubble color (slight bluish tint)
+    let base_color = vec3<f32>(0.95, 0.97, 1.0);
+
+    // Combine base with interference
+    let final_color = base_color * 0.1 + interference_color;
+
+    // Alpha: more transparent when looking straight on, more visible at edges
+    let alpha = 0.3 + 0.6 * (1.0 - cos_theta);
+
+    return vec4<f32>(final_color, alpha);
+}

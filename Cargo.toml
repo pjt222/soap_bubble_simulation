@@ -1,0 +1,39 @@
+[package]
+name = "soap-bubble-sim"
+version = "0.1.0"
+edition = "2024"
+authors = ["Philipp Thoss <ph.thoss@gmx.de>"]
+description = "Physically accurate 3D soap bubble simulation with GPU rendering"
+license = "MIT"
+
+[dependencies]
+# GPU & Rendering
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+
+# Mathematics
+nalgebra = "0.33"
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# Configuration & Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image export
+image = "0.25"
+
+# Logging & CLI
+env_logger = "0.11"
+log = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+
+# GUI (optional)
+egui = "0.30"
+egui-wgpu = "0.30"
+egui-winit = "0.30"
+
+[profile.release]
+opt-level = 3
+lto = true

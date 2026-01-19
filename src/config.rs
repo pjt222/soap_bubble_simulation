@@ -1,0 +1,268 @@
+//! Configuration module for soap bubble simulation parameters.
+//!
+//! This module defines the parameter structures for the soap bubble simulation,
+//! including bubble geometry, fluid properties, and environmental conditions.
+
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+
+/// Parameters defining the physical properties of the soap bubble.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BubbleParameters {
+    /// Diameter of the bubble in meters
+    pub diameter: f64,
+
+    /// Initial film thickness in nanometers
+    pub film_thickness_nm: f64,
+
+    /// Critical film thickness before bursting (nm)
+    pub critical_thickness_nm: f64,
+
+    /// Refractive index of the soap film (~1.33 for water-based)
+    pub refractive_index: f64,
+}
+
+impl Default for BubbleParameters {
+    fn default() -> Self {
+        Self {
+            diameter: 0.05,              // 5 cm
+            film_thickness_nm: 500.0,    // 500 nm
+            critical_thickness_nm: 10.0, // 10 nm
+            refractive_index: 1.33,
+        }
+    }
+}
+
+/// Parameters defining the fluid properties of the soap solution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FluidParameters {
+    /// Dynamic viscosity in Pa*s (Pascal-seconds)
+    pub viscosity: f64,
+
+    /// Surface tension in N/m (Newtons per meter)
+    pub surface_tension: f64,
+
+    /// Density in kg/m^3
+    pub density: f64,
+
+    /// Surfactant diffusion coefficient in m^2/s
+    pub surfactant_diffusion: f64,
+
+    /// Surfactant concentration (relative, 0.0 to 1.0)
+    pub surfactant_concentration: f64,
+}
+
+impl Default for FluidParameters {
+    fn default() -> Self {
+        Self {
+            viscosity: 0.001,             // ~water viscosity
+            surface_tension: 0.025,       // soap solution
+            density: 1000.0,              // kg/m^3
+            surfactant_diffusion: 1e-9,   // m^2/s
+            surfactant_concentration: 0.5,
+        }
+    }
+}
+
+/// Parameters defining the environmental conditions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentParameters {
+    /// Gravitational acceleration in m/s^2
+    pub gravity: f64,
+
+    /// Ambient temperature in Kelvin
+    pub temperature: f64,
+
+    /// Atmospheric pressure in Pascal
+    pub pressure: f64,
+}
+
+impl Default for EnvironmentParameters {
+    fn default() -> Self {
+        Self {
+            gravity: 9.81,       // Earth gravity
+            temperature: 293.15, // 20 degrees Celsius
+            pressure: 101325.0,  // 1 atm
+        }
+    }
+}
+
+/// Complete simulation configuration combining all parameter groups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationConfig {
+    /// Bubble geometry and optical properties
+    pub bubble: BubbleParameters,
+
+    /// Fluid dynamics parameters
+    pub fluid: FluidParameters,
+
+    /// Environmental conditions
+    pub environment: EnvironmentParameters,
+
+    /// Simulation time step in seconds
+    pub dt: f64,
+
+    /// Simulation grid resolution (vertices on sphere)
+    pub resolution: u32,
+}
+
+impl Default for SimulationConfig {
+    fn default() -> Self {
+        Self {
+            bubble: BubbleParameters::default(),
+            fluid: FluidParameters::default(),
+            environment: EnvironmentParameters::default(),
+            dt: 0.001,       // 1 ms time step
+            resolution: 128, // 128x256 grid
+        }
+    }
+}
+
+impl SimulationConfig {
+    /// Load configuration from a JSON file.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the JSON configuration file
+    ///
+    /// # Returns
+    /// * `Ok(SimulationConfig)` - Parsed configuration
+    /// * `Err` - If file cannot be read or parsed
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let contents = fs::read_to_string(path.as_ref()).map_err(|error| ConfigError::Io {
+            path: path.as_ref().to_path_buf(),
+            error,
+        })?;
+        serde_json::from_str(&contents).map_err(|error| ConfigError::Parse {
+            path: path.as_ref().to_path_buf(),
+            error,
+        })
+    }
+
+    /// Save configuration to a JSON file.
+    ///
+    /// # Arguments
+    /// * `path` - Path to write the JSON configuration file
+    ///
+    /// # Returns
+    /// * `Ok(())` - If successfully written
+    /// * `Err` - If file cannot be written
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
+        let contents =
+            serde_json::to_string_pretty(self).map_err(|error| ConfigError::Serialize { error })?;
+        fs::write(path.as_ref(), contents).map_err(|error| ConfigError::Io {
+            path: path.as_ref().to_path_buf(),
+            error,
+        })
+    }
+
+    /// Calculate the bubble radius in meters.
+    pub fn bubble_radius(&self) -> f64 {
+        self.bubble.diameter / 2.0
+    }
+
+    /// Calculate the internal pressure difference using Young-Laplace equation.
+    /// Delta P = 4 * gamma / R (factor 4 because of two interfaces)
+    pub fn internal_pressure_difference(&self) -> f64 {
+        4.0 * self.fluid.surface_tension / self.bubble_radius()
+    }
+
+    /// Convert film thickness from nanometers to meters.
+    pub fn film_thickness_meters(&self) -> f64 {
+        self.bubble.film_thickness_nm * 1e-9
+    }
+}
+
+/// Error types for configuration operations.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// IO error when reading or writing configuration files
+    Io {
+        path: std::path::PathBuf,
+        error: std::io::Error,
+    },
+    /// JSON parsing error
+    Parse {
+        path: std::path::PathBuf,
+        error: serde_json::Error,
+    },
+    /// JSON serialization error
+    Serialize { error: serde_json::Error },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Io { path, error } => {
+                write!(
+                    formatter,
+                    "Failed to read/write config file '{}': {}",
+                    path.display(),
+                    error
+                )
+            }
+            ConfigError::Parse { path, error } => {
+                write!(
+                    formatter,
+                    "Failed to parse config file '{}': {}",
+                    path.display(),
+                    error
+                )
+            }
+            ConfigError::Serialize { error } => {
+                write!(formatter, "Failed to serialize config: {}", error)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::Io { error, .. } => Some(error),
+            ConfigError::Parse { error, .. } => Some(error),
+            ConfigError::Serialize { error } => Some(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = SimulationConfig::default();
+        assert!((config.bubble.diameter - 0.05).abs() < f64::EPSILON);
+        assert!((config.bubble.film_thickness_nm - 500.0).abs() < f64::EPSILON);
+        assert!((config.fluid.viscosity - 0.001).abs() < f64::EPSILON);
+        assert!((config.environment.gravity - 9.81).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_bubble_radius() {
+        let config = SimulationConfig::default();
+        assert!((config.bubble_radius() - 0.025).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_internal_pressure() {
+        let config = SimulationConfig::default();
+        let expected_pressure = 4.0 * 0.025 / 0.025; // 4 Pa
+        assert!((config.internal_pressure_difference() - expected_pressure).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_film_thickness_conversion() {
+        let config = SimulationConfig::default();
+        assert!((config.film_thickness_meters() - 500e-9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let config = SimulationConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SimulationConfig = serde_json::from_str(&json).unwrap();
+        assert!((config.bubble.diameter - deserialized.bubble.diameter).abs() < f64::EPSILON);
+    }
+}
