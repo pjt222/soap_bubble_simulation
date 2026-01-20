@@ -10,6 +10,7 @@ use crate::render::camera::Camera;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct BubbleUniform {
+    // Visual properties (9 floats)
     pub refractive_index: f32,
     pub base_thickness_nm: f32,
     pub time: f32,
@@ -19,6 +20,14 @@ pub struct BubbleUniform {
     pub background_r: f32,
     pub background_g: f32,
     pub background_b: f32,
+
+    // Film dynamics parameters (4 floats)
+    pub film_time: f32,
+    pub swirl_intensity: f32,
+    pub drainage_speed: f32,
+    pub pattern_scale: f32,
+
+    // Padding for 16-byte alignment (3 floats)
     pub _padding: [f32; 3],
 }
 
@@ -34,6 +43,11 @@ impl Default for BubbleUniform {
             background_r: 0.1,
             background_g: 0.1,
             background_b: 0.15,
+            // Film dynamics defaults
+            film_time: 0.0,
+            swirl_intensity: 1.0,
+            drainage_speed: 0.5,
+            pattern_scale: 1.0,
             _padding: [0.0; 3],
         }
     }
@@ -65,6 +79,11 @@ pub struct RenderPipeline {
     // FPS tracking
     frame_times: Vec<f32>,
     fps: f32,
+    // Animation state
+    rotation_playing: bool,
+    rotation_speed: f32,  // radians per second for camera yaw
+    film_playing: bool,
+    film_speed: f32,
 }
 
 impl RenderPipeline {
@@ -164,7 +183,7 @@ impl RenderPipeline {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT, // Only used in fragment shader for film dynamics
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -305,6 +324,11 @@ impl RenderPipeline {
             egui_renderer,
             frame_times: Vec::with_capacity(60),
             fps: 0.0,
+            // Animation state
+            rotation_playing: false,
+            rotation_speed: 0.5,  // radians per second
+            film_playing: true,
+            film_speed: 1.0,
         }
     }
 
@@ -375,6 +399,22 @@ impl RenderPipeline {
     pub fn update(&mut self, dt: f32) {
         self.bubble_uniform.time += dt;
 
+        // Camera rotation animation (orbits around Y axis)
+        if self.rotation_playing {
+            self.camera.yaw += dt * self.rotation_speed;
+            // Keep yaw in valid range
+            if self.camera.yaw > std::f32::consts::TAU {
+                self.camera.yaw -= std::f32::consts::TAU;
+            } else if self.camera.yaw < 0.0 {
+                self.camera.yaw += std::f32::consts::TAU;
+            }
+        }
+
+        // Film animation
+        if self.film_playing {
+            self.bubble_uniform.film_time += dt * self.film_speed;
+        }
+
         // Track FPS
         self.frame_times.push(dt);
         if self.frame_times.len() > 60 {
@@ -425,6 +465,15 @@ impl RenderPipeline {
         let num_triangles = self.num_indices / 3;
         let time = self.bubble_uniform.time;
 
+        // Animation state extraction
+        let mut rotation_playing = self.rotation_playing;
+        let mut rotation_speed = self.rotation_speed;
+        let mut film_playing = self.film_playing;
+        let mut film_speed = self.film_speed;
+        let mut swirl_intensity = self.bubble_uniform.swirl_intensity;
+        let mut drainage_speed = self.bubble_uniform.drainage_speed;
+        let mut pattern_scale = self.bubble_uniform.pattern_scale;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -445,6 +494,14 @@ impl RenderPipeline {
                 height,
                 num_triangles,
                 time,
+                // Animation parameters
+                &mut rotation_playing,
+                &mut rotation_speed,
+                &mut film_playing,
+                &mut film_speed,
+                &mut swirl_intensity,
+                &mut drainage_speed,
+                &mut pattern_scale,
             );
         });
 
@@ -460,6 +517,15 @@ impl RenderPipeline {
         if subdivision != self.subdivision_level {
             self.set_subdivision_level(subdivision);
         }
+
+        // Write back animation state
+        self.rotation_playing = rotation_playing;
+        self.rotation_speed = rotation_speed;
+        self.film_playing = film_playing;
+        self.film_speed = film_speed;
+        self.bubble_uniform.swirl_intensity = swirl_intensity;
+        self.bubble_uniform.drainage_speed = drainage_speed;
+        self.bubble_uniform.pattern_scale = pattern_scale;
 
         // Handle egui platform output
         self.egui_state.handle_platform_output(window, egui_output.platform_output);
@@ -594,6 +660,14 @@ impl RenderPipeline {
         height: u32,
         num_triangles: u32,
         time: f32,
+        // Animation parameters
+        rotation_playing: &mut bool,
+        rotation_speed: &mut f32,
+        film_playing: &mut bool,
+        film_speed: &mut f32,
+        swirl_intensity: &mut f32,
+        drainage_speed: &mut f32,
+        pattern_scale: &mut f32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -660,6 +734,49 @@ impl RenderPipeline {
                         *bg_g = color[1];
                         *bg_b = color[2];
                     }
+                });
+
+                ui.separator();
+                ui.heading("Animation");
+                ui.separator();
+
+                ui.collapsing("Camera Orbit", |ui| {
+                    ui.horizontal(|ui| {
+                        let play_text = if *rotation_playing { "\u{23F8} Pause" } else { "\u{25B6} Play" };
+                        if ui.button(play_text).clicked() {
+                            *rotation_playing = !*rotation_playing;
+                        }
+                    });
+
+                    ui.add(egui::Slider::new(rotation_speed, 0.1..=2.0)
+                        .text("Speed")
+                        .suffix(" rad/s")
+                        .fixed_decimals(2));
+                });
+
+                ui.collapsing("Film Dynamics", |ui| {
+                    ui.horizontal(|ui| {
+                        let play_text = if *film_playing { "\u{23F8} Pause" } else { "\u{25B6} Play" };
+                        if ui.button(play_text).clicked() {
+                            *film_playing = !*film_playing;
+                        }
+                    });
+
+                    ui.add(egui::Slider::new(film_speed, 0.1..=3.0)
+                        .text("Speed")
+                        .fixed_decimals(1));
+
+                    ui.add(egui::Slider::new(swirl_intensity, 0.0..=2.0)
+                        .text("Swirl")
+                        .fixed_decimals(2));
+
+                    ui.add(egui::Slider::new(drainage_speed, 0.0..=2.0)
+                        .text("Drainage")
+                        .fixed_decimals(2));
+
+                    ui.add(egui::Slider::new(pattern_scale, 0.5..=3.0)
+                        .text("Pattern scale")
+                        .fixed_decimals(1));
                 });
 
                 ui.separator();

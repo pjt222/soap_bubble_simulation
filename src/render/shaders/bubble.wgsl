@@ -8,6 +8,7 @@ struct CameraUniform {
 };
 
 struct BubbleUniform {
+    // Visual properties (9 floats)
     refractive_index: f32,
     base_thickness_nm: f32,
     time: f32,
@@ -17,6 +18,14 @@ struct BubbleUniform {
     background_r: f32,
     background_g: f32,
     background_b: f32,
+
+    // Film dynamics parameters (4 floats)
+    film_time: f32,
+    swirl_intensity: f32,
+    drainage_speed: f32,
+    pattern_scale: f32,
+
+    // Padding for 16-byte alignment (3 floats)
     _padding1: f32,
     _padding2: f32,
     _padding3: f32,
@@ -48,25 +57,35 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Calculate film thickness with drainage effect
+// Calculate film thickness with enhanced dynamics
 // Uses normal vector directly to avoid UV seam artifacts
 fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let base = bubble.base_thickness_nm;
+    let t = bubble.film_time;
+    let scale = bubble.pattern_scale;
+    let swirl = bubble.swirl_intensity;
 
-    // Drainage: film collects at bottom based on Y component of normal
-    // normal.y goes from 1 (top) to -1 (bottom)
-    let drainage_factor = 0.3 * (1.0 - normal.y) * 0.5; // 0 at top, 0.3 at bottom
+    // Animated drainage - film collects at bottom, progresses over time
+    let drain_progress = min(t * bubble.drainage_speed * 0.1, 1.0);
+    let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
 
-    // Gentle noise using spherical harmonics-like basis (seamless on sphere)
-    // Uses low frequencies to avoid mesh topology artifacts
-    let n = normal;
-    let noise = 0.05 * (
-        sin(3.0 * n.x + time * 0.3) * sin(3.0 * n.y + time * 0.2) +
-        sin(4.0 * n.y + time * 0.4) * sin(4.0 * n.z + time * 0.25) +
-        sin(5.0 * n.z + time * 0.35) * sin(5.0 * n.x + time * 0.15)
-    ) / 3.0;
+    // Swirling pattern - rotates around Y axis
+    let swirl_angle = t * 0.5;
+    let sx = normal.x * cos(swirl_angle) - normal.z * sin(swirl_angle);
+    let sz = normal.x * sin(swirl_angle) + normal.z * cos(swirl_angle);
+    let n = normal * scale;
 
-    return base * (1.0 - drainage_factor + noise);
+    // Multi-frequency noise for organic look
+    let noise = swirl * 0.1 * (
+        sin(4.0 * sx + t * 0.3) * sin(4.0 * n.y + t * 0.2) +
+        0.6 * sin(6.0 * n.y + t * 0.4) * sin(6.0 * sz + t * 0.25) +
+        0.3 * sin(8.0 * sz + t * 0.35) * sin(8.0 * sx + t * 0.15)
+    ) / 1.9;
+
+    // Gravity ripples - waves propagating downward
+    let wave = 0.03 * swirl * sin(n.y * 10.0 - t * 2.0) * (1.0 - abs(n.y));
+
+    return base * (1.0 - drainage - noise - wave);
 }
 
 // Snell's law: calculate transmission angle cosine

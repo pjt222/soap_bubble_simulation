@@ -9,6 +9,7 @@ This document captures important lessons learned during the development of the s
 3. [egui Depth Buffer Configuration](#egui-depth-buffer-configuration)
 4. [WSL2 Display Configuration](#wsl2-display-configuration)
 5. [Thin-Film Interference Implementation](#thin-film-interference-implementation)
+6. [Animation: Camera Rotation vs Geometry Rotation](#animation-camera-rotation-vs-geometry-rotation)
 
 ---
 
@@ -286,3 +287,86 @@ fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec
 ### Lesson Learned
 
 Physically-based rendering requires balancing accuracy with visual appeal. The 4x intensity multiplier is physically "wrong" but necessary for the colors to be visible.
+
+---
+
+## Animation: Camera Rotation vs Geometry Rotation
+
+### Problem
+
+When implementing auto-rotation of the bubble, rotating the geometry via vertex shader produced **non-smooth, jerky motion**.
+
+### Initial Approach (Vertex Shader Rotation)
+
+The first implementation applied Rodrigues rotation formula in the vertex shader:
+
+```wgsl
+fn rotate_around_axis(v: vec3<f32>, axis: vec3<f32>, angle: f32) -> vec3<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    let k = normalize(axis);
+    return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    // Rotate every vertex every frame
+    let pos = rotate_around_axis(in.position, axis, angle);
+    let norm = rotate_around_axis(in.normal, axis, angle);
+    // ...
+}
+```
+
+### Root Cause
+
+The vertex shader rotation had several issues:
+
+1. **Per-vertex computation** - At subdivision level 3, ~32k vertices each computing trig functions
+2. **Uniform buffer overhead** - Required 4 extra floats (angle + axis) in the uniform buffer
+3. **Shader complexity** - More instructions per vertex, potential for precision issues
+
+### Solution: Camera-Based Rotation
+
+Instead of rotating the geometry, rotate the camera's viewpoint:
+
+```rust
+// In update() - just increment camera yaw
+if self.rotation_playing {
+    self.camera.yaw += dt * self.rotation_speed;
+    if self.camera.yaw > std::f32::consts::TAU {
+        self.camera.yaw -= std::f32::consts::TAU;
+    }
+}
+```
+
+The camera already uses yaw/pitch for its orbit controls, so auto-rotation simply animates the yaw angle.
+
+### Benefits
+
+| Aspect | Vertex Rotation | Camera Rotation |
+|--------|-----------------|-----------------|
+| Computation | ~32k vertices × trig ops | 1 matrix rebuild |
+| Smoothness | Jerky | Smooth |
+| Code complexity | Rodrigues formula in shader | Single float increment |
+| Uniform buffer | 80 bytes (with rotation fields) | 64 bytes |
+| Shader stages | VERTEX_FRAGMENT visibility | FRAGMENT only |
+
+### Simplified Shader
+
+After removing vertex rotation:
+
+```wgsl
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.world_pos = in.position;
+    out.normal = normalize(in.normal);
+    out.uv = in.uv;
+    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    return out;
+}
+```
+
+### Lesson Learned
+
+For smooth rotation animation of static geometry, prefer moving the camera/viewpoint rather than transforming geometry. The view matrix is computed once per frame on the CPU, while vertex transformations run for every vertex on the GPU. Additionally, the existing orbit camera infrastructure can often be reused for auto-rotation.
