@@ -5,3 +5,8 @@ CONTINUE_HERE.md
 
 # Screenshot output directory
 /screenshots
+
+# Reference materials (PDFs are copyrighted - do not commit)
+/references/*.pdf
+/references/chunks_*/
+/references/summaries_*/
