@@ -231,6 +231,10 @@ When integrating egui with a 3D scene using depth testing:
 - Huang, W., et al. (2020). "Chemomechanical simulation of soap film flow on spherical bubbles." *ACM Transactions on Graphics*, 39(4).
   - Advanced simulation of soap film dynamics
 
+- Meng, X., Piazza, F., Both, G. J., Barzel, B., & Barabási, A.-L. (2026). "Surface optimization governs the local design of physical networks." *Nature*, 649, 315-322.
+  - DOI: [10.1038/s41586-025-09784-4](https://doi.org/10.1038/s41586-025-09784-4)
+  - Mathematical framework connecting surface minimization to network physics
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
