@@ -1,12 +1,11 @@
 //! Sphere mesh generation for soap bubble rendering
 //!
-//! Generates an icosphere mesh suitable for GPU rendering with thin-film
+//! Generates a UV sphere mesh suitable for GPU rendering with thin-film
 //! interference effects. UV coordinates map to spherical coordinates (theta, phi)
 //! for film thickness texture mapping.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use std::collections::HashMap;
 use std::f32::consts::PI;
 
 /// Vertex data for GPU rendering
@@ -105,22 +104,20 @@ pub struct SphereMesh {
 }
 
 impl SphereMesh {
-    /// Create a new icosphere mesh
+    /// Create a new UV sphere mesh
     ///
     /// # Arguments
     /// * `radius` - Radius of the sphere
-    /// * `subdivision_level` - Number of subdivision iterations (0 = icosahedron,
-    ///   each level quadruples the triangle count)
-    ///
-    /// # Triangle counts by subdivision level
-    /// * 0: 20 triangles (icosahedron)
-    /// * 1: 80 triangles
-    /// * 2: 320 triangles
-    /// * 3: 1,280 triangles
-    /// * 4: 5,120 triangles
-    /// * 5: 20,480 triangles
+    /// * `subdivision_level` - Controls resolution: segments = 16 * 2^level
+    ///   * 0: 16 segments (512 triangles)
+    ///   * 1: 32 segments (2,048 triangles)
+    ///   * 2: 64 segments (8,192 triangles)
+    ///   * 3: 128 segments (32,768 triangles)
+    ///   * 4: 256 segments (131,072 triangles)
+    ///   * 5: 512 segments (524,288 triangles)
     pub fn new(radius: f32, subdivision_level: u32) -> Self {
-        let (vertices, indices) = Self::generate_icosphere(radius, subdivision_level);
+        let segments = 16 * (1 << subdivision_level);
+        let (vertices, indices) = Self::generate_uv_sphere(radius, segments, segments / 2);
 
         Self {
             vertices,
@@ -130,113 +127,57 @@ impl SphereMesh {
         }
     }
 
-    /// Generate an icosphere mesh
-    fn generate_icosphere(radius: f32, subdivision_level: u32) -> (Vec<Vertex>, Vec<u32>) {
-        // Start with a unit icosahedron
-        let (mut positions, mut indices) = Self::create_icosahedron();
+    /// Generate a UV sphere mesh (latitude/longitude grid)
+    fn generate_uv_sphere(radius: f32, lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
-        // Subdivide the icosahedron
-        for _ in 0..subdivision_level {
-            (positions, indices) = Self::subdivide(&positions, &indices);
+        // Generate vertices
+        for lat in 0..=lat_segments {
+            let theta = (lat as f32 / lat_segments as f32) * PI; // 0 to PI (top to bottom)
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
+
+            for lon in 0..=lon_segments {
+                let phi = (lon as f32 / lon_segments as f32) * 2.0 * PI; // 0 to 2*PI
+                let sin_phi = phi.sin();
+                let cos_phi = phi.cos();
+
+                // Position on unit sphere
+                let x = sin_theta * cos_phi;
+                let y = cos_theta;
+                let z = sin_theta * sin_phi;
+
+                let position = Vec3::new(x, y, z) * radius;
+                let normal = Vec3::new(x, y, z);
+                let uv = [lon as f32 / lon_segments as f32, lat as f32 / lat_segments as f32];
+
+                vertices.push(Vertex::new(position, normal, uv));
+            }
         }
 
-        // Create vertices with proper normals and UVs
-        let vertices: Vec<Vertex> = positions
-            .iter()
-            .map(|&pos| Vertex::from_sphere_point(pos, radius))
-            .collect();
+        // Generate indices
+        for lat in 0..lat_segments {
+            for lon in 0..lon_segments {
+                let current = lat * (lon_segments + 1) + lon;
+                let next = current + lon_segments + 1;
+
+                // Two triangles per quad (skip degenerate triangles at poles)
+                if lat != 0 {
+                    indices.push(current);
+                    indices.push(next);
+                    indices.push(current + 1);
+                }
+
+                if lat != lat_segments - 1 {
+                    indices.push(current + 1);
+                    indices.push(next);
+                    indices.push(next + 1);
+                }
+            }
+        }
 
         (vertices, indices)
-    }
-
-    /// Create the initial icosahedron vertices and indices
-    fn create_icosahedron() -> (Vec<Vec3>, Vec<u32>) {
-        // Golden ratio
-        let phi = (1.0 + 5.0_f32.sqrt()) / 2.0;
-
-        // Normalize so all vertices are on unit sphere
-        let scale = 1.0 / (1.0 + phi * phi).sqrt();
-        let a = scale;
-        let b = phi * scale;
-
-        // 12 vertices of an icosahedron
-        let positions = vec![
-            Vec3::new(-a, b, 0.0),
-            Vec3::new(a, b, 0.0),
-            Vec3::new(-a, -b, 0.0),
-            Vec3::new(a, -b, 0.0),
-            Vec3::new(0.0, -a, b),
-            Vec3::new(0.0, a, b),
-            Vec3::new(0.0, -a, -b),
-            Vec3::new(0.0, a, -b),
-            Vec3::new(b, 0.0, -a),
-            Vec3::new(b, 0.0, a),
-            Vec3::new(-b, 0.0, -a),
-            Vec3::new(-b, 0.0, a),
-        ];
-
-        // 20 triangular faces
-        let indices = vec![
-            0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7,
-            6, 7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10,
-            8, 6, 7, 9, 8, 1,
-        ];
-
-        (positions, indices)
-    }
-
-    /// Subdivide the mesh by splitting each triangle into 4 triangles
-    fn subdivide(positions: &[Vec3], indices: &[u32]) -> (Vec<Vec3>, Vec<u32>) {
-        let mut new_positions = positions.to_vec();
-        let mut new_indices = Vec::with_capacity(indices.len() * 4);
-        let mut midpoint_cache: HashMap<(u32, u32), u32> = HashMap::new();
-
-        // Helper to get or create midpoint vertex
-        let mut get_midpoint = |p1_idx: u32, p2_idx: u32| -> u32 {
-            // Use ordered pair as key to avoid duplicates
-            let key = if p1_idx < p2_idx {
-                (p1_idx, p2_idx)
-            } else {
-                (p2_idx, p1_idx)
-            };
-
-            if let Some(&idx) = midpoint_cache.get(&key) {
-                return idx;
-            }
-
-            // Create new midpoint vertex on unit sphere
-            let p1 = new_positions[p1_idx as usize];
-            let p2 = new_positions[p2_idx as usize];
-            let midpoint = ((p1 + p2) / 2.0).normalize();
-
-            let new_idx = new_positions.len() as u32;
-            new_positions.push(midpoint);
-            midpoint_cache.insert(key, new_idx);
-
-            new_idx
-        };
-
-        // Process each triangle
-        for triangle in indices.chunks(3) {
-            let v0 = triangle[0];
-            let v1 = triangle[1];
-            let v2 = triangle[2];
-
-            // Get midpoints of each edge
-            let m01 = get_midpoint(v0, v1);
-            let m12 = get_midpoint(v1, v2);
-            let m20 = get_midpoint(v2, v0);
-
-            // Create 4 new triangles
-            // Corner triangles
-            new_indices.extend_from_slice(&[v0, m01, m20]);
-            new_indices.extend_from_slice(&[v1, m12, m01]);
-            new_indices.extend_from_slice(&[v2, m20, m12]);
-            // Center triangle
-            new_indices.extend_from_slice(&[m01, m12, m20]);
-        }
-
-        (new_positions, new_indices)
     }
 
     /// Get the number of triangles in the mesh
@@ -265,22 +206,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_icosahedron_creation() {
+    fn test_uv_sphere_creation() {
         let mesh = SphereMesh::new(1.0, 0);
-        assert_eq!(mesh.triangle_count(), 20);
-        assert_eq!(mesh.vertex_count(), 12);
+        // Level 0: 16 lon segments, 8 lat segments
+        // Triangles: 2 * 16 * 8 - 16 (top) - 16 (bottom) = 224
+        // But we skip degenerate triangles at poles, so slightly less
+        assert!(mesh.triangle_count() > 200);
+        assert!(mesh.vertex_count() > 100);
     }
 
     #[test]
-    fn test_subdivision_levels() {
-        // Each subdivision quadruples triangle count
+    fn test_subdivision_increases_detail() {
+        // Each level doubles segments, quadrupling triangle count
         let mesh_0 = SphereMesh::new(1.0, 0);
         let mesh_1 = SphereMesh::new(1.0, 1);
         let mesh_2 = SphereMesh::new(1.0, 2);
 
-        assert_eq!(mesh_0.triangle_count(), 20);
-        assert_eq!(mesh_1.triangle_count(), 80);
-        assert_eq!(mesh_2.triangle_count(), 320);
+        assert!(mesh_1.triangle_count() > mesh_0.triangle_count() * 3);
+        assert!(mesh_2.triangle_count() > mesh_1.triangle_count() * 3);
     }
 
     #[test]

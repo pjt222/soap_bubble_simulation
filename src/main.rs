@@ -91,6 +91,14 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // First, let egui handle the event
+        let egui_consumed = if let (Some(pipeline), Some(window)) = (&mut self.pipeline, &self.window) {
+            pipeline.handle_event(window, &event)
+        } else {
+            false
+        };
+
+        // If egui consumed the event, don't process it further (except for essential events)
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Close requested, exiting");
@@ -101,12 +109,12 @@ impl ApplicationHandler for App {
                     pipeline.resize(new_size);
                 }
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::MouseInput { state, button, .. } if !egui_consumed => {
                 if button == MouseButton::Left {
                     self.mouse_pressed = state == ElementState::Pressed;
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } if !egui_consumed => {
                 if self.mouse_pressed {
                     if let Some((last_x, last_y)) = self.last_mouse_pos {
                         let delta_x = position.x - last_x;
@@ -118,7 +126,11 @@ impl ApplicationHandler for App {
                 }
                 self.last_mouse_pos = Some((position.x, position.y));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::CursorMoved { position, .. } => {
+                // Always track mouse position for smooth transitions
+                self.last_mouse_pos = Some((position.x, position.y));
+            }
+            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
@@ -141,12 +153,12 @@ impl ApplicationHandler for App {
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
 
-                if let Some(ref mut pipeline) = self.pipeline {
+                if let (Some(pipeline), Some(window)) = (&mut self.pipeline, &self.window) {
                     // Update animation
                     pipeline.update(dt);
 
                     // Render
-                    match pipeline.render() {
+                    match pipeline.render(window) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost) => {
                             let size = pipeline.size();

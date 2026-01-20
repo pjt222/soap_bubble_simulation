@@ -11,7 +11,15 @@ struct BubbleUniform {
     refractive_index: f32,
     base_thickness_nm: f32,
     time: f32,
-    _padding: f32,
+    interference_intensity: f32,
+    base_alpha: f32,
+    edge_alpha: f32,
+    background_r: f32,
+    background_g: f32,
+    background_b: f32,
+    _padding1: f32,
+    _padding2: f32,
+    _padding3: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -41,18 +49,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 }
 
 // Calculate film thickness with drainage effect
-// Film is thinner at top (UV.y close to 0) due to gravity
-fn get_film_thickness(uv: vec2<f32>, time: f32) -> f32 {
+// Uses normal vector directly to avoid UV seam artifacts
+fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let base = bubble.base_thickness_nm;
 
-    // Drainage: film collects at bottom
-    // uv.v goes from 0 (top) to 1 (bottom)
-    let drainage_factor = 0.3 * (1.0 - cos(uv.y * 3.14159265));
+    // Drainage: film collects at bottom based on Y component of normal
+    // normal.y goes from 1 (top) to -1 (bottom)
+    let drainage_factor = 0.3 * (1.0 - normal.y) * 0.5; // 0 at top, 0.3 at bottom
 
-    // Small noise-like variation for realism
-    let noise = sin(uv.x * 20.0 + time * 0.5) * sin(uv.y * 20.0 + time * 0.3) * 0.1;
+    // Gentle noise using spherical harmonics-like basis (seamless on sphere)
+    // Uses low frequencies to avoid mesh topology artifacts
+    let n = normal;
+    let noise = 0.05 * (
+        sin(3.0 * n.x + time * 0.3) * sin(3.0 * n.y + time * 0.2) +
+        sin(4.0 * n.y + time * 0.4) * sin(4.0 * n.z + time * 0.25) +
+        sin(5.0 * n.z + time * 0.35) * sin(5.0 * n.x + time * 0.15)
+    ) / 3.0;
 
-    return base * (1.0 - drainage_factor * 0.5 + noise);
+    return base * (1.0 - drainage_factor + noise);
 }
 
 // Snell's law: calculate transmission angle cosine
@@ -93,19 +107,22 @@ fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec
 
     // Combine interference with Fresnel reflection
     // Scale for visibility (thin films are weakly reflecting)
-    return intensity * fresnel * 4.0;
+    return intensity * fresnel * bubble.interference_intensity;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Renormalize interpolated normal (GPU interpolation denormalizes)
+    let normal = normalize(in.normal);
+
     // View direction
     let view_dir = normalize(camera.camera_pos - in.world_pos);
 
     // Angle between view and surface normal
-    let cos_theta = abs(dot(view_dir, in.normal));
+    let cos_theta = abs(dot(view_dir, normal));
 
-    // Get film thickness at this point
-    let thickness = get_film_thickness(in.uv, bubble.time);
+    // Get film thickness at this point (using normal to avoid UV seam)
+    let thickness = get_film_thickness(normal, bubble.time);
 
     // Calculate interference color
     let interference_color = thin_film_interference(
@@ -121,7 +138,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let final_color = base_color * 0.1 + interference_color;
 
     // Alpha: more transparent when looking straight on, more visible at edges
-    let alpha = 0.3 + 0.6 * (1.0 - cos_theta);
+    let alpha = bubble.base_alpha + bubble.edge_alpha * (1.0 - cos_theta);
 
     return vec4<f32>(final_color, alpha);
 }

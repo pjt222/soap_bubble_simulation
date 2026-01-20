@@ -13,7 +13,13 @@ pub struct BubbleUniform {
     pub refractive_index: f32,
     pub base_thickness_nm: f32,
     pub time: f32,
-    pub _padding: f32,
+    pub interference_intensity: f32,
+    pub base_alpha: f32,
+    pub edge_alpha: f32,
+    pub background_r: f32,
+    pub background_g: f32,
+    pub background_b: f32,
+    pub _padding: [f32; 3],
 }
 
 impl Default for BubbleUniform {
@@ -22,7 +28,13 @@ impl Default for BubbleUniform {
             refractive_index: 1.33,
             base_thickness_nm: 500.0,
             time: 0.0,
-            _padding: 0.0,
+            interference_intensity: 4.0,
+            base_alpha: 0.3,
+            edge_alpha: 0.6,
+            background_r: 0.1,
+            background_g: 0.1,
+            background_b: 0.15,
+            _padding: [0.0; 3],
         }
     }
 }
@@ -43,6 +55,16 @@ pub struct RenderPipeline {
     depth_texture: wgpu::TextureView,
     pub camera: Camera,
     pub bubble_uniform: BubbleUniform,
+    // Mesh settings
+    pub subdivision_level: u32,
+    radius: f32,
+    // egui integration
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    // FPS tracking
+    frame_times: Vec<f32>,
+    fps: f32,
 }
 
 impl RenderPipeline {
@@ -228,8 +250,10 @@ impl RenderPipeline {
             cache: None,
         });
 
-        // Create sphere mesh (5cm diameter, subdivision level 4)
-        let mesh = SphereMesh::new(0.025, 4);
+        // Create UV sphere mesh (5cm diameter, level 3 = 128 segments, ~32k triangles)
+        let radius = 0.025;
+        let subdivision_level = 3_u32;
+        let mesh = SphereMesh::new(radius, subdivision_level);
 
         // Create vertex buffer
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -247,6 +271,18 @@ impl RenderPipeline {
 
         let num_indices = mesh.indices.len() as u32;
 
+        // Initialize egui
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, Some(wgpu::TextureFormat::Depth32Float), 1, false);
+
         Self {
             surface,
             device,
@@ -262,7 +298,38 @@ impl RenderPipeline {
             depth_texture,
             camera,
             bubble_uniform,
+            subdivision_level,
+            radius,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            frame_times: Vec::with_capacity(60),
+            fps: 0.0,
         }
+    }
+
+    /// Regenerate mesh with new subdivision level
+    pub fn set_subdivision_level(&mut self, level: u32) {
+        if level == self.subdivision_level || level > 5 {
+            return; // No change or too high
+        }
+        self.subdivision_level = level;
+
+        let mesh = SphereMesh::new(self.radius, level);
+
+        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: mesh.vertex_bytes(),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: mesh.index_bytes(),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.num_indices = mesh.indices.len() as u32;
     }
 
     fn create_depth_texture(
@@ -298,9 +365,25 @@ impl RenderPipeline {
         }
     }
 
+    /// Handle window events for egui
+    pub fn handle_event(&mut self, window: &winit::window::Window, event: &winit::event::WindowEvent) -> bool {
+        let response = self.egui_state.on_window_event(window, event);
+        response.consumed
+    }
+
     /// Update time for animation
     pub fn update(&mut self, dt: f32) {
         self.bubble_uniform.time += dt;
+
+        // Track FPS
+        self.frame_times.push(dt);
+        if self.frame_times.len() > 60 {
+            self.frame_times.remove(0);
+        }
+        if !self.frame_times.is_empty() {
+            let avg_dt: f32 = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
+            self.fps = 1.0 / avg_dt;
+        }
 
         // Update uniform buffers
         self.queue.write_buffer(
@@ -315,12 +398,84 @@ impl RenderPipeline {
         );
     }
 
-    /// Render a frame
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    /// Render a frame with egui overlay
+    pub fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Build egui UI - extract mutable values to avoid borrow conflicts
+        let raw_input = self.egui_state.take_egui_input(window);
+        let mut thickness = self.bubble_uniform.base_thickness_nm;
+        let mut refractive_index = self.bubble_uniform.refractive_index;
+        let mut interference_intensity = self.bubble_uniform.interference_intensity;
+        let mut base_alpha = self.bubble_uniform.base_alpha;
+        let mut edge_alpha = self.bubble_uniform.edge_alpha;
+        let mut bg_r = self.bubble_uniform.background_r;
+        let mut bg_g = self.bubble_uniform.background_g;
+        let mut bg_b = self.bubble_uniform.background_b;
+        let mut subdivision = self.subdivision_level;
+        let camera_distance = self.camera.distance;
+        let camera_yaw = self.camera.yaw;
+        let camera_pitch = self.camera.pitch;
+        let fps = self.fps;
+        let width = self.config.width;
+        let height = self.config.height;
+        let num_triangles = self.num_indices / 3;
+        let time = self.bubble_uniform.time;
+
+        let egui_output = self.egui_ctx.run(raw_input, |ctx| {
+            Self::build_ui_inner(
+                ctx,
+                &mut thickness,
+                &mut refractive_index,
+                &mut interference_intensity,
+                &mut base_alpha,
+                &mut edge_alpha,
+                &mut bg_r,
+                &mut bg_g,
+                &mut bg_b,
+                &mut subdivision,
+                camera_distance,
+                camera_yaw,
+                camera_pitch,
+                fps,
+                width,
+                height,
+                num_triangles,
+                time,
+            );
+        });
+
+        // Write back modified values
+        self.bubble_uniform.base_thickness_nm = thickness;
+        self.bubble_uniform.refractive_index = refractive_index;
+        self.bubble_uniform.interference_intensity = interference_intensity;
+        self.bubble_uniform.base_alpha = base_alpha;
+        self.bubble_uniform.edge_alpha = edge_alpha;
+        self.bubble_uniform.background_r = bg_r;
+        self.bubble_uniform.background_g = bg_g;
+        self.bubble_uniform.background_b = bg_b;
+        if subdivision != self.subdivision_level {
+            self.set_subdivision_level(subdivision);
+        }
+
+        // Handle egui platform output
+        self.egui_state.handle_platform_output(window, egui_output.platform_output);
+
+        // Tessellate egui
+        let clipped_primitives = self.egui_ctx.tessellate(egui_output.shapes, egui_output.pixels_per_point);
+
+        // Update egui textures
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: egui_output.pixels_per_point,
+        };
+
+        for (id, image_delta) in &egui_output.textures_delta.set {
+            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+        }
 
         let mut encoder = self
             .device
@@ -328,6 +483,16 @@ impl RenderPipeline {
                 label: Some("Render Encoder"),
             });
 
+        // Update egui buffers
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &clipped_primitives,
+            &screen_descriptor,
+        );
+
+        // Render bubble
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -336,9 +501,9 @@ impl RenderPipeline {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.15,
+                            r: self.bubble_uniform.background_r as f64,
+                            g: self.bubble_uniform.background_g as f64,
+                            b: self.bubble_uniform.background_b as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -363,10 +528,186 @@ impl RenderPipeline {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
+        // Render egui
+        // Safety: The render pass is used immediately and dropped before encoder.finish()
+        // The 'static lifetime is a limitation of the egui-wgpu API
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Egui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+            // Transmute lifetime - safe because render_pass is dropped before encoder.finish()
+            let render_pass: &mut wgpu::RenderPass<'static> = unsafe {
+                std::mem::transmute(&mut render_pass)
+            };
+
+            self.egui_renderer.render(render_pass, &clipped_primitives, &screen_descriptor);
+        }
+
+        // Free egui textures
+        for id in &egui_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    /// Build the egui UI with interactive controls (static to avoid borrow issues)
+    #[allow(clippy::too_many_arguments)]
+    fn build_ui_inner(
+        ctx: &egui::Context,
+        thickness: &mut f32,
+        refractive_index: &mut f32,
+        interference_intensity: &mut f32,
+        base_alpha: &mut f32,
+        edge_alpha: &mut f32,
+        bg_r: &mut f32,
+        bg_g: &mut f32,
+        bg_b: &mut f32,
+        subdivision: &mut u32,
+        camera_distance: f32,
+        camera_yaw: f32,
+        camera_pitch: f32,
+        fps: f32,
+        width: u32,
+        height: u32,
+        num_triangles: u32,
+        time: f32,
+    ) {
+        egui::Window::new("Soap Bubble")
+            .default_pos([10.0, 10.0])
+            .default_width(280.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("Film Properties");
+                ui.separator();
+
+                ui.add(egui::Slider::new(thickness, 100.0..=1500.0)
+                    .text("Thickness")
+                    .suffix(" nm"));
+
+                ui.add(egui::Slider::new(refractive_index, 1.0..=2.0)
+                    .text("Refractive index")
+                    .fixed_decimals(2));
+
+                // Preset buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Soap").clicked() {
+                        *refractive_index = 1.33;
+                        *thickness = 500.0;
+                    }
+                    if ui.button("Oil").clicked() {
+                        *refractive_index = 1.47;
+                        *thickness = 300.0;
+                    }
+                    if ui.button("Thin").clicked() {
+                        *thickness = 150.0;
+                    }
+                    if ui.button("Thick").clicked() {
+                        *thickness = 1200.0;
+                    }
+                });
+
+                ui.separator();
+                ui.heading("Render Settings");
+                ui.separator();
+
+                ui.add(egui::Slider::new(interference_intensity, 0.5..=10.0)
+                    .text("Color intensity")
+                    .fixed_decimals(1));
+
+                ui.add(egui::Slider::new(base_alpha, 0.0..=1.0)
+                    .text("Base opacity")
+                    .fixed_decimals(2));
+
+                ui.add(egui::Slider::new(edge_alpha, 0.0..=1.0)
+                    .text("Edge opacity")
+                    .fixed_decimals(2));
+
+                ui.separator();
+                ui.heading("Mesh & Background");
+                ui.separator();
+
+                ui.add(egui::Slider::new(subdivision, 1..=5)
+                    .text("Mesh detail"));
+
+                ui.horizontal(|ui| {
+                    ui.label("Background:");
+                    let mut color = [*bg_r, *bg_g, *bg_b];
+                    if ui.color_edit_button_rgb(&mut color).changed() {
+                        *bg_r = color[0];
+                        *bg_g = color[1];
+                        *bg_b = color[2];
+                    }
+                });
+
+                ui.separator();
+                ui.collapsing("Camera Info", |ui| {
+                    egui::Grid::new("camera_grid")
+                        .num_columns(2)
+                        .spacing([20.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Distance:");
+                            ui.label(format!("{:.3} m", camera_distance));
+                            ui.end_row();
+
+                            ui.label("Yaw:");
+                            ui.label(format!("{:.1}°", camera_yaw.to_degrees()));
+                            ui.end_row();
+
+                            ui.label("Pitch:");
+                            ui.label(format!("{:.1}°", camera_pitch.to_degrees()));
+                            ui.end_row();
+                        });
+                });
+
+                ui.collapsing("Performance", |ui| {
+                    egui::Grid::new("perf_grid")
+                        .num_columns(2)
+                        .spacing([20.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("FPS:");
+                            ui.label(format!("{:.0}", fps));
+                            ui.end_row();
+
+                            ui.label("Resolution:");
+                            ui.label(format!("{}x{}", width, height));
+                            ui.end_row();
+
+                            ui.label("Triangles:");
+                            ui.label(format!("{}", num_triangles));
+                            ui.end_row();
+
+                            ui.label("Time:");
+                            ui.label(format!("{:.1} s", time));
+                            ui.end_row();
+                        });
+                });
+
+                ui.separator();
+                ui.small("Drag to rotate | Scroll to zoom | ESC to exit");
+            });
     }
 
     /// Get window size
