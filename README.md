@@ -6,6 +6,8 @@ Physically accurate 3D soap bubble simulation in Rust with GPU-accelerated visua
 ![License](https://img.shields.io/badge/License-MIT-blue)
 ![wgpu](https://img.shields.io/badge/wgpu-24.0-green)
 
+![Soap Bubble Simulation](showcase.gif)
+
 ## Features
 
 - **Thin-film interference rendering** - Realistic iridescent colors based on optical physics

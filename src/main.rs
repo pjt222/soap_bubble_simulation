@@ -142,8 +142,23 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     use winit::keyboard::{Key, NamedKey};
-                    if let Key::Named(NamedKey::Escape) = event.logical_key {
-                        event_loop.exit();
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            event_loop.exit();
+                        }
+                        Key::Named(NamedKey::F12) => {
+                            // Take screenshot
+                            if let Some(ref mut pipeline) = self.pipeline {
+                                pipeline.screenshot_requested = true;
+                            }
+                        }
+                        Key::Named(NamedKey::F11) => {
+                            // Toggle recording
+                            if let Some(ref mut pipeline) = self.pipeline {
+                                pipeline.toggle_recording();
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

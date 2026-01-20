@@ -2,9 +2,11 @@
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+use std::path::Path;
 
 use crate::physics::geometry::{SphereMesh, Vertex};
 use crate::render::camera::Camera;
+use crate::export::image_export;
 
 /// Bubble-specific uniform data
 #[repr(C)]
@@ -84,6 +86,10 @@ pub struct RenderPipeline {
     rotation_speed: f32,  // radians per second for camera yaw
     film_playing: bool,
     film_speed: f32,
+    // Export state
+    pub recording: bool,
+    pub frame_counter: u32,
+    pub screenshot_requested: bool,
 }
 
 impl RenderPipeline {
@@ -134,7 +140,7 @@ impl RenderPipeline {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width,
             height: size.height,
@@ -329,6 +335,10 @@ impl RenderPipeline {
             rotation_speed: 0.5,  // radians per second
             film_playing: true,
             film_speed: 1.0,
+            // Export state
+            recording: false,
+            frame_counter: 0,
+            screenshot_requested: false,
         }
     }
 
@@ -474,6 +484,11 @@ impl RenderPipeline {
         let mut drainage_speed = self.bubble_uniform.drainage_speed;
         let mut pattern_scale = self.bubble_uniform.pattern_scale;
 
+        // Export state extraction
+        let mut screenshot_requested = self.screenshot_requested;
+        let mut recording = self.recording;
+        let frame_counter = self.frame_counter;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -502,6 +517,10 @@ impl RenderPipeline {
                 &mut swirl_intensity,
                 &mut drainage_speed,
                 &mut pattern_scale,
+                // Export parameters
+                &mut screenshot_requested,
+                &mut recording,
+                frame_counter,
             );
         });
 
@@ -526,6 +545,20 @@ impl RenderPipeline {
         self.bubble_uniform.swirl_intensity = swirl_intensity;
         self.bubble_uniform.drainage_speed = drainage_speed;
         self.bubble_uniform.pattern_scale = pattern_scale;
+
+        // Write back export state
+        self.screenshot_requested = screenshot_requested;
+        // Handle recording toggle from UI
+        if recording != self.recording {
+            if recording {
+                self.frame_counter = 0;
+                let _ = std::fs::create_dir_all("screenshots");
+                log::info!("Recording started");
+            } else {
+                log::info!("Recording stopped after {} frames", self.frame_counter);
+            }
+            self.recording = recording;
+        }
 
         // Handle egui platform output
         self.egui_state.handle_platform_output(window, egui_output.platform_output);
@@ -633,7 +666,106 @@ impl RenderPipeline {
             self.egui_renderer.free_texture(id);
         }
 
+        // Check if we need to capture a frame
+        let should_capture = self.screenshot_requested || self.recording;
+        let staging_buffer = if should_capture {
+            // Calculate buffer size with proper alignment
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+            let buffer_size = (padded_bytes_per_row * self.config.height) as u64;
+
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Screenshot Staging Buffer"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            // Copy texture to buffer
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &output.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row),
+                        rows_per_image: Some(self.config.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            Some((buffer, padded_bytes_per_row))
+        } else {
+            None
+        };
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Process screenshot if requested
+        if let Some((staging_buffer, padded_bytes_per_row)) = staging_buffer {
+            let buffer_slice = staging_buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+
+            self.device.poll(wgpu::Maintain::Wait);
+
+            if let Ok(Ok(())) = rx.recv() {
+                let data = buffer_slice.get_mapped_range();
+                let width = self.config.width;
+                let height = self.config.height;
+                let bytes_per_pixel = 4u32;
+
+                // Remove row padding
+                let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+                for row in 0..height {
+                    let start = (row * padded_bytes_per_row) as usize;
+                    let end = start + (width * bytes_per_pixel) as usize;
+                    pixels.extend_from_slice(&data[start..end]);
+                }
+
+                drop(data);
+                staging_buffer.unmap();
+
+                // Convert BGRA to RGBA
+                for chunk in pixels.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                }
+
+                // Determine filename
+                let _ = std::fs::create_dir_all("screenshots");
+                let path = if self.screenshot_requested && !self.recording {
+                    format!("screenshots/screenshot_{:04}.png", self.frame_counter)
+                } else {
+                    format!("screenshots/frame_{:04}.png", self.frame_counter)
+                };
+
+                // Export
+                if let Err(e) = image_export::export_frame(&path, width, height, &pixels) {
+                    log::error!("Failed to export frame: {}", e);
+                } else {
+                    log::info!("Saved: {}", path);
+                }
+
+                self.frame_counter += 1;
+            }
+
+            self.screenshot_requested = false;
+        }
+
         output.present();
 
         Ok(())
@@ -668,6 +800,10 @@ impl RenderPipeline {
         swirl_intensity: &mut f32,
         drainage_speed: &mut f32,
         pattern_scale: &mut f32,
+        // Export parameters
+        screenshot_requested: &mut bool,
+        recording: &mut bool,
+        frame_counter: u32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -823,8 +959,144 @@ impl RenderPipeline {
                 });
 
                 ui.separator();
+                ui.heading("Export");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("\u{1F4F7} Screenshot").clicked() {
+                        *screenshot_requested = true;
+                    }
+
+                    let record_text = if *recording {
+                        "\u{23F9} Stop Recording"
+                    } else {
+                        "\u{23FA} Record"
+                    };
+                    if ui.button(record_text).clicked() {
+                        *recording = !*recording;
+                    }
+                });
+
+                if *recording {
+                    ui.colored_label(egui::Color32::RED, format!("\u{1F534} Recording... Frame {}", frame_counter));
+                }
+
+                ui.small("F12: Screenshot | F11: Toggle Recording");
+
+                ui.separator();
                 ui.small("Drag to rotate | Scroll to zoom | ESC to exit");
             });
+    }
+
+    /// Capture current frame to a PNG file
+    pub fn capture_frame<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let width = self.config.width;
+        let height = self.config.height;
+
+        // Calculate buffer size with proper alignment
+        // wgpu requires rows to be aligned to 256 bytes
+        let bytes_per_pixel = 4u32;
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        // Create staging buffer
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Screenshot Staging Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Get current frame texture
+        let output = self.surface.get_current_texture()
+            .map_err(|e| format!("Failed to get surface texture: {}", e))?;
+
+        // Create command encoder
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Screenshot Encoder"),
+        });
+
+        // Copy texture to buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &output.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map buffer and read data
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().map_err(|e| format!("Failed to map buffer: {:?}", e))?;
+
+        // Read data and remove padding
+        let data = buffer_slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + (width * bytes_per_pixel) as usize;
+            pixels.extend_from_slice(&data[start..end]);
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+
+        // The texture format is BGRA, convert to RGBA
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk.swap(0, 2); // Swap B and R
+        }
+
+        // Export to PNG
+        image_export::export_frame(path, width, height, &pixels)
+            .map_err(|e| format!("Failed to export frame: {}", e))?;
+
+        // Don't present this frame (it was consumed by screenshot)
+        // The next render() call will present a new frame
+
+        Ok(())
+    }
+
+    /// Request a screenshot on the next frame
+    pub fn request_screenshot(&mut self) {
+        self.screenshot_requested = true;
+    }
+
+    /// Toggle recording mode
+    pub fn toggle_recording(&mut self) {
+        self.recording = !self.recording;
+        if self.recording {
+            self.frame_counter = 0;
+            // Create screenshots directory
+            let _ = std::fs::create_dir_all("screenshots");
+            log::info!("Recording started");
+        } else {
+            log::info!("Recording stopped after {} frames", self.frame_counter);
+        }
     }
 
     /// Get window size
