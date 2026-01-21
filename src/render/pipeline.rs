@@ -8,6 +8,7 @@ use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
 use crate::physics::geometry::{LodMeshCache, SphereMesh, Vertex};
 use crate::render::camera::Camera;
+use crate::render::gpu_drainage::GPUDrainageSimulator;
 use crate::export::image_export;
 
 /// Bubble-specific uniform data
@@ -130,6 +131,9 @@ pub struct RenderPipeline {
     current_lod_level: u32,
     lod_enabled: bool,
     lod_thresholds: [f32; 4],  // Distance thresholds for LOD transitions [5→4, 4→3, 3→2, 2→1]
+    // GPU drainage simulation
+    gpu_drainage: GPUDrainageSimulator,
+    pub gpu_drainage_enabled: bool,
 }
 
 impl RenderPipeline {
@@ -357,6 +361,14 @@ impl RenderPipeline {
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
 
+        // Initialize GPU drainage simulator
+        let gpu_drainage = GPUDrainageSimulator::new(
+            &device,
+            500e-9,  // Initial thickness: 500nm
+            128,     // Grid width (phi)
+            64,      // Grid height (theta)
+        );
+
         Self {
             surface,
             device,
@@ -409,6 +421,9 @@ impl RenderPipeline {
             current_lod_level: subdivision_level,
             lod_enabled: false,  // Disabled by default, user can enable
             lod_thresholds: [0.08, 0.15, 0.30, 0.60],  // Distance thresholds in meters
+            // GPU drainage simulation
+            gpu_drainage,
+            gpu_drainage_enabled: false,
         }
     }
 
@@ -877,6 +892,13 @@ impl RenderPipeline {
         let mut lod_enabled = self.lod_enabled;
         let current_lod_level = self.current_lod_level;
 
+        // GPU drainage extraction
+        let mut gpu_drainage_enabled = self.gpu_drainage_enabled;
+        let mut gpu_drainage_time_scale = self.gpu_drainage.time_scale;
+        let mut gpu_drainage_steps = self.gpu_drainage.steps_per_frame;
+        let gpu_drainage_time = self.gpu_drainage.current_time();
+        let mut reset_gpu_drainage = false;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -930,6 +952,12 @@ impl RenderPipeline {
                 // LOD parameters
                 &mut lod_enabled,
                 current_lod_level,
+                // GPU drainage parameters
+                &mut gpu_drainage_enabled,
+                &mut gpu_drainage_time_scale,
+                &mut gpu_drainage_steps,
+                gpu_drainage_time,
+                &mut reset_gpu_drainage,
             );
         });
 
@@ -1016,6 +1044,15 @@ impl RenderPipeline {
         // Handle LOD enable/disable
         self.lod_enabled = lod_enabled;
 
+        // Handle GPU drainage changes
+        self.gpu_drainage_enabled = gpu_drainage_enabled;
+        self.gpu_drainage.enabled = gpu_drainage_enabled;
+        self.gpu_drainage.time_scale = gpu_drainage_time_scale;
+        self.gpu_drainage.steps_per_frame = gpu_drainage_steps;
+        if reset_gpu_drainage {
+            self.gpu_drainage.reset(&self.queue, 500e-9);  // Reset to 500nm
+        }
+
         // Handle egui platform output
         self.egui_state.handle_platform_output(window, egui_output.platform_output);
 
@@ -1037,6 +1074,13 @@ impl RenderPipeline {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+
+        // GPU drainage simulation compute pass (before render pass)
+        if self.gpu_drainage_enabled {
+            // Get frame dt from fps tracking
+            let dt = if self.fps > 0.0 { 1.0 / self.fps } else { 1.0 / 60.0 };
+            self.gpu_drainage.step(&mut encoder, dt);
+        }
 
         // Update egui buffers
         self.egui_renderer.update_buffers(
@@ -1282,6 +1326,12 @@ impl RenderPipeline {
         // LOD parameters
         lod_enabled: &mut bool,
         current_lod_level: u32,
+        // GPU drainage parameters
+        gpu_drainage_enabled: &mut bool,
+        gpu_drainage_time_scale: &mut f32,
+        gpu_drainage_steps: &mut u32,
+        gpu_drainage_time: f64,
+        reset_gpu_drainage: &mut bool,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1449,8 +1499,8 @@ impl RenderPipeline {
                     }
                 });
 
-                ui.collapsing("Physics Drainage", |ui| {
-                    ui.checkbox(physics_drainage_enabled, "Enable physics simulation");
+                ui.collapsing("Physics Drainage (CPU)", |ui| {
+                    ui.checkbox(physics_drainage_enabled, "Enable CPU simulation");
 
                     if *physics_drainage_enabled {
                         ui.add(egui::Slider::new(drainage_time_scale, 1.0..=500.0)
@@ -1470,6 +1520,30 @@ impl RenderPipeline {
                             ui.label("Initializing...");
                         }
                     }
+                });
+
+                ui.collapsing("GPU Drainage", |ui| {
+                    ui.checkbox(gpu_drainage_enabled, "Enable GPU simulation");
+
+                    if *gpu_drainage_enabled {
+                        ui.add(egui::Slider::new(gpu_drainage_time_scale, 10.0..=500.0)
+                            .text("Time scale")
+                            .logarithmic(true)
+                            .fixed_decimals(0));
+
+                        ui.add(egui::Slider::new(gpu_drainage_steps, 1..=50)
+                            .text("Steps/frame"));
+
+                        ui.separator();
+                        ui.label(format!("Sim time: {:.2} s", gpu_drainage_time));
+                        ui.label("Grid: 128×64 (8k cells)");
+
+                        if ui.button("Reset").clicked() {
+                            *reset_gpu_drainage = true;
+                        }
+                    }
+
+                    ui.label("⚡ Real-time PDE solver");
                 });
 
                 ui.collapsing("Gravity Deformation", |ui| {

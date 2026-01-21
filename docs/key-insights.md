@@ -12,6 +12,7 @@ This document captures important lessons learned during the development of the s
 6. [Animation: Camera Rotation vs Geometry Rotation](#animation-camera-rotation-vs-geometry-rotation)
 7. [MSAA (Multi-Sample Anti-Aliasing) Implementation](#msaa-multi-sample-anti-aliasing-implementation)
 8. [LOD (Level of Detail) System](#lod-level-of-detail-system)
+9. [GPU Drainage Simulation](#gpu-drainage-simulation)
 
 ---
 
@@ -612,3 +613,159 @@ if *lod_enabled {
 3. Distance thresholds should be tuned based on screen coverage, not absolute distance
 4. For simple geometry like spheres, instant LOD switching is acceptable without blending
 5. Separating mesh cache from GPU buffers allows flexible memory management
+
+---
+
+## GPU Drainage Simulation
+
+### Problem
+
+CPU-based drainage simulation (in `DrainageSimulator`) was too slow for real-time physics at high grid resolution. The PDE solver iterates over each grid cell sequentially.
+
+### Solution
+
+Move the drainage PDE solver to GPU compute shaders with double-buffered storage for safe parallel updates.
+
+### Architecture
+
+```rust
+/// GPU-based drainage simulator with double-buffered storage
+pub struct GPUDrainageSimulator {
+    thickness_buffers: [wgpu::Buffer; 2],  // Double-buffering for read/write
+    current_buffer: usize,                  // Alternates 0↔1 each step
+    params_buffer: wgpu::Buffer,            // Uniform parameters
+    compute_pipeline: wgpu::ComputePipeline,
+    bind_groups: [wgpu::BindGroup; 2],      // For both buffer directions
+}
+```
+
+### Double-Buffering Pattern
+
+The key challenge is that GPU shaders can't safely read from and write to the same buffer location. Solution: use two buffers and alternate:
+
+```
+Step 1: Read from A → Write to B
+Step 2: Read from B → Write to A
+Step 3: Read from A → Write to B
+...
+```
+
+Implementation:
+```rust
+// Create bind groups for both directions
+let bind_groups = [
+    // A → B (read from A, write to B)
+    device.create_bind_group(&BindGroupDescriptor {
+        entries: &[
+            BindGroupEntry { binding: 0, resource: buffers[0].as_entire_binding() }, // read
+            BindGroupEntry { binding: 1, resource: buffers[1].as_entire_binding() }, // write
+        ],
+    }),
+    // B → A (read from B, write to A)
+    device.create_bind_group(&BindGroupDescriptor {
+        entries: &[
+            BindGroupEntry { binding: 0, resource: buffers[1].as_entire_binding() }, // read
+            BindGroupEntry { binding: 1, resource: buffers[0].as_entire_binding() }, // write
+        ],
+    }),
+];
+
+// Each step swaps which bind group is used
+fn step(&mut self, encoder: &mut CommandEncoder) {
+    compute_pass.set_bind_group(0, &self.bind_groups[self.current_buffer], &[]);
+    compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    self.current_buffer = 1 - self.current_buffer;  // Swap for next step
+}
+```
+
+### Compute Shader Structure
+
+The drainage compute shader (`shaders/drainage.wgsl`) implements the thin-film drainage PDE:
+
+```wgsl
+struct DrainageParams {
+    dt: f32,              // Time step
+    gravity: f32,         // Gravitational acceleration
+    viscosity: f32,       // Dynamic viscosity
+    density: f32,         // Fluid density
+    diffusion_coeff: f32, // Surface diffusion
+    bubble_radius: f32,   // For Laplacian calculation
+    grid_width: u32,
+    grid_height: u32,
+};
+
+@group(0) @binding(0) var<storage, read> thickness_in: array<f32>;
+@group(0) @binding(1) var<storage, read_write> thickness_out: array<f32>;
+@group(0) @binding(2) var<uniform> params: DrainageParams;
+
+@compute @workgroup_size(16, 16)
+fn drainage_step(@builtin(global_invocation_id) id: vec3<u32>) {
+    // Drainage equation: dh/dt = -ρgh³/(3η) * sin(θ) + D∇²h
+    let drainage_term = -drainage_coeff * h_cubed * sin_theta;
+    let diffusion_term = diffusion_coeff * laplacian;
+    thickness_out[idx] = h + (drainage_term + diffusion_term) * dt;
+}
+```
+
+### Integration with Render Loop
+
+Compute passes run before render passes in the same command encoder:
+
+```rust
+fn render(&mut self, window: &Window) -> Result<(), SurfaceError> {
+    let mut encoder = device.create_command_encoder(...);
+
+    // GPU drainage simulation (compute)
+    if self.gpu_drainage_enabled {
+        self.gpu_drainage.step(&mut encoder, dt);
+    }
+
+    // 3D render pass (graphics)
+    {
+        let render_pass = encoder.begin_render_pass(...);
+        // Draw bubble...
+    }
+
+    // 2D UI pass (graphics)
+    {
+        let render_pass = encoder.begin_render_pass(...);
+        // Draw egui...
+    }
+
+    queue.submit(std::iter::once(encoder.finish()));
+}
+```
+
+### Key Implementation Details
+
+**1. Grid Layout**
+- Grid stored in row-major order: `index = theta_idx * grid_width + phi_idx`
+- Theta (polar): 0 to π (top to bottom of sphere)
+- Phi (azimuthal): 0 to 2π (periodic boundary)
+
+**2. Boundary Conditions**
+- Periodic in phi (azimuthal): wraps around
+- Special handling at poles (theta = 0, π): averaged from neighboring ring
+
+**3. Workgroup Dispatch**
+```rust
+let workgroups_x = (grid_width + 15) / 16;   // Ceiling division
+let workgroups_y = (grid_height + 15) / 16;
+compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+```
+
+**4. Time Scaling**
+GPU drainage runs faster than real-time for visible effects:
+```rust
+time_scale: f32,        // Default: 100x
+steps_per_frame: u32,   // Multiple iterations per frame
+```
+
+### Lesson Learned
+
+1. Double-buffering is essential for GPU parallel updates where each cell depends on neighbors
+2. Compute passes can share the same command encoder as render passes
+3. Bind groups pre-encode buffer bindings, so create one for each buffer direction
+4. Grid resolution (e.g., 128×64) can be much higher than practical for CPU iteration
+5. Time scaling allows physics to run faster than real-time for visualization
+6. Boundary conditions (poles, periodic edges) need explicit handling in the shader
