@@ -899,6 +899,10 @@ impl RenderPipeline {
         let gpu_drainage_time = self.gpu_drainage.current_time();
         let mut reset_gpu_drainage = false;
 
+        // Marangoni effect extraction
+        let mut marangoni_enabled = self.gpu_drainage.marangoni_enabled;
+        let mut marangoni_coeff = self.gpu_drainage.params().marangoni_coeff;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -958,6 +962,9 @@ impl RenderPipeline {
                 &mut gpu_drainage_steps,
                 gpu_drainage_time,
                 &mut reset_gpu_drainage,
+                // Marangoni parameters
+                &mut marangoni_enabled,
+                &mut marangoni_coeff,
             );
         });
 
@@ -1051,6 +1058,21 @@ impl RenderPipeline {
         self.gpu_drainage.steps_per_frame = gpu_drainage_steps;
         if reset_gpu_drainage {
             self.gpu_drainage.reset(&self.queue, 500e-9);  // Reset to 500nm
+        }
+
+        // Handle Marangoni changes
+        if marangoni_enabled != self.gpu_drainage.marangoni_enabled {
+            self.gpu_drainage.set_marangoni_enabled(&self.queue, marangoni_enabled);
+        }
+        if (marangoni_coeff - self.gpu_drainage.params().marangoni_coeff).abs() > 0.0001 {
+            let params = self.gpu_drainage.params();
+            self.gpu_drainage.set_marangoni_params(
+                &self.queue,
+                params.gamma_air,
+                params.gamma_reduction,
+                params.surfactant_diffusion,
+                marangoni_coeff,
+            );
         }
 
         // Handle egui platform output
@@ -1332,6 +1354,9 @@ impl RenderPipeline {
         gpu_drainage_steps: &mut u32,
         gpu_drainage_time: f64,
         reset_gpu_drainage: &mut bool,
+        // Marangoni parameters
+        marangoni_enabled: &mut bool,
+        marangoni_coeff: &mut f32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1533,6 +1558,16 @@ impl RenderPipeline {
 
                         ui.add(egui::Slider::new(gpu_drainage_steps, 1..=50)
                             .text("Steps/frame"));
+
+                        ui.separator();
+                        ui.checkbox(marangoni_enabled, "Marangoni effect");
+                        if *marangoni_enabled {
+                            ui.add(egui::Slider::new(marangoni_coeff, 0.001..=0.1)
+                                .text("Strength")
+                                .logarithmic(true)
+                                .fixed_decimals(3));
+                            ui.label("Surfactant-driven flow");
+                        }
 
                         ui.separator();
                         ui.label(format!("Sim time: {:.2} s", gpu_drainage_time));

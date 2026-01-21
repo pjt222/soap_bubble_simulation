@@ -13,6 +13,7 @@ This document captures important lessons learned during the development of the s
 7. [MSAA (Multi-Sample Anti-Aliasing) Implementation](#msaa-multi-sample-anti-aliasing-implementation)
 8. [LOD (Level of Detail) System](#lod-level-of-detail-system)
 9. [GPU Drainage Simulation](#gpu-drainage-simulation)
+10. [Marangoni Effect Implementation](#marangoni-effect-implementation)
 
 ---
 
@@ -769,3 +770,127 @@ steps_per_frame: u32,   // Multiple iterations per frame
 4. Grid resolution (e.g., 128×64) can be much higher than practical for CPU iteration
 5. Time scaling allows physics to run faster than real-time for visualization
 6. Boundary conditions (poles, periodic edges) need explicit handling in the shader
+
+---
+
+## Marangoni Effect Implementation
+
+### Problem
+
+Soap bubbles exhibit beautiful swirling patterns driven by surface tension gradients. The basic drainage model only accounts for gravitational drainage, missing the self-healing behavior where surfactant redistributes to stabilize thin regions.
+
+### Physics Background
+
+The Marangoni effect occurs when surface tension gradients drive fluid flow:
+
+1. **Surface tension depends on surfactant concentration:**
+   ```
+   γ(Γ) = γ_air - γ_r × Γ
+   ```
+   Where Γ is surfactant concentration (0-1), γ_air is clean interface tension (~0.072 N/m for water), γ_r is reduction rate (~0.045 N/m).
+
+2. **Marangoni stress from concentration gradient:**
+   ```
+   τ = -γ_r × ∇Γ
+   ```
+   This drives flow from regions of low surface tension (high surfactant) to high surface tension (low surfactant).
+
+3. **Coupled system:**
+   - Thickness evolves with drainage + Marangoni coupling
+   - Concentration evolves with diffusion + thickness coupling
+
+### Solution
+
+Extend the GPU drainage simulator to track surfactant concentration and compute Marangoni stress coupling.
+
+### Extended Uniform Structure
+
+```rust
+pub struct DrainageParams {
+    // ... existing fields ...
+    // Marangoni parameters
+    pub marangoni_enabled: u32,      // 0 or 1
+    pub gamma_air: f32,              // N/m (clean interface)
+    pub gamma_reduction: f32,        // N/m per concentration
+    pub surfactant_diffusion: f32,   // m²/s
+    pub marangoni_coeff: f32,        // Stress coefficient
+}
+```
+
+### Double-Buffered Concentration
+
+Just like thickness, concentration needs double-buffering for safe parallel updates:
+
+```rust
+pub struct GPUDrainageSimulator {
+    thickness_buffers: [wgpu::Buffer; 2],
+    concentration_buffers: [wgpu::Buffer; 2],  // NEW
+    // ...
+}
+```
+
+### Coupled Shader Logic
+
+```wgsl
+@compute @workgroup_size(16, 16)
+fn drainage_step(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // ... get neighbors for both thickness and concentration ...
+
+    // THICKNESS EVOLUTION
+    let drainage_term = -drainage_coeff * h_cubed * sin_theta;
+    let h_diffusion = params.diffusion_coeff * h_laplacian;
+
+    // Marangoni coupling to thickness
+    var marangoni_term = 0.0;
+    if (params.marangoni_enabled != 0u) {
+        let dc_dtheta = (c_theta_plus - c_theta_minus) / (2.0 * delta_theta);
+        let dc_dphi = (c_phi_plus - c_phi_minus) / (2.0 * delta_phi);
+        let grad_c_mag = sqrt(grad_c_theta^2 + grad_c_phi^2);
+        let marangoni_stress = params.gamma_reduction * grad_c_mag;
+        marangoni_term = params.marangoni_coeff * marangoni_stress * h * h;
+    }
+
+    thickness_out[idx] = h + dt * (drainage_term + h_diffusion + marangoni_term);
+
+    // CONCENTRATION EVOLUTION
+    let c_diffusion = params.surfactant_diffusion * c_laplacian;
+    var dc_dt = c_diffusion;
+
+    if (params.marangoni_enabled != 0u) {
+        // Coupling: surfactant follows thickness gradients
+        dc_dt += coupling_coeff * h_laplacian * conc;
+    }
+
+    concentration_out[idx] = clamp(conc + dt * dc_dt, 0.0, 1.0);
+}
+```
+
+### Bind Group Extension
+
+The bind group layout must include concentration buffers:
+
+```rust
+// Binding 0: thickness_in (read)
+// Binding 1: thickness_out (write)
+// Binding 2: params (uniform)
+// Binding 3: concentration_in (read)   // NEW
+// Binding 4: concentration_out (write) // NEW
+```
+
+### Physical Behavior
+
+The Marangoni effect produces:
+
+1. **Self-healing**: Thin regions (high concentration) push fluid toward thick regions (low concentration), stabilizing the film
+
+2. **Swirling patterns**: Concentration gradients drive surface flows that create organic, dynamic patterns
+
+3. **Counter-drainage**: Marangoni stress can partially counteract gravitational drainage, explaining why soap bubbles last longer than pure water films
+
+### Lesson Learned
+
+1. Coupled PDEs require careful buffer management - both fields need double-buffering
+2. WGSL uses function syntax (`sqrt(x)`) not method syntax (`x.sqrt()`)
+3. The Marangoni coefficient needs tuning for visual effect - too high causes instability
+4. Initialization matters: starting with uniform concentration allows gradients to develop naturally
+5. The coupling is bidirectional: thickness affects concentration and vice versa

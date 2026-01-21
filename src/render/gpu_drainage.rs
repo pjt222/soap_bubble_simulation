@@ -6,7 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-/// Uniform parameters for the drainage compute shader
+/// Uniform parameters for the drainage compute shader with Marangoni effect
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct DrainageParams {
@@ -18,7 +18,7 @@ pub struct DrainageParams {
     pub viscosity: f32,
     /// Fluid density (kg/m³)
     pub density: f32,
-    /// Diffusion coefficient (m²/s)
+    /// Thickness diffusion coefficient (m²/s)
     pub diffusion_coeff: f32,
     /// Bubble radius for surface Laplacian (m)
     pub bubble_radius: f32,
@@ -28,6 +28,16 @@ pub struct DrainageParams {
     pub grid_width: u32,
     /// Number of theta (polar) grid points
     pub grid_height: u32,
+    /// Whether Marangoni effect is enabled (0 or 1)
+    pub marangoni_enabled: u32,
+    /// Surface tension of clean interface (N/m), typically 0.072 for water
+    pub gamma_air: f32,
+    /// Surface tension reduction rate (N/m per concentration)
+    pub gamma_reduction: f32,
+    /// Surfactant diffusion coefficient (m²/s)
+    pub surfactant_diffusion: f32,
+    /// Marangoni stress coefficient M/η
+    pub marangoni_coeff: f32,
     /// Padding for 16-byte alignment
     pub _padding: [u32; 3],
 }
@@ -39,24 +49,37 @@ impl Default for DrainageParams {
             gravity: 9.81,                // Earth gravity
             viscosity: 0.001,             // Water-like (Pa·s)
             density: 1000.0,              // Water density (kg/m³)
-            diffusion_coeff: 1e-9,        // Surfactant diffusion
+            diffusion_coeff: 1e-9,        // Thickness diffusion
             bubble_radius: 0.025,         // 2.5cm radius
             critical_thickness: 30e-9,    // 30nm critical thickness
             grid_width: 128,
             grid_height: 64,
+            // Marangoni parameters
+            marangoni_enabled: 0,         // Disabled by default
+            gamma_air: 0.072,             // N/m (clean water-air interface)
+            gamma_reduction: 0.045,       // How much soap reduces tension
+            surfactant_diffusion: 1e-9,   // m²/s
+            marangoni_coeff: 0.01,        // Stress coefficient
             _padding: [0; 3],
         }
     }
 }
 
-/// GPU-based drainage simulator with double-buffered storage.
+/// GPU-based drainage simulator with Marangoni effect support.
 ///
-/// Runs the drainage PDE on the GPU using compute shaders.
-/// The thickness field is stored in two alternating buffers
-/// for safe parallel read/write operations.
+/// Runs the coupled drainage + surfactant PDEs on the GPU using compute shaders.
+/// Uses double-buffering for safe parallel updates of both thickness and concentration.
+///
+/// # Physics
+/// - Drainage: dh/dt = -ρgh³/(3η)sin(θ) + D_h∇²h + Marangoni coupling
+/// - Surfactant: DΓ/Dt = D_s∇²Γ + advection
+/// - Surface tension: γ(Γ) = γ_air - γ_r × Γ
+/// - Marangoni stress: τ = -γ_r × ∇Γ
 pub struct GPUDrainageSimulator {
     /// Double-buffered storage for thickness field
     thickness_buffers: [wgpu::Buffer; 2],
+    /// Double-buffered storage for surfactant concentration
+    concentration_buffers: [wgpu::Buffer; 2],
     /// Current buffer index (0 or 1)
     current_buffer: usize,
     /// Uniform buffer for drainage parameters
@@ -77,10 +100,12 @@ pub struct GPUDrainageSimulator {
     pub time_scale: f32,
     /// Number of compute steps per frame
     pub steps_per_frame: u32,
+    /// Whether Marangoni effect is enabled
+    pub marangoni_enabled: bool,
 }
 
 impl GPUDrainageSimulator {
-    /// Create a new GPU drainage simulator.
+    /// Create a new GPU drainage simulator with Marangoni effect support.
     ///
     /// # Arguments
     /// * `device` - wgpu device
@@ -96,18 +121,36 @@ impl GPUDrainageSimulator {
         let total_cells = (grid_width * grid_height) as usize;
 
         // Initialize thickness field with uniform values
-        let initial_data: Vec<f32> = vec![initial_thickness; total_cells];
+        let initial_thickness_data: Vec<f32> = vec![initial_thickness; total_cells];
 
-        // Create double-buffered storage
+        // Initialize surfactant concentration with uniform values (normalized 0-1)
+        let initial_concentration: f32 = 0.5;  // 50% coverage
+        let initial_conc_data: Vec<f32> = vec![initial_concentration; total_cells];
+
+        // Create double-buffered storage for thickness
         let thickness_buffers = [
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Thickness Buffer A"),
-                contents: bytemuck::cast_slice(&initial_data),
+                contents: bytemuck::cast_slice(&initial_thickness_data),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             }),
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Thickness Buffer B"),
-                contents: bytemuck::cast_slice(&initial_data),
+                contents: bytemuck::cast_slice(&initial_thickness_data),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            }),
+        ];
+
+        // Create double-buffered storage for surfactant concentration
+        let concentration_buffers = [
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Concentration Buffer A"),
+                contents: bytemuck::cast_slice(&initial_conc_data),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            }),
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Concentration Buffer B"),
+                contents: bytemuck::cast_slice(&initial_conc_data),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             }),
         ];
@@ -123,7 +166,7 @@ impl GPUDrainageSimulator {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create bind group layout
+        // Create bind group layout with thickness and concentration buffers
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Drainage Bind Group Layout"),
             entries: &[
@@ -160,6 +203,28 @@ impl GPUDrainageSimulator {
                     },
                     count: None,
                 },
+                // concentration_in (read-only storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // concentration_out (read-write storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -182,6 +247,14 @@ impl GPUDrainageSimulator {
                         binding: 2,
                         resource: params_buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: concentration_buffers[0].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: concentration_buffers[1].as_entire_binding(),
+                    },
                 ],
             }),
             // B -> A (read from B, write to A)
@@ -200,6 +273,14 @@ impl GPUDrainageSimulator {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: concentration_buffers[1].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: concentration_buffers[0].as_entire_binding(),
                     },
                 ],
             }),
@@ -229,6 +310,7 @@ impl GPUDrainageSimulator {
 
         Self {
             thickness_buffers,
+            concentration_buffers,
             current_buffer: 0,
             params_buffer,
             compute_pipeline,
@@ -239,6 +321,7 @@ impl GPUDrainageSimulator {
             enabled: false,
             time_scale: 100.0,  // Speed up for visible effect
             steps_per_frame: 10,
+            marangoni_enabled: false,
         }
     }
 
@@ -319,23 +402,57 @@ impl GPUDrainageSimulator {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
     }
 
-    /// Reset the simulation to uniform thickness.
+    /// Reset the simulation to uniform thickness and concentration.
     ///
     /// # Arguments
     /// * `queue` - wgpu queue for buffer updates
     /// * `initial_thickness` - Thickness in meters
     pub fn reset(&mut self, queue: &wgpu::Queue, initial_thickness: f32) {
         let total_cells = (self.params.grid_width * self.params.grid_height) as usize;
-        let data: Vec<f32> = vec![initial_thickness; total_cells];
 
-        // Reset both buffers
-        queue.write_buffer(&self.thickness_buffers[0], 0, bytemuck::cast_slice(&data));
-        queue.write_buffer(&self.thickness_buffers[1], 0, bytemuck::cast_slice(&data));
+        // Reset thickness buffers
+        let thickness_data: Vec<f32> = vec![initial_thickness; total_cells];
+        queue.write_buffer(&self.thickness_buffers[0], 0, bytemuck::cast_slice(&thickness_data));
+        queue.write_buffer(&self.thickness_buffers[1], 0, bytemuck::cast_slice(&thickness_data));
+
+        // Reset concentration buffers to uniform 50%
+        let conc_data: Vec<f32> = vec![0.5; total_cells];
+        queue.write_buffer(&self.concentration_buffers[0], 0, bytemuck::cast_slice(&conc_data));
+        queue.write_buffer(&self.concentration_buffers[1], 0, bytemuck::cast_slice(&conc_data));
 
         self.current_buffer = 0;
         self.current_time = 0.0;
 
         log::info!("GPU drainage simulation reset to {} nm", initial_thickness * 1e9);
+    }
+
+    /// Enable or disable Marangoni effect.
+    pub fn set_marangoni_enabled(&mut self, queue: &wgpu::Queue, enabled: bool) {
+        self.marangoni_enabled = enabled;
+        self.params.marangoni_enabled = if enabled { 1 } else { 0 };
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
+        log::info!("Marangoni effect {}", if enabled { "enabled" } else { "disabled" });
+    }
+
+    /// Set Marangoni physical parameters.
+    pub fn set_marangoni_params(
+        &mut self,
+        queue: &wgpu::Queue,
+        gamma_air: f32,
+        gamma_reduction: f32,
+        surfactant_diffusion: f32,
+        marangoni_coeff: f32,
+    ) {
+        self.params.gamma_air = gamma_air;
+        self.params.gamma_reduction = gamma_reduction;
+        self.params.surfactant_diffusion = surfactant_diffusion;
+        self.params.marangoni_coeff = marangoni_coeff;
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    /// Get the current concentration buffer for reading.
+    pub fn concentration_buffer(&self) -> &wgpu::Buffer {
+        &self.concentration_buffers[1 - self.current_buffer]
     }
 
     /// Get current simulation time in seconds.
