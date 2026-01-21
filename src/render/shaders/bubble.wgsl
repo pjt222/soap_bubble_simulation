@@ -198,11 +198,34 @@ fn snells_law(cos_theta_i: f32, n_film: f32) -> f32 {
     return sqrt(max(0.0, 1.0 - sin_theta_t * sin_theta_t));
 }
 
-// Fresnel reflectance (Schlick approximation)
-fn fresnel_schlick(cos_theta: f32, n_film: f32) -> f32 {
-    let n_air = 1.0;
-    let r0 = pow((n_film - n_air) / (n_film + n_air), 2.0);
-    return r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
+// Full Fresnel equations with s and p polarization
+// Returns vec2(R_s, R_p) - reflectances for s and p polarized light
+// More accurate than Schlick approximation, especially at grazing angles
+fn fresnel_full(cos_theta_i: f32, cos_theta_t: f32, n1: f32, n2: f32) -> vec2<f32> {
+    // s-polarization (perpendicular to plane of incidence)
+    // r_s = (n₁ cos θ_i - n₂ cos θ_t) / (n₁ cos θ_i + n₂ cos θ_t)
+    let n1_cos_i = n1 * cos_theta_i;
+    let n2_cos_t = n2 * cos_theta_t;
+    let r_s_num = n1_cos_i - n2_cos_t;
+    let r_s_den = n1_cos_i + n2_cos_t;
+    let r_s = r_s_num / max(r_s_den, 0.0001);
+
+    // p-polarization (parallel to plane of incidence)
+    // r_p = (n₂ cos θ_i - n₁ cos θ_t) / (n₂ cos θ_i + n₁ cos θ_t)
+    let n2_cos_i = n2 * cos_theta_i;
+    let n1_cos_t = n1 * cos_theta_t;
+    let r_p_num = n2_cos_i - n1_cos_t;
+    let r_p_den = n2_cos_i + n1_cos_t;
+    let r_p = r_p_num / max(r_p_den, 0.0001);
+
+    // Return reflectances (squared amplitude coefficients)
+    return vec2<f32>(r_s * r_s, r_p * r_p);
+}
+
+// Unpolarized Fresnel reflectance (average of s and p)
+fn fresnel_unpolarized(cos_theta_i: f32, cos_theta_t: f32, n1: f32, n2: f32) -> f32 {
+    let R = fresnel_full(cos_theta_i, cos_theta_t, n1, n2);
+    return (R.x + R.y) * 0.5;
 }
 
 // Calculate finesse coefficient F from reflectance
@@ -261,8 +284,8 @@ fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec
     // Transmission angle from Snell's law
     let cos_theta_t = snells_law(cos_theta, n_film);
 
-    // Fresnel reflection coefficient
-    let fresnel = fresnel_schlick(cos_theta, n_film);
+    // Full Fresnel reflection with polarization (air → film interface)
+    let fresnel = fresnel_unpolarized(cos_theta, cos_theta_t, 1.0, n_film);
 
     // Optical path (same for all wavelengths, phase varies)
     let optical_path = 2.0 * n_film * thickness_nm * cos_theta_t;
