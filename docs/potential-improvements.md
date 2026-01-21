@@ -433,7 +433,7 @@ r_p = (n₂cosθ_i - n₁cosθ_t) / (n₂cosθ_i + n₁cosθ_t)
 4. ✅ External forces - Wind, buoyancy, drag, soft boundaries implemented
 
 ### Phase 2: Visual Enhancement (1 week)
-5. ⬜ Procedural noise texture
+5. ✅ Procedural noise texture - 3D simplex noise with FBM in shader
 6. ✅ Multi-bounce interference (Airy formula) - Ported to shader
 7. ⬜ Finesse-based sharpness
 
@@ -551,6 +551,34 @@ wgpu::BindGroupLayoutEntry {
 - Soft boundaries: gradually return bubble toward center if too far
 
 **Key insight:** For realistic bubble motion, drag coefficient ~0.5 provides good damping without making motion feel sluggish.
+
+### Procedural Simplex Noise (2026-01-21)
+
+**Goal:** Replace synthetic sine-wave thickness patterns with organic, natural-looking noise.
+
+**Implementation:**
+1. Ported Stefan Gustavson's 3D simplex noise algorithm to WGSL
+2. Added FBM (Fractal Brownian Motion) for multi-octave layering
+3. Two noise layers in thickness calculation:
+   - **Primary:** Slow-flowing FBM (4 octaves) for large-scale organic variation
+   - **Secondary:** Faster simplex swirl for fine detail
+
+**Key WGSL considerations:**
+- Use modulo 289.0 for permutation to avoid integer overflow issues
+- `taylor_inv_sqrt` approximation is faster than `inverseSqrt` for vec4
+- Gradient normalization is essential for consistent amplitude
+
+**Noise parameters tuned for soap films:**
+```wgsl
+// Slow animation for flowing effect
+let noise_time = t * 0.08;
+// Scale factor 3.0 gives good feature size on bubble surface
+let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, ...);
+// 12% amplitude for subtle but visible variation
+let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
+```
+
+**Key insight:** Animating noise coordinates slowly (0.08× time) creates a gentle flowing effect that mimics real soap film dynamics without the computational cost of fluid simulation.
 
 ---
 
