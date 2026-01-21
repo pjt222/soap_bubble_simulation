@@ -435,12 +435,12 @@ r_p = (n₂cosθ_i - n₁cosθ_t) / (n₂cosθ_i + n₁cosθ_t)
 ### Phase 2: Visual Enhancement (1 week)
 5. ✅ Procedural noise texture - 3D simplex noise with FBM in shader
 6. ✅ Multi-bounce interference (Airy formula) - Ported to shader
-7. ⬜ Finesse-based sharpness
+7. ✅ Finesse-based sharpness - F = 4R/(1-R)² coefficient in Airy formula
 
 ### Phase 3: Physics Accuracy (2-3 weeks)
 8. ⬜ Marginal regeneration model
 9. ⬜ Bubble deformation
-10. ⬜ Full Fresnel polarization
+10. ✅ Full Fresnel polarization - Separate s/p components, averaged for unpolarized
 
 ### Phase 4: Major Features (1+ months each)
 11. ⬜ Marangoni effect
@@ -579,6 +579,50 @@ let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
 ```
 
 **Key insight:** Animating noise coordinates slowly (0.08× time) creates a gentle flowing effect that mimics real soap film dynamics without the computational cost of fluid simulation.
+
+### Finesse-Based Fringe Sharpness (2026-01-21)
+
+**Goal:** Make interference fringe sharpness depend on reflectance via the finesse parameter.
+
+**Implementation:**
+```wgsl
+fn finesse_coefficient(reflectance: f32) -> f32 {
+    let one_minus_r = max(1.0 - reflectance, 0.001);
+    return 4.0 * reflectance / (one_minus_r * one_minus_r);
+}
+```
+
+**Key insight:** The finesse coefficient F = 4R/(1-R)² determines how many effective bounces contribute to interference. Higher reflectance (grazing angles) → sharper fringes. Lower reflectance (normal incidence) → softer color blending. This is the standard Airy formulation that makes the physics explicit.
+
+### Full Fresnel Equations with Polarization (2026-01-21)
+
+**Goal:** Replace Schlick approximation with physically accurate Fresnel equations.
+
+**Implementation:**
+```wgsl
+// s-polarization (perpendicular to plane of incidence)
+r_s = (n₁ cos θ_i - n₂ cos θ_t) / (n₁ cos θ_i + n₂ cos θ_t)
+
+// p-polarization (parallel to plane of incidence)
+r_p = (n₂ cos θ_i - n₁ cos θ_t) / (n₂ cos θ_i + n₁ cos θ_t)
+
+// Reflectances
+R_s = r_s², R_p = r_p²
+
+// Unpolarized light (natural light average)
+R = (R_s + R_p) / 2
+```
+
+**Key differences from Schlick:**
+- Schlick: R ≈ R₀ + (1-R₀)(1-cosθ)⁵ — single approximation
+- Full Fresnel: Separate s/p components, exact at all angles
+
+**When it matters most:**
+- At Brewster's angle (~53° for n=1.33): R_p → 0 while R_s remains significant
+- Grazing angles: Both polarizations approach 1.0 but at different rates
+- The polarization difference creates subtle color variations visible at bubble edges
+
+**Key insight:** For unpolarized natural light, averaging s and p gives correct results. The full equations are only ~20 lines more than Schlick but capture physics that the approximation misses entirely (like the Brewster angle dip in p-polarization).
 
 ---
 
