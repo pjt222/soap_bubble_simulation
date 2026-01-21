@@ -60,7 +60,107 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Calculate film thickness with enhanced dynamics
+// ============================================================================
+// Simplex Noise Implementation (3D)
+// Based on Stefan Gustavson's implementation, adapted for WGSL
+// ============================================================================
+
+// Permutation polynomial hash
+fn permute(x: vec4<f32>) -> vec4<f32> {
+    return ((x * 34.0 + 1.0) * x) % 289.0;
+}
+
+fn taylor_inv_sqrt(r: vec4<f32>) -> vec4<f32> {
+    return 1.79284291400159 - 0.85373472095314 * r;
+}
+
+// 3D Simplex noise
+fn simplex_noise_3d(v: vec3<f32>) -> f32 {
+    let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
+    let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);
+
+    // First corner
+    var i = floor(v + dot(v, vec3<f32>(C.y)));
+    let x0 = v - i + dot(i, vec3<f32>(C.x));
+
+    // Other corners
+    let g = step(x0.yzx, x0.xyz);
+    let l = 1.0 - g;
+    let i1 = min(g.xyz, l.zxy);
+    let i2 = max(g.xyz, l.zxy);
+
+    let x1 = x0 - i1 + C.x;
+    let x2 = x0 - i2 + C.y;
+    let x3 = x0 - D.yyy;
+
+    // Permutations
+    i = i % 289.0;
+    let p = permute(permute(permute(
+        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
+      + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
+      + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
+
+    // Gradients: 7x7 points over a square, mapped onto an octahedron
+    let n_ = 0.142857142857; // 1.0/7.0
+    let ns = n_ * D.wyz - D.xzx;
+
+    let j = p - 49.0 * floor(p * ns.z * ns.z);
+
+    let x_ = floor(j * ns.z);
+    let y_ = floor(j - 7.0 * x_);
+
+    let x = x_ * ns.x + ns.yyyy;
+    let y = y_ * ns.x + ns.yyyy;
+    let h = 1.0 - abs(x) - abs(y);
+
+    let b0 = vec4<f32>(x.xy, y.xy);
+    let b1 = vec4<f32>(x.zw, y.zw);
+
+    let s0 = floor(b0) * 2.0 + 1.0;
+    let s1 = floor(b1) * 2.0 + 1.0;
+    let sh = -step(h, vec4<f32>(0.0));
+
+    let a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    let a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    var p0 = vec3<f32>(a0.xy, h.x);
+    var p1 = vec3<f32>(a0.zw, h.y);
+    var p2 = vec3<f32>(a1.xy, h.z);
+    var p3 = vec3<f32>(a1.zw, h.w);
+
+    // Normalise gradients
+    let norm = taylor_inv_sqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    // Mix final noise value
+    var m = max(0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
+    m = m * m;
+    return 42.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+
+// Fractal Brownian Motion - layered noise for natural patterns
+fn fbm_noise(p: vec3<f32>, octaves: i32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    var pos = p;
+
+    for (var i = 0; i < octaves; i = i + 1) {
+        value += amplitude * simplex_noise_3d(pos * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+
+// ============================================================================
+// Film Thickness Calculation
+// ============================================================================
+
+// Calculate film thickness with organic noise patterns
 // Uses normal vector directly to avoid UV seam artifacts
 fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let base = bubble.base_thickness_nm;
@@ -72,23 +172,22 @@ fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let drain_progress = min(t * bubble.drainage_speed * 0.1, 1.0);
     let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
 
-    // Swirling pattern - rotates around Y axis
+    // Organic noise pattern using simplex FBM
+    // Slowly animate the noise field for flowing effect
+    let noise_time = t * 0.08;
+    let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
+    let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
+
+    // Secondary swirling pattern - faster, smaller scale
     let swirl_angle = t * 0.5;
     let sx = normal.x * cos(swirl_angle) - normal.z * sin(swirl_angle);
     let sz = normal.x * sin(swirl_angle) + normal.z * cos(swirl_angle);
-    let n = normal * scale;
+    let swirl_noise = simplex_noise_3d(vec3<f32>(sx, normal.y, sz) * 5.0 + vec3<f32>(t * 0.2)) * swirl * 0.05;
 
-    // Multi-frequency noise for organic look
-    let noise = swirl * 0.1 * (
-        sin(4.0 * sx + t * 0.3) * sin(4.0 * n.y + t * 0.2) +
-        0.6 * sin(6.0 * n.y + t * 0.4) * sin(6.0 * sz + t * 0.25) +
-        0.3 * sin(8.0 * sz + t * 0.35) * sin(8.0 * sx + t * 0.15)
-    ) / 1.9;
+    // Gravity ripples - waves propagating downward (reduced, organic noise dominates)
+    let wave = 0.02 * swirl * sin(normal.y * scale * 8.0 - t * 2.0) * (1.0 - abs(normal.y));
 
-    // Gravity ripples - waves propagating downward
-    let wave = 0.03 * swirl * sin(n.y * 10.0 - t * 2.0) * (1.0 - abs(n.y));
-
-    return base * (1.0 - drainage - noise - wave);
+    return base * (1.0 - drainage + organic_noise + swirl_noise - wave);
 }
 
 // Snell's law: calculate transmission angle cosine
