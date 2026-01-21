@@ -205,14 +205,28 @@ fn fresnel_schlick(cos_theta: f32, n_film: f32) -> f32 {
     return r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
 }
 
-// Airy formula for multi-bounce interference (more accurate than simple cos)
-// Returns intensity accounting for multiple internal reflections
+// Calculate finesse coefficient F from reflectance
+// Higher F = sharper interference fringes (thicker films, grazing angles)
+// Lower F = broader, softer fringes (thinner films, normal incidence)
+fn finesse_coefficient(reflectance: f32) -> f32 {
+    // F = 4R / (1-R)² - coefficient of finesse
+    let one_minus_r = max(1.0 - reflectance, 0.001);
+    return 4.0 * reflectance / (one_minus_r * one_minus_r);
+}
+
+// Airy formula for multi-bounce interference with finesse-based sharpness
+// Returns reflected intensity accounting for multiple internal reflections
+// Thicker films and higher reflectance produce sharper color bands
 fn airy_interference(phase: f32, reflectance: f32) -> f32 {
-    let r2 = reflectance * reflectance;
-    let cos_delta = cos(phase);
-    // Airy formula: I = 2R(1 - cos δ) / (1 + R² - 2R cos δ)
-    let numerator = 2.0 * reflectance * (1.0 - cos_delta);
-    let denominator = 1.0 + r2 - 2.0 * reflectance * cos_delta;
+    // Finesse coefficient determines fringe sharpness
+    let F = finesse_coefficient(reflectance);
+
+    // Airy formula: I_reflected = F * sin²(δ/2) / (1 + F * sin²(δ/2))
+    let sin_half_phase = sin(phase * 0.5);
+    let sin2 = sin_half_phase * sin_half_phase;
+    let numerator = F * sin2;
+    let denominator = 1.0 + F * sin2;
+
     return numerator / max(denominator, 0.001);
 }
 
