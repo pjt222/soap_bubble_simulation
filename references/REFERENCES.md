@@ -2,7 +2,7 @@
 
 Status tracking for academic references used in the soap bubble simulation project.
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-21
 
 ## Status Legend
 
@@ -29,7 +29,8 @@ Status tracking for academic references used in the soap bubble simulation proje
 | Reference | Type | Collected | Summarized | In App | Source |
 |-----------|------|:---------:|:----------:|:------:|--------|
 | Huang et al. (2020) "Chemomechanical simulation of soap film flow on spherical bubbles" *ACM TOG* | Paper | ✓ | ✓ | ✗ | [DOI](https://doi.org/10.1145/3386569.3392094) |
-| Durikovič (2001) "Animation of Soap Bubble Dynamics, Cluster Formation and Collision" | Paper | ✗ | ✗ | ✗ | — |
+| Monier et al. (2025) "Soap Film Drainage Under Tunable Gravity" *arXiv* | Paper | — | ✓ | ✗ | [arXiv](https://arxiv.org/abs/2511.08194) |
+| Durikovič (2001) "Animation of Soap Bubble Dynamics, Cluster Formation and Collision" | Paper | — | ✓ | ✗ | [Eurographics](https://diglib.eg.org/handle/10.2312/8850) |
 
 ### Surface Optimization & Network Physics
 
@@ -41,8 +42,8 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 | Reference | Type | Collected | Summarized | In App | Source |
 |-----------|------|:---------:|:----------:|:------:|--------|
-| Patsyk et al. (2020) "Observation of branched flow of light" *Nature* | Paper | ✗ | ✗ | ✗ | [DOI](https://doi.org/10.1038/s41586-020-2376-8) |
-| Jura et al. (2007) "Unexpected features of branched flow..." *Nature Physics* | Paper | ✗ | ✗ | ✗ | [DOI](https://doi.org/10.1038/nphys756) |
+| Patsyk et al. (2020) "Observation of branched flow of light" *Nature* | Paper | — | ✓ | ✗ | [DOI](https://doi.org/10.1038/s41586-020-2376-8) |
+| Jura et al. (2007) "Unexpected features of branched flow..." *Nature Physics* | Paper | — | ✓ | ✗ | [DOI](https://doi.org/10.1038/nphys756) |
 
 ---
 
@@ -50,9 +51,9 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 | Reference | Type | Collected | Summarized | In App | Source |
 |-----------|------|:---------:|:----------:|:------:|--------|
-| Söderlund et al. (2022) "Ray Tracing of Signed Distance Function Grids" *JCGT* | Paper | ✗ | ✗ | ✗ | [JCGT](https://jcgt.org/published/0011/03/06/) |
-| Losasso & Hoppe (2004) "Geometry Clipmaps: Terrain Rendering Using Nested Regular Grids" | Paper | ✗ | ✗ | ✗ | [PDF](https://hhoppe.com/geomclipmap.pdf) |
-| Green (2007) "Improved Alpha-Tested Magnification for Vector Textures" *SIGGRAPH* | Paper | ✗ | ✗ | ✗ | [PDF](https://steamcdn-a.akamaihd.net/apps/valve/2007/SIGGRAPH2007_AlphaTestedMagnification.pdf) |
+| Söderlund et al. (2022) "Ray Tracing of Signed Distance Function Grids" *JCGT* | Paper | — | ✓ | ✗ | [JCGT](https://jcgt.org/published/0011/03/06/) |
+| Losasso & Hoppe (2004) "Geometry Clipmaps: Terrain Rendering Using Nested Regular Grids" | Paper | — | ✓ | ✗ | [PDF](https://hhoppe.com/geomclipmap.pdf) |
+| Green (2007) "Improved Alpha-Tested Magnification for Vector Textures" *SIGGRAPH* | Paper | — | ✓ | ✗ | [PDF](https://steamcdn-a.akamaihd.net/apps/valve/2007/SIGGRAPH2007_AlphaTestedMagnification.pdf) |
 
 ---
 
@@ -60,10 +61,10 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 | Reference | Type | Collected | Summarized | In App | Source |
 |-----------|------|:---------:|:----------:|:------:|--------|
-| Witten (1986) "Non-commutative geometry and string field theory" *Nucl. Phys. B* | Paper | ✗ | ✗ | ✗ | — |
-| Carlip (1988) "Quadratic differentials and closed string vertices" *Phys. Lett. B* | Paper | ✗ | ✗ | ✗ | — |
-| Saadi & Zwiebach (1989) "Closed string field theory from polyhedra" *Ann. Phys.* | Paper | ✗ | ✗ | ✗ | — |
-| Tong "Lectures on String Theory" | Online | — | ✗ | ✗ | [URL](http://www.damtp.cam.ac.uk/user/tong/string.html) |
+| Witten (1986) "Non-commutative geometry and string field theory" *Nucl. Phys. B* | Paper | — | ✓ | ✗ | [DOI](https://doi.org/10.1016/0550-3213(86)90155-0) |
+| Carlip (1988) "Quadratic differentials and closed string vertices" *Phys. Lett. B* | Paper | — | ✓ | ✗ | [DOI](https://doi.org/10.1016/0370-2693(88)90106-2) |
+| Saadi & Zwiebach (1989) "Closed string field theory from polyhedra" *Ann. Phys.* | Paper | — | ✓ | ✗ | [DOI](https://doi.org/10.1016/0003-4916(89)90126-7) |
+| Tong "Lectures on String Theory" | Online | — | ✓ | ✗ | [arXiv](https://arxiv.org/abs/0908.0333) |
 
 ---
 
@@ -71,10 +72,10 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 | Reference | Type | Collected | Summarized | In App | Notes |
 |-----------|------|:---------:|:----------:|:------:|-------|
-| Born & Wolf (1999) *Principles of Optics* 7th ed. | Book | ✗ | ✗ | ◐ | Ch. 7, 13 relevant |
-| Macleod (2010) *Thin-Film Optical Filters* 4th ed. | Book | ✗ | ✗ | ✗ | — |
-| Isenberg (1992) *The Science of Soap Films and Soap Bubbles* | Book | ✗ | ✗ | ✗ | Dover, classic reference |
-| de Gennes et al. (2004) *Capillarity and Wetting Phenomena* | Book | ✗ | ✗ | ✗ | Thin films chapter |
+| Born & Wolf (1999) *Principles of Optics* 7th ed. | Book | — | ✓ | ◐ | [Cambridge](https://www.cambridge.org/core/books/principles-of-optics/D12868B8AE26B83D6D3C2193E94FFC32) |
+| Macleod (2010) *Thin-Film Optical Filters* 4th ed. | Book | — | ✓ | ✗ | [CRC Press](https://www.taylorfrancis.com/books/mono/10.1201/9781420073034/) |
+| Isenberg (1992) *The Science of Soap Films and Soap Bubbles* | Book | — | ✓ | ✗ | [Dover](https://www.amazon.com/Science-Soap-Films-Bubbles/dp/0486269604) |
+| de Gennes et al. (2004) *Capillarity and Wetting Phenomena* | Book | — | ✓ | ✗ | [Springer](https://link.springer.com/book/10.1007/978-0-387-21656-0) |
 
 ---
 
@@ -107,10 +108,10 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 | Category | Total | Collected | Summarized | In App |
 |----------|:-----:|:---------:|:----------:|:------:|
-| Core Papers | 7 | 5 | 5 | 2 |
-| SDF/Rendering Papers | 3 | 0 | 0 | 0 |
-| String Theory Papers | 4 | 0 | 0 | 0 |
-| Books | 4 | 0 | 0 | 0 |
+| Core Papers | 8 | 5 | 8 | 2 |
+| SDF/Rendering Papers | 3 | 0 | 3 | 0 |
+| String Theory Papers | 4 | 0 | 4 | 0 |
+| Books | 4 | 0 | 4 | 0 |
 | Videos | 3 | 0 | — | — |
 
 ---
@@ -119,11 +120,26 @@ Status tracking for academic references used in the soap bubble simulation proje
 
 Papers to collect next (by relevance):
 
-1. **Patsyk et al. (2020)** - Branched flow of light ⭐ High priority
-2. **Söderlund et al. (2022)** - SDF ray tracing
-3. **Losasso & Hoppe (2004)** - Geometry clipmaps
-4. **Green (2007)** - SDF magnification
-5. **Durikovič (2001)** - Bubble animation
+1. ~~**Patsyk et al. (2020)**~~ - ✓ Summarized (web-based)
+2. ~~**Söderlund et al. (2022)**~~ - ✓ Summarized (web-based)
+3. ~~**Losasso & Hoppe (2004)**~~ - ✓ Summarized (web-based)
+4. ~~**Green (2007)**~~ - ✓ Summarized (web-based)
+5. ~~**Durikovič (2001)**~~ - ✓ Summarized (web-based)
+6. ~~**Monier et al. (2025)**~~ - ✓ Summarized (NEW - discovered on arXiv)
+
+**All priority items completed!**
+
+Summaries created for all tracked references:
+- ✓ Core papers (8/8)
+- ✓ SDF/Rendering (3/3)
+- ✓ String theory (4/4)
+- ✓ Books (4/4)
+- ✓ Branched flow (2/2)
+
+**Optional future additions:**
+- Video resources (watch and summarize)
+- Additional papers from citations
+- Implementation notes as concepts are coded
 
 ---
 
@@ -142,6 +158,21 @@ references/
 ├── Huang_2020_Chemomechanical_soap_film_summary.md
 ├── Meng_2026_Surface_optimization.pdf
 ├── Meng_2026_Surface_optimization_summary.md
+├── Soderlund_2022_SDF_Ray_Tracing_summary.md   # Web-based summary
+├── Monier_2025_Soap_Film_Drainage_summary.md   # Web-based summary
+├── Green_2007_SDF_Magnification_summary.md     # Web-based summary
+├── Losasso_2004_Geometry_Clipmaps_summary.md   # Web-based summary
+├── Patsyk_2020_Branched_Flow_Light_summary.md  # Web-based summary
+├── Durikovic_2001_Soap_Bubble_Animation_summary.md  # Web-based summary
+├── Jura_2007_Branched_Flow_Electrons_summary.md     # Web-based summary
+├── Tong_String_Theory_Lectures_summary.md           # Web-based summary
+├── Isenberg_1992_Soap_Films_Book_summary.md         # Web-based summary
+├── Witten_1986_String_Field_Theory_summary.md       # Web-based summary
+├── Carlip_1988_String_Vertices_summary.md           # Web-based summary
+├── Saadi_Zwiebach_1989_Closed_String_Field_Theory_summary.md  # Web-based summary
+├── Born_Wolf_1999_Principles_of_Optics_summary.md   # Web-based summary
+├── Macleod_2010_Thin_Film_Optical_Filters_summary.md  # Web-based summary
+├── deGennes_2004_Capillarity_Wetting_summary.md     # Web-based summary
 ├── chunks_*/                                  # PDF chunks for extraction
 ├── summaries_*/                               # Individual chunk summaries
 ├── split_pdf.sh                               # PDF splitting script

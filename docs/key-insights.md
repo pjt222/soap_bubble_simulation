@@ -14,6 +14,7 @@ This document captures important lessons learned during the development of the s
 8. [LOD (Level of Detail) System](#lod-level-of-detail-system)
 9. [GPU Drainage Simulation](#gpu-drainage-simulation)
 10. [Marangoni Effect Implementation](#marangoni-effect-implementation)
+11. [Edge Smoothing Modes](#edge-smoothing-modes)
 
 ---
 
@@ -113,6 +114,20 @@ struct BubbleUniform {
 1. Use `#[repr(C, align(16))]` in Rust and add explicit padding
 2. Use `vec4<f32>` instead of `vec3<f32>` (both have 16-byte alignment)
 3. Use the `bytemuck` crate with careful size assertions
+
+### Note: Applies to All vec3 Types
+
+The 16-byte alignment rule applies to `vec3<u32>` as well, not just `vec3<f32>`. When using `vec3<u32>` for padding in uniform buffers, the same size mismatch occurs. Always use separate scalar fields:
+
+```wgsl
+// BAD - vec3<u32> has 16-byte alignment, causing hidden padding
+_padding: vec3<u32>,
+
+// GOOD - three separate u32 fields, predictable 12-byte size
+_padding1: u32,
+_padding2: u32,
+_padding3: u32,
+```
 
 ### Lesson Learned
 
@@ -894,3 +909,60 @@ The Marangoni effect produces:
 3. The Marangoni coefficient needs tuning for visual effect - too high causes instability
 4. Initialization matters: starting with uniform concentration allows gradients to develop naturally
 5. The coupling is bidirectional: thickness affects concentration and vice versa
+
+---
+
+## Edge Smoothing Modes
+
+### Problem
+
+The bubble's edge transparency follows a simple linear falloff (`1 - cos(θ)`), which produces sharp edges that can look unnatural or harsh.
+
+### Solution
+
+Implement selectable edge smoothing curves that provide different visual aesthetics:
+
+```wgsl
+// In bubble.wgsl fragment shader
+let edge_factor = 1.0 - cos_theta;
+var smooth_edge: f32;
+if (bubble.edge_smoothing_mode == 1u) {
+    // Smoothstep: S-curve easing for gradual transition
+    smooth_edge = edge_factor * edge_factor * (3.0 - 2.0 * edge_factor);
+} else if (bubble.edge_smoothing_mode == 2u) {
+    // Power falloff: softer edges with pow(x, 1.5)
+    smooth_edge = pow(edge_factor, 1.5);
+} else {
+    // Linear (original behavior)
+    smooth_edge = edge_factor;
+}
+let alpha = bubble.base_alpha + bubble.edge_alpha * smooth_edge;
+```
+
+### Smoothing Modes
+
+| Mode | Formula | Visual Effect |
+|------|---------|---------------|
+| Linear (0) | `x` | Sharp edges, original behavior |
+| Smoothstep (1) | `x²(3-2x)` | S-curve, gradual transition |
+| Power (2) | `x^1.5` | Softer edges, subtle falloff |
+
+### Uniform Buffer Extension
+
+Added `edge_smoothing_mode: u32` to `BubbleUniform` with proper padding:
+
+```wgsl
+struct BubbleUniform {
+    // ... existing fields ...
+    edge_smoothing_mode: u32,
+    _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
+};
+```
+
+### Lesson Learned
+
+1. Small visual tweaks (edge smoothing) can significantly improve perceived quality
+2. Providing multiple options lets users choose their preferred aesthetic
+3. The smoothstep function (`3x² - 2x³`) is a standard shader technique for natural-looking transitions

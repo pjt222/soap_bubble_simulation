@@ -29,6 +29,13 @@ struct BubbleUniform {
     position_x: f32,
     position_y: f32,
     position_z: f32,
+
+    // Edge smoothing mode (0 = linear, 1 = smoothstep, 2 = power)
+    edge_smoothing_mode: u32,
+    // Padding for 16-byte alignment
+    _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -335,7 +342,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let thickness = get_film_thickness(normal, bubble.time);
 
     // Alpha: more transparent when looking straight on, more visible at edges
-    let alpha = bubble.base_alpha + bubble.edge_alpha * (1.0 - cos_theta);
+    // Apply edge smoothing based on mode
+    let edge_factor = 1.0 - cos_theta;
+    var smooth_edge: f32;
+    if (bubble.edge_smoothing_mode == 1u) {
+        // Smoothstep: S-curve easing for gradual transition
+        smooth_edge = edge_factor * edge_factor * (3.0 - 2.0 * edge_factor);
+    } else if (bubble.edge_smoothing_mode == 2u) {
+        // Power falloff: softer edges with pow(x, 1.5)
+        smooth_edge = pow(edge_factor, 1.5);
+    } else {
+        // Linear (original behavior)
+        smooth_edge = edge_factor;
+    }
+    let alpha = bubble.base_alpha + bubble.edge_alpha * smooth_edge;
 
     // Black film detection: Newton's black appears when film thins below ~30nm
     // At this thickness, destructive interference eliminates most reflection
