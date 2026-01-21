@@ -39,7 +39,8 @@ pub struct DrainageParams {
     /// Marangoni stress coefficient M/η
     pub marangoni_coeff: f32,
     /// Padding for 16-byte alignment
-    pub _padding: [u32; 3],
+    pub _padding1: u32,
+    pub _padding2: u32,
 }
 
 impl Default for DrainageParams {
@@ -60,7 +61,8 @@ impl Default for DrainageParams {
             gamma_reduction: 0.045,       // How much soap reduces tension
             surfactant_diffusion: 1e-9,   // m²/s
             marangoni_coeff: 0.01,        // Stress coefficient
-            _padding: [0; 3],
+            _padding1: 0,
+            _padding2: 0,
         }
     }
 }

@@ -25,7 +25,8 @@ struct DrainageParams {
     gamma_reduction: f32,       // Surface tension reduction rate
     surfactant_diffusion: f32,  // Surfactant diffusion coefficient (m²/s)
     marangoni_coeff: f32,       // Marangoni stress coefficient
-    _padding: vec3<u32>,        // Padding for 16-byte alignment
+    _padding1: u32,             // Padding for 16-byte alignment
+    _padding2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> thickness_in: array<f32>;
