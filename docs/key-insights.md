@@ -10,6 +10,7 @@ This document captures important lessons learned during the development of the s
 4. [WSL2 Display Configuration](#wsl2-display-configuration)
 5. [Thin-Film Interference Implementation](#thin-film-interference-implementation)
 6. [Animation: Camera Rotation vs Geometry Rotation](#animation-camera-rotation-vs-geometry-rotation)
+7. [MSAA (Multi-Sample Anti-Aliasing) Implementation](#msaa-multi-sample-anti-aliasing-implementation)
 
 ---
 
@@ -370,3 +371,117 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 ### Lesson Learned
 
 For smooth rotation animation of static geometry, prefer moving the camera/viewpoint rather than transforming geometry. The view matrix is computed once per frame on the CPU, while vertex transformations run for every vertex on the GPU. Additionally, the existing orbit camera infrastructure can often be reused for auto-rotation.
+
+---
+
+## MSAA (Multi-Sample Anti-Aliasing) Implementation
+
+### Problem
+
+The bubble's silhouette edge (where rendered geometry meets background) appeared **jagged/aliased** with hard pixel boundaries.
+
+### Root Cause
+
+MSAA was disabled in the render pipeline:
+
+```rust
+multisample: wgpu::MultisampleState {
+    count: 1,  // Single sample = hard pixel edges
+    mask: !0,
+    alpha_to_coverage_enabled: false,
+},
+```
+
+With `count: 1`, each pixel's coverage is determined by a single sample point at the pixel center.
+
+### Solution
+
+Enable 4x MSAA with proper texture setup:
+
+1. **Create MSAA render target** - A texture with `sample_count: 4` matching the surface format
+2. **Create matching depth texture** - Depth buffer must have the same sample count
+3. **Update render pipeline** - Set `MultisampleState.count` to 4
+4. **Configure render pass** - Render to MSAA texture, resolve to swap chain
+
+### Key Implementation Details
+
+```rust
+// MSAA texture creation
+fn create_msaa_texture(device: &Device, config: &SurfaceConfiguration, sample_count: u32) -> TextureView {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("MSAA Texture"),
+        size: Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+        sample_count,  // Must match pipeline
+        format: config.format,
+        usage: TextureUsages::RENDER_ATTACHMENT,
+        // ...
+    });
+    texture.create_view(&TextureViewDescriptor::default())
+}
+
+// Render pass with MSAA resolve
+color_attachments: &[Some(RenderPassColorAttachment {
+    view: &msaa_texture,       // Render to MSAA texture
+    resolve_target: Some(&swap_chain_view),  // Resolve to swap chain
+    ops: Operations { load: LoadOp::Clear(...), store: StoreOp::Store },
+})],
+```
+
+### Critical Constraints: Sample Count Support
+
+**Not all sample counts are supported on all hardware!**
+
+The WebGPU spec only guarantees support for sample counts **1 and 4** for `Depth32Float` format.
+
+```
+Sample count 2 is not supported by format Depth32Float on this device.
+Sample count 8 is not supported by format Depth32Float on this device.
+The WebGPU spec guarantees [1, 4] samples are supported by this format.
+```
+
+**Lesson:** Only offer 1x (off) and 4x MSAA options in the UI. Do not assume 2x or 8x will work.
+
+### Separate Render Passes for MSAA + egui
+
+When using MSAA for 3D content but rendering egui (2D UI) without MSAA:
+
+1. **Bubble pass**: Render to MSAA texture → resolve to swap chain
+2. **egui pass**: Render directly to swap chain (no depth attachment needed)
+
+```rust
+// egui renderer - no depth, no MSAA
+let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
+
+// egui render pass - loads from resolved swap chain
+color_attachments: &[Some(RenderPassColorAttachment {
+    view: &swap_chain_view,  // Resolved from MSAA
+    resolve_target: None,     // No MSAA for 2D UI
+    ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
+})],
+depth_stencil_attachment: None,  // No depth for 2D overlay
+```
+
+### Dynamic MSAA Switching
+
+To allow runtime MSAA toggling:
+
+1. Store `bind_group_layout` for pipeline recreation
+2. Recreate render pipeline with new `MultisampleState.count`
+3. Recreate depth and MSAA textures with new sample count
+4. Handle the "no MSAA" case (sample_count=1): render directly to swap chain without resolve
+
+```rust
+let (color_view, resolve_target) = if msaa_samples > 1 {
+    (&self.msaa_texture, Some(&swap_chain_view))
+} else {
+    (&swap_chain_view, None)  // No MSAA: render directly
+};
+```
+
+### Lesson Learned
+
+1. MSAA smooths geometric edges (silhouettes) but not texture/shader aliasing
+2. Only 1x and 4x sample counts are universally supported
+3. All multisampled textures (color + depth) must have matching sample counts
+4. egui and other 2D overlays should render in a separate pass after MSAA resolve
+5. Pipeline recreation is required to change MSAA at runtime

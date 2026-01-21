@@ -35,6 +35,13 @@ pub struct BubbleUniform {
     pub position_x: f32,
     pub position_y: f32,
     pub position_z: f32,
+
+    // Edge smoothing mode (0 = linear, 1 = smoothstep, 2 = power)
+    pub edge_smoothing_mode: u32,
+    // Padding for 16-byte alignment
+    pub _padding1: u32,
+    pub _padding2: u32,
+    pub _padding3: u32,
 }
 
 impl Default for BubbleUniform {
@@ -58,6 +65,11 @@ impl Default for BubbleUniform {
             position_x: 0.0,
             position_y: 0.0,
             position_z: 0.0,
+            // Edge smoothing (default to smoothstep for smooth edges)
+            edge_smoothing_mode: 1,
+            _padding1: 0,
+            _padding2: 0,
+            _padding3: 0,
         }
     }
 }
@@ -76,6 +88,9 @@ pub struct RenderPipeline {
     bubble_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     depth_texture: wgpu::TextureView,
+    msaa_texture: wgpu::TextureView,
+    msaa_samples: u32,
+    bind_group_layout: wgpu::BindGroupLayout,
     pub camera: Camera,
     pub bubble_uniform: BubbleUniform,
     // Mesh settings
@@ -171,8 +186,14 @@ impl RenderPipeline {
         };
         surface.configure(&device, &config);
 
-        // Create depth texture
-        let depth_texture = Self::create_depth_texture(&device, &config);
+        // Default MSAA sample count
+        let msaa_samples = 4_u32;
+
+        // Create depth texture (MSAA)
+        let depth_texture = Self::create_depth_texture(&device, &config, msaa_samples);
+
+        // Create MSAA render target texture
+        let msaa_texture = Self::create_msaa_texture(&device, &config, msaa_samples);
 
         // Create camera
         let camera = Camera::new(size.width as f32 / size.height as f32);
@@ -287,7 +308,7 @@ impl RenderPipeline {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: 1,
+                count: msaa_samples,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -326,7 +347,7 @@ impl RenderPipeline {
             None,
             None,
         );
-        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, Some(wgpu::TextureFormat::Depth32Float), 1, false);
+        let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
 
         Self {
             surface,
@@ -341,6 +362,9 @@ impl RenderPipeline {
             bubble_buffer,
             bind_group,
             depth_texture,
+            msaa_texture,
+            msaa_samples,
+            bind_group_layout,
             camera,
             bubble_uniform,
             subdivision_level,
@@ -437,6 +461,7 @@ impl RenderPipeline {
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
+        sample_count: u32,
     ) -> wgpu::TextureView {
         let size = wgpu::Extent3d {
             width: config.width,
@@ -447,10 +472,32 @@ impl RenderPipeline {
             label: Some("Depth Texture"),
             size,
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn create_msaa_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        sample_count: u32,
+    ) -> wgpu::TextureView {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("MSAA Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         texture.create_view(&wgpu::TextureViewDescriptor::default())
@@ -462,9 +509,87 @@ impl RenderPipeline {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            self.depth_texture = Self::create_depth_texture(&self.device, &self.config);
+            self.depth_texture = Self::create_depth_texture(&self.device, &self.config, self.msaa_samples);
+            self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, self.msaa_samples);
             self.camera.set_aspect(new_size.width as f32 / new_size.height as f32);
         }
+    }
+
+    /// Set MSAA sample count (1 or 4)
+    /// Recreates render pipeline and textures as needed
+    pub fn set_msaa_samples(&mut self, samples: u32) {
+        let samples = match samples {
+            1 | 4 => samples,
+            _ => 4, // Default to 4 for invalid values
+        };
+
+        if samples == self.msaa_samples {
+            return; // No change needed
+        }
+
+        self.msaa_samples = samples;
+
+        // Recreate textures with new sample count
+        self.depth_texture = Self::create_depth_texture(&self.device, &self.config, samples);
+        self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, samples);
+
+        // Recreate render pipeline with new multisample state
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Bubble Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
+        });
+
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[&self.bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        self.render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::buffer_layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        log::info!("MSAA changed to {}x", samples);
     }
 
     /// Handle window events for egui
@@ -656,6 +781,12 @@ impl RenderPipeline {
         let mut deformation_enabled = self.deformation_enabled;
         let mut aspect_ratio = self.aspect_ratio;
 
+        // Edge smoothing extraction
+        let mut edge_smoothing_mode = self.bubble_uniform.edge_smoothing_mode;
+
+        // MSAA extraction
+        let mut msaa_samples = self.msaa_samples;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -702,6 +833,10 @@ impl RenderPipeline {
                 // Deformation parameters
                 &mut deformation_enabled,
                 &mut aspect_ratio,
+                // Edge smoothing parameter
+                &mut edge_smoothing_mode,
+                // MSAA parameter
+                &mut msaa_samples,
             );
         });
 
@@ -777,6 +912,14 @@ impl RenderPipeline {
             self.set_deformation(deformation_enabled, aspect_ratio);
         }
 
+        // Write back edge smoothing mode
+        self.bubble_uniform.edge_smoothing_mode = edge_smoothing_mode;
+
+        // Handle MSAA changes
+        if msaa_samples != self.msaa_samples {
+            self.set_msaa_samples(msaa_samples);
+        }
+
         // Handle egui platform output
         self.egui_state.handle_platform_output(window, egui_output.platform_output);
 
@@ -808,13 +951,21 @@ impl RenderPipeline {
             &screen_descriptor,
         );
 
-        // Render bubble
+        // Render bubble (with MSAA if enabled)
         {
+            // When MSAA is enabled (samples > 1), render to msaa_texture and resolve to swap chain
+            // When MSAA is disabled (samples = 1), render directly to swap chain
+            let (color_view, resolve_target) = if self.msaa_samples > 1 {
+                (&self.msaa_texture, Some(&view))
+            } else {
+                (&view, None)
+            };
+
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: color_view,
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: self.bubble_uniform.background_r as f64,
@@ -844,7 +995,7 @@ impl RenderPipeline {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
-        // Render egui
+        // Render egui (2D overlay - no depth testing needed, renders to resolved swap chain)
         // Safety: The render pass is used immediately and dropped before encoder.finish()
         // The 'static lifetime is a limitation of the egui-wgpu API
         {
@@ -858,14 +1009,7 @@ impl RenderPipeline {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+                depth_stencil_attachment: None, // No depth needed for 2D UI overlay
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
@@ -1035,6 +1179,10 @@ impl RenderPipeline {
         // Deformation parameters
         deformation_enabled: &mut bool,
         aspect_ratio: &mut f32,
+        // Edge smoothing parameter
+        edge_smoothing_mode: &mut u32,
+        // MSAA parameter
+        msaa_samples: &mut u32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1085,6 +1233,34 @@ impl RenderPipeline {
                 ui.add(egui::Slider::new(edge_alpha, 0.0..=1.0)
                     .text("Edge opacity")
                     .fixed_decimals(2));
+
+                ui.horizontal(|ui| {
+                    ui.label("Edge blend:");
+                    egui::ComboBox::from_id_salt("edge_blend")
+                        .selected_text(match *edge_smoothing_mode {
+                            1 => "Smoothstep",
+                            2 => "Power",
+                            _ => "Linear",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(edge_smoothing_mode, 0, "Linear");
+                            ui.selectable_value(edge_smoothing_mode, 1, "Smoothstep");
+                            ui.selectable_value(edge_smoothing_mode, 2, "Power");
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Anti-aliasing:");
+                    egui::ComboBox::from_id_salt("msaa")
+                        .selected_text(match *msaa_samples {
+                            1 => "Off",
+                            _ => "4x MSAA",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(msaa_samples, 1, "Off");
+                            ui.selectable_value(msaa_samples, 4, "4x MSAA");
+                        });
+                });
 
                 ui.separator();
                 ui.heading("Mesh & Background");
