@@ -673,7 +673,7 @@ mod tests {
         let fresnel = calculator.calculate_fresnel_reflection(1.0);
 
         // At normal incidence, R = ((n1-n2)/(n1+n2))^2
-        let expected_reflectance = ((1.0 - 1.33) / (1.0 + 1.33)).powi(2);
+        let expected_reflectance = ((1.0_f64 - 1.33) / (1.0 + 1.33)).powi(2);
         assert!((fresnel.reflectance_average - expected_reflectance).abs() < 1e-4);
     }
 

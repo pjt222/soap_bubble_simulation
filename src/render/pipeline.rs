@@ -4,6 +4,8 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use std::path::Path;
 
+use crate::config::SimulationConfig;
+use crate::physics::drainage::DrainageSimulator;
 use crate::physics::geometry::{SphereMesh, Vertex};
 use crate::render::camera::Camera;
 use crate::export::image_export;
@@ -29,8 +31,10 @@ pub struct BubbleUniform {
     pub drainage_speed: f32,
     pub pattern_scale: f32,
 
-    // Padding for 16-byte alignment (3 floats)
-    pub _padding: [f32; 3],
+    // Bubble position (3 floats) - replaces padding
+    pub position_x: f32,
+    pub position_y: f32,
+    pub position_z: f32,
 }
 
 impl Default for BubbleUniform {
@@ -50,7 +54,10 @@ impl Default for BubbleUniform {
             swirl_intensity: 1.0,
             drainage_speed: 0.5,
             pattern_scale: 1.0,
-            _padding: [0.0; 3],
+            // Bubble position (starts at origin)
+            position_x: 0.0,
+            position_y: 0.0,
+            position_z: 0.0,
         }
     }
 }
@@ -90,6 +97,16 @@ pub struct RenderPipeline {
     pub recording: bool,
     pub frame_counter: u32,
     pub screenshot_requested: bool,
+    // External forces
+    pub bubble_velocity: [f32; 3],
+    pub wind_strength: f32,
+    pub wind_direction: [f32; 3],  // Normalized direction
+    pub buoyancy_strength: f32,
+    pub forces_enabled: bool,
+    // Drainage simulation
+    drainage_simulator: Option<DrainageSimulator>,
+    pub physics_drainage_enabled: bool,
+    drainage_time_scale: f32,
 }
 
 impl RenderPipeline {
@@ -189,7 +206,7 @@ impl RenderPipeline {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT, // Only used in fragment shader for film dynamics
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -339,7 +356,36 @@ impl RenderPipeline {
             recording: false,
             frame_counter: 0,
             screenshot_requested: false,
+            // External forces
+            bubble_velocity: [0.0, 0.0, 0.0],
+            wind_strength: 0.0,
+            wind_direction: [1.0, 0.0, 0.0],  // Default: blowing in +X direction
+            buoyancy_strength: 0.02,  // Light upward force
+            forces_enabled: false,
+            // Drainage simulation (initialized lazily or with default config)
+            drainage_simulator: None,
+            physics_drainage_enabled: false,
+            drainage_time_scale: 100.0,  // Speed up simulation for visible effect
         }
+    }
+
+    /// Initialize the drainage simulator with the given configuration.
+    pub fn init_drainage_simulator(&mut self, config: &SimulationConfig) {
+        self.drainage_simulator = Some(DrainageSimulator::new(config));
+        log::info!("Drainage simulator initialized");
+    }
+
+    /// Reset the drainage simulator to initial thickness.
+    pub fn reset_drainage(&mut self, initial_thickness_nm: f32) {
+        if let Some(ref mut simulator) = self.drainage_simulator {
+            simulator.reset((initial_thickness_nm * 1e-9) as f64);
+            log::info!("Drainage simulation reset to {} nm", initial_thickness_nm);
+        }
+    }
+
+    /// Get current drainage simulation time (if running).
+    pub fn drainage_time(&self) -> Option<f64> {
+        self.drainage_simulator.as_ref().map(|s| s.current_time())
     }
 
     /// Regenerate mesh with new subdivision level
@@ -425,6 +471,84 @@ impl RenderPipeline {
             self.bubble_uniform.film_time += dt * self.film_speed;
         }
 
+        // Apply external forces (wind and buoyancy)
+        if self.forces_enabled {
+            // Wind force: F = wind_strength * direction
+            let wind_force = [
+                self.wind_strength * self.wind_direction[0],
+                self.wind_strength * self.wind_direction[1],
+                self.wind_strength * self.wind_direction[2],
+            ];
+
+            // Buoyancy force: light soap bubble rises (upward in +Y)
+            let buoyancy_force = [0.0, self.buoyancy_strength, 0.0];
+
+            // Simple drag to prevent runaway velocity (air resistance)
+            let drag = 0.5;
+
+            // Update velocity: v += (F - drag*v) * dt
+            for i in 0..3 {
+                let total_force = wind_force[i] + buoyancy_force[i] - drag * self.bubble_velocity[i];
+                self.bubble_velocity[i] += total_force * dt;
+            }
+
+            // Update position: p += v * dt
+            self.bubble_uniform.position_x += self.bubble_velocity[0] * dt;
+            self.bubble_uniform.position_y += self.bubble_velocity[1] * dt;
+            self.bubble_uniform.position_z += self.bubble_velocity[2] * dt;
+
+            // Soft boundary: gradually push bubble back toward center if too far
+            let max_distance = 0.15; // 15 cm from center
+            let pos = [
+                self.bubble_uniform.position_x,
+                self.bubble_uniform.position_y,
+                self.bubble_uniform.position_z,
+            ];
+            let dist_sq = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2];
+            if dist_sq > max_distance * max_distance {
+                let dist = dist_sq.sqrt();
+                let return_strength = 0.5 * (dist - max_distance);
+                for i in 0..3 {
+                    self.bubble_velocity[i] -= return_strength * pos[i] / dist * dt;
+                }
+            }
+        }
+
+        // Physics-based drainage simulation
+        if self.physics_drainage_enabled {
+            if let Some(ref mut simulator) = self.drainage_simulator {
+                // Step the drainage simulation (with time scaling for visible effect)
+                let scaled_dt = (dt * self.drainage_time_scale) as f64;
+                simulator.step(scaled_dt);
+
+                // Get thickness statistics from the simulation
+                let field = simulator.thickness_field();
+                let min_thickness = field.min_thickness() as f32 * 1e9;  // Convert to nm
+                let max_thickness = field.max_thickness() as f32 * 1e9;
+
+                // Sample thickness at equator (theta = PI/2) to get representative value
+                let equator_thickness = simulator.get_thickness(
+                    std::f64::consts::FRAC_PI_2,
+                    0.0
+                ) as f32 * 1e9;
+
+                // Update the base thickness to reflect drainage
+                // Use the equator thickness as it's a good representative
+                self.bubble_uniform.base_thickness_nm = equator_thickness;
+
+                // Adjust drainage_speed based on actual simulation progress
+                // This affects the procedural overlay in the shader
+                let drain_ratio = min_thickness / max_thickness;
+                self.bubble_uniform.drainage_speed = (1.0 - drain_ratio).clamp(0.0, 2.0);
+
+                // Check for burst condition
+                if simulator.has_critical_region() {
+                    log::info!("Bubble reached critical thickness - would burst at t={:.2}s",
+                        simulator.current_time());
+                }
+            }
+        }
+
         // Track FPS
         self.frame_times.push(dt);
         if self.frame_times.len() > 60 {
@@ -489,6 +613,23 @@ impl RenderPipeline {
         let mut recording = self.recording;
         let frame_counter = self.frame_counter;
 
+        // External forces extraction
+        let mut forces_enabled = self.forces_enabled;
+        let mut wind_strength = self.wind_strength;
+        let mut buoyancy_strength = self.buoyancy_strength;
+        let bubble_pos = [
+            self.bubble_uniform.position_x,
+            self.bubble_uniform.position_y,
+            self.bubble_uniform.position_z,
+        ];
+
+        // Physics drainage extraction
+        let mut physics_drainage_enabled = self.physics_drainage_enabled;
+        let mut drainage_time_scale = self.drainage_time_scale;
+        let drainage_sim_time = self.drainage_time().unwrap_or(0.0);
+        let mut reset_drainage = false;
+        let has_drainage_sim = self.drainage_simulator.is_some();
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -521,6 +662,17 @@ impl RenderPipeline {
                 &mut screenshot_requested,
                 &mut recording,
                 frame_counter,
+                // External forces parameters
+                &mut forces_enabled,
+                &mut wind_strength,
+                &mut buoyancy_strength,
+                bubble_pos,
+                // Physics drainage parameters
+                &mut physics_drainage_enabled,
+                &mut drainage_time_scale,
+                drainage_sim_time,
+                &mut reset_drainage,
+                has_drainage_sim,
             );
         });
 
@@ -558,6 +710,37 @@ impl RenderPipeline {
                 log::info!("Recording stopped after {} frames", self.frame_counter);
             }
             self.recording = recording;
+        }
+
+        // Write back external forces state
+        self.forces_enabled = forces_enabled;
+        self.wind_strength = wind_strength;
+        self.buoyancy_strength = buoyancy_strength;
+
+        // Handle forces enable/disable - reset position when disabled
+        if !forces_enabled {
+            self.bubble_uniform.position_x = 0.0;
+            self.bubble_uniform.position_y = 0.0;
+            self.bubble_uniform.position_z = 0.0;
+            self.bubble_velocity = [0.0, 0.0, 0.0];
+        }
+
+        // Write back physics drainage state
+        self.drainage_time_scale = drainage_time_scale;
+
+        // Handle physics drainage enable/disable
+        if physics_drainage_enabled != self.physics_drainage_enabled {
+            self.physics_drainage_enabled = physics_drainage_enabled;
+            if physics_drainage_enabled && self.drainage_simulator.is_none() {
+                // Initialize with default config if not already initialized
+                let config = SimulationConfig::default();
+                self.init_drainage_simulator(&config);
+            }
+        }
+
+        // Handle drainage reset request
+        if reset_drainage {
+            self.reset_drainage(500.0);  // Reset to 500nm
         }
 
         // Handle egui platform output
@@ -804,6 +987,17 @@ impl RenderPipeline {
         screenshot_requested: &mut bool,
         recording: &mut bool,
         frame_counter: u32,
+        // External forces parameters
+        forces_enabled: &mut bool,
+        wind_strength: &mut f32,
+        buoyancy_strength: &mut f32,
+        bubble_pos: [f32; 3],
+        // Physics drainage parameters
+        physics_drainage_enabled: &mut bool,
+        drainage_time_scale: &mut f32,
+        drainage_sim_time: f64,
+        reset_drainage: &mut bool,
+        has_drainage_sim: bool,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -913,6 +1107,49 @@ impl RenderPipeline {
                     ui.add(egui::Slider::new(pattern_scale, 0.5..=3.0)
                         .text("Pattern scale")
                         .fixed_decimals(1));
+                });
+
+                ui.collapsing("External Forces", |ui| {
+                    ui.checkbox(forces_enabled, "Enable forces");
+
+                    if *forces_enabled {
+                        ui.add(egui::Slider::new(wind_strength, 0.0..=0.5)
+                            .text("Wind")
+                            .suffix(" m/s²")
+                            .fixed_decimals(2));
+
+                        ui.add(egui::Slider::new(buoyancy_strength, 0.0..=0.1)
+                            .text("Buoyancy")
+                            .suffix(" m/s²")
+                            .fixed_decimals(3));
+
+                        ui.separator();
+                        ui.label(format!("Position: ({:.3}, {:.3}, {:.3})",
+                            bubble_pos[0], bubble_pos[1], bubble_pos[2]));
+                    }
+                });
+
+                ui.collapsing("Physics Drainage", |ui| {
+                    ui.checkbox(physics_drainage_enabled, "Enable physics simulation");
+
+                    if *physics_drainage_enabled {
+                        ui.add(egui::Slider::new(drainage_time_scale, 1.0..=500.0)
+                            .text("Time scale")
+                            .logarithmic(true)
+                            .fixed_decimals(0));
+
+                        ui.separator();
+                        if has_drainage_sim {
+                            ui.label(format!("Sim time: {:.2} s", drainage_sim_time));
+                            ui.label(format!("Thickness: {:.0} nm", *thickness));
+
+                            if ui.button("Reset").clicked() {
+                                *reset_drainage = true;
+                            }
+                        } else {
+                            ui.label("Initializing...");
+                        }
+                    }
                 });
 
                 ui.separator();

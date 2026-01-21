@@ -76,6 +76,18 @@ pub struct EnvironmentParameters {
 
     /// Atmospheric pressure in Pascal
     pub pressure: f64,
+
+    /// Wind velocity in m/s (x, y, z components)
+    #[serde(default)]
+    pub wind: [f64; 3],
+
+    /// Buoyancy strength multiplier (default 1.0)
+    #[serde(default = "default_buoyancy")]
+    pub buoyancy: f64,
+}
+
+fn default_buoyancy() -> f64 {
+    1.0
 }
 
 impl Default for EnvironmentParameters {
@@ -84,6 +96,8 @@ impl Default for EnvironmentParameters {
             gravity: 9.81,       // Earth gravity
             temperature: 293.15, // 20 degrees Celsius
             pressure: 101325.0,  // 1 atm
+            wind: [0.0, 0.0, 0.0], // No wind by default
+            buoyancy: 1.0,       // Normal buoyancy
         }
     }
 }
