@@ -439,7 +439,7 @@ r_p = (n₂cosθ_i - n₁cosθ_t) / (n₂cosθ_i + n₁cosθ_t)
 
 ### Phase 3: Physics Accuracy (2-3 weeks)
 8. ⬜ Marginal regeneration model
-9. ⬜ Bubble deformation
+9. ✅ Bubble deformation - Ellipsoid mesh with configurable aspect ratio
 10. ✅ Full Fresnel polarization - Separate s/p components, averaged for unpolarized
 
 ### Phase 4: Major Features (1+ months each)
@@ -623,6 +623,42 @@ R = (R_s + R_p) / 2
 - The polarization difference creates subtle color variations visible at bubble edges
 
 **Key insight:** For unpolarized natural light, averaging s and p gives correct results. The full equations are only ~20 lines more than Schlick but capture physics that the approximation misses entirely (like the Brewster angle dip in p-polarization).
+
+### Bubble Deformation Under Gravity (2026-01-21)
+
+**Goal:** Model bubble flattening due to gravity (oblate spheroid instead of perfect sphere).
+
+**Physics:**
+```
+Bond number: Bo = ρgL² / γ
+- ρ = fluid density
+- g = gravity
+- L = characteristic length (diameter)
+- γ = surface tension
+
+For small Bo: aspect_ratio ≈ 1 - 0.1 * Bo
+```
+
+For a 5cm soap bubble with γ = 0.025 N/m: Bo ≈ 0.25, giving ~2.5% flattening.
+
+**Implementation:**
+1. Modified `SphereMesh` to support ellipsoid generation via `new_ellipsoid(radius, subdivision, aspect_ratio)`
+2. Ellipsoid parametric equations:
+   - Position: (r_eq·sinθ·cosφ, r_pol·cosθ, r_eq·sinθ·sinφ)
+   - where r_pol = r_eq × aspect_ratio
+3. Ellipsoid normals (critical for correct lighting):
+   ```
+   n = normalize(x/a², y/b², z/a²)
+   ```
+   NOT the same as position direction for non-spheres!
+
+**Key insight:** The normal calculation for ellipsoids is the gradient of the implicit surface equation x²/a² + y²/b² + z²/a² = 1. Using position vectors as normals (which works for spheres) produces incorrect lighting on deformed bubbles.
+
+**UI integration:**
+- "Gravity Deformation" collapsible section
+- Checkbox to enable/disable
+- Slider for aspect ratio (0.7 to 1.0)
+- Mesh regenerates dynamically on change
 
 ---
 
