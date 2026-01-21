@@ -7,8 +7,10 @@ use std::path::Path;
 use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
 use crate::physics::geometry::{LodMeshCache, SphereMesh, Vertex};
+use crate::physics::foam_dynamics::FoamSimulator;
 use crate::render::camera::Camera;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
+use crate::render::foam_renderer::FoamRenderer;
 use crate::export::image_export;
 
 /// Bubble-specific uniform data
@@ -134,6 +136,11 @@ pub struct RenderPipeline {
     // GPU drainage simulation
     gpu_drainage: GPUDrainageSimulator,
     pub gpu_drainage_enabled: bool,
+    // Multi-bubble foam system
+    foam_simulator: Option<FoamSimulator>,
+    foam_renderer: FoamRenderer,
+    pub foam_enabled: bool,
+    foam_time_scale: f32,
 }
 
 impl RenderPipeline {
@@ -369,6 +376,9 @@ impl RenderPipeline {
             64,      // Grid height (theta)
         );
 
+        // Initialize foam renderer
+        let foam_renderer = FoamRenderer::new(&device, 64);
+
         Self {
             surface,
             device,
@@ -424,6 +434,11 @@ impl RenderPipeline {
             // GPU drainage simulation
             gpu_drainage,
             gpu_drainage_enabled: false,
+            // Foam system (disabled by default)
+            foam_simulator: None,
+            foam_renderer,
+            foam_enabled: false,
+            foam_time_scale: 1.0,
         }
     }
 
@@ -470,6 +485,46 @@ impl RenderPipeline {
 
         // Regenerate current mesh
         self.regenerate_mesh();
+    }
+
+    /// Initialize the foam simulator for multi-bubble mode.
+    pub fn init_foam_simulator(&mut self) {
+        if self.foam_simulator.is_none() {
+            let simulator = FoamSimulator::with_default_cluster();
+            self.foam_simulator = Some(simulator);
+            log::info!("Foam simulator initialized with default cluster");
+        }
+    }
+
+    /// Enable or disable foam mode.
+    pub fn set_foam_enabled(&mut self, enabled: bool) {
+        self.foam_enabled = enabled;
+        if enabled && self.foam_simulator.is_none() {
+            self.init_foam_simulator();
+        }
+    }
+
+    /// Add a bubble to the foam simulation.
+    pub fn add_foam_bubble(&mut self, radius: f32) {
+        if let Some(ref mut sim) = self.foam_simulator {
+            sim.add_random_bubble((radius * 0.8, radius * 1.2));
+        }
+    }
+
+    /// Reset the foam simulation.
+    pub fn reset_foam(&mut self) {
+        if let Some(ref mut sim) = self.foam_simulator {
+            sim.reset();
+        }
+    }
+
+    /// Get foam statistics (bubble count, connections).
+    pub fn foam_stats(&self) -> (usize, usize) {
+        if let Some(ref sim) = self.foam_simulator {
+            (sim.bubble_count(), sim.connection_count())
+        } else {
+            (0, 0)
+        }
     }
 
     /// Regenerate mesh with current parameters (subdivision level, aspect ratio)
@@ -797,6 +852,18 @@ impl RenderPipeline {
             }
         }
 
+        // Multi-bubble foam simulation
+        if self.foam_enabled {
+            if let Some(ref mut sim) = self.foam_simulator {
+                let scaled_dt = dt * self.foam_time_scale;
+                sim.step(scaled_dt);
+
+                // Update foam renderer with current bubble positions
+                self.foam_renderer.update_from_cluster(&sim.cluster);
+                self.foam_renderer.upload(&self.queue);
+            }
+        }
+
         // Track FPS
         self.frame_times.push(dt);
         if self.frame_times.len() > 60 {
@@ -903,6 +970,13 @@ impl RenderPipeline {
         let mut marangoni_enabled = self.gpu_drainage.marangoni_enabled;
         let mut marangoni_coeff = self.gpu_drainage.params().marangoni_coeff;
 
+        // Foam system extraction
+        let mut foam_enabled = self.foam_enabled;
+        let mut foam_time_scale = self.foam_time_scale;
+        let foam_stats = self.foam_stats();
+        let mut add_bubble_requested = false;
+        let mut reset_foam_requested = false;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -965,6 +1039,12 @@ impl RenderPipeline {
                 // Marangoni parameters
                 &mut marangoni_enabled,
                 &mut marangoni_coeff,
+                // Foam parameters
+                &mut foam_enabled,
+                &mut foam_time_scale,
+                foam_stats,
+                &mut add_bubble_requested,
+                &mut reset_foam_requested,
             );
         });
 
@@ -1073,6 +1153,18 @@ impl RenderPipeline {
                 params.surfactant_diffusion,
                 marangoni_coeff,
             );
+        }
+
+        // Apply foam parameter changes
+        if foam_enabled != self.foam_enabled {
+            self.set_foam_enabled(foam_enabled);
+        }
+        self.foam_time_scale = foam_time_scale;
+        if add_bubble_requested {
+            self.add_foam_bubble(self.radius * 0.8);
+        }
+        if reset_foam_requested {
+            self.reset_foam();
         }
 
         // Handle egui platform output
@@ -1357,6 +1449,12 @@ impl RenderPipeline {
         // Marangoni parameters
         marangoni_enabled: &mut bool,
         marangoni_coeff: &mut f32,
+        // Foam parameters
+        foam_enabled: &mut bool,
+        foam_time_scale: &mut f32,
+        foam_stats: (usize, usize),
+        add_bubble_requested: &mut bool,
+        reset_foam_requested: &mut bool,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1593,6 +1691,33 @@ impl RenderPipeline {
                         let deform_percent = (1.0 - *aspect_ratio) * 100.0;
                         ui.label(format!("Flattening: {:.1}%", deform_percent));
                         ui.label("(1.0 = sphere, <1.0 = oblate)");
+                    }
+                });
+
+                ui.collapsing("Multi-Bubble Foam", |ui| {
+                    ui.checkbox(foam_enabled, "Enable foam mode");
+
+                    if *foam_enabled {
+                        ui.add(egui::Slider::new(foam_time_scale, 0.1..=5.0)
+                            .text("Time scale")
+                            .fixed_decimals(1));
+
+                        ui.separator();
+                        ui.label(format!("Bubbles: {}", foam_stats.0));
+                        ui.label(format!("Connections: {}", foam_stats.1));
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Add Bubble").clicked() {
+                                *add_bubble_requested = true;
+                            }
+                            if ui.button("Reset").clicked() {
+                                *reset_foam_requested = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("N-body bubble dynamics");
+                        ui.label("with Van der Waals forces");
                     }
                 });
 

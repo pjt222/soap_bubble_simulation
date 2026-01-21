@@ -102,6 +102,90 @@ impl Default for EnvironmentParameters {
     }
 }
 
+/// Parameters for multi-bubble foam simulation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoamParameters {
+    /// Enable multi-bubble foam mode
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum number of bubbles
+    #[serde(default = "default_max_bubbles")]
+    pub max_bubbles: u32,
+
+    /// Initial number of bubbles
+    #[serde(default = "default_initial_bubbles")]
+    pub initial_count: u32,
+
+    /// Van der Waals attraction strength
+    #[serde(default = "default_vdw_strength")]
+    pub van_der_waals_strength: f64,
+
+    /// Enable bubble coalescence (merging)
+    #[serde(default)]
+    pub coalescence_enabled: bool,
+
+    /// Plateau's rules enforcement strength (0.0 to 1.0)
+    #[serde(default = "default_plateau_stiffness")]
+    pub plateau_stiffness: f64,
+
+    /// Minimum bubble radius before removal (meters)
+    #[serde(default = "default_min_radius")]
+    pub min_radius: f64,
+
+    /// Maximum bubble radius (meters)
+    #[serde(default = "default_max_radius")]
+    pub max_radius: f64,
+
+    /// Physics simulation time scale multiplier
+    #[serde(default = "default_time_scale")]
+    pub time_scale: f64,
+}
+
+fn default_max_bubbles() -> u32 {
+    64
+}
+
+fn default_initial_bubbles() -> u32 {
+    5
+}
+
+fn default_vdw_strength() -> f64 {
+    1e-12
+}
+
+fn default_plateau_stiffness() -> f64 {
+    1.0
+}
+
+fn default_min_radius() -> f64 {
+    0.005 // 5mm
+}
+
+fn default_max_radius() -> f64 {
+    0.1 // 10cm
+}
+
+fn default_time_scale() -> f64 {
+    1.0
+}
+
+impl Default for FoamParameters {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_bubbles: default_max_bubbles(),
+            initial_count: default_initial_bubbles(),
+            van_der_waals_strength: default_vdw_strength(),
+            coalescence_enabled: false,
+            plateau_stiffness: default_plateau_stiffness(),
+            min_radius: default_min_radius(),
+            max_radius: default_max_radius(),
+            time_scale: default_time_scale(),
+        }
+    }
+}
+
 /// Complete simulation configuration combining all parameter groups.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationConfig {
@@ -113,6 +197,10 @@ pub struct SimulationConfig {
 
     /// Environmental conditions
     pub environment: EnvironmentParameters,
+
+    /// Multi-bubble foam parameters
+    #[serde(default)]
+    pub foam: FoamParameters,
 
     /// Simulation time step in seconds
     pub dt: f64,
@@ -127,6 +215,7 @@ impl Default for SimulationConfig {
             bubble: BubbleParameters::default(),
             fluid: FluidParameters::default(),
             environment: EnvironmentParameters::default(),
+            foam: FoamParameters::default(),
             dt: 0.001,       // 1 ms time step
             resolution: 128, // 128x256 grid
         }

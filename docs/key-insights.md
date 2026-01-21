@@ -14,7 +14,8 @@ This document captures important lessons learned during the development of the s
 8. [LOD (Level of Detail) System](#lod-level-of-detail-system)
 9. [GPU Drainage Simulation](#gpu-drainage-simulation)
 10. [Marangoni Effect Implementation](#marangoni-effect-implementation)
-11. [Edge Smoothing Modes](#edge-smoothing-modes)
+11. [Multi-Bubble Foam System](#multi-bubble-foam-system)
+12. [Edge Smoothing Modes](#edge-smoothing-modes)
 
 ---
 
@@ -909,6 +910,144 @@ The Marangoni effect produces:
 3. The Marangoni coefficient needs tuning for visual effect - too high causes instability
 4. Initialization matters: starting with uniform concentration allows gradients to develop naturally
 5. The coupling is bidirectional: thickness affects concentration and vice versa
+
+---
+
+## Multi-Bubble Foam System
+
+### Problem
+
+The simulation was limited to a single bubble. Real soap bubble behavior includes:
+- Bubble clusters and foam formation
+- Inter-bubble forces (Van der Waals attraction, collision)
+- Coalescence (bubble merging)
+- Plateau's rules for foam geometry (120° angles at junctions)
+
+### Solution
+
+Implement a multi-bubble foam system with:
+1. Data structures for bubbles and clusters
+2. N-body physics simulation
+3. Spatial hashing for efficient neighbor queries
+4. Instance-based rendering preparation
+
+### Architecture
+
+```rust
+/// Individual bubble in the foam
+pub struct Bubble {
+    pub id: BubbleId,
+    pub position: Vec3,
+    pub radius: f32,
+    pub velocity: Vec3,
+    pub aspect_ratio: f32,
+    pub thickness_nm: f32,
+    pub neighbors: Vec<BubbleId>,
+}
+
+/// Collection of interacting bubbles
+pub struct BubbleCluster {
+    bubbles: Vec<Bubble>,
+    spatial_hash: SpatialHash,
+    connections: Vec<BubbleConnection>,
+}
+
+/// Physics simulator for foam dynamics
+pub struct FoamSimulator {
+    pub cluster: BubbleCluster,
+    pub surface_tension: f32,
+    pub van_der_waals_strength: f32,
+    pub repulsion_stiffness: f32,
+}
+```
+
+### Physics Model
+
+**Van der Waals Attraction:**
+```
+F_vdw = A * r_a * r_b / d²  (for d > r_a + r_b)
+```
+Long-range attraction that draws bubbles together.
+
+**Collision Repulsion (Hertzian):**
+```
+F_rep = k * overlap^1.5  (when overlap > 0)
+```
+Prevents bubbles from interpenetrating.
+
+**Buoyancy:**
+```
+F_buoyancy = ρ_air * g * V_bubble - m_film * g
+```
+Light soap bubbles rise due to the air inside being less dense than the thin film.
+
+### Spatial Hashing
+
+For efficient O(1) neighbor queries instead of O(n²) brute force:
+
+```rust
+pub struct SpatialHash {
+    cell_size: f32,  // ~2x max bubble radius
+    cells: HashMap<(i32, i32, i32), Vec<BubbleId>>,
+}
+
+impl SpatialHash {
+    fn cell_coords(&self, position: Vec3) -> (i32, i32, i32) {
+        (
+            (position.x / self.cell_size).floor() as i32,
+            (position.y / self.cell_size).floor() as i32,
+            (position.z / self.cell_size).floor() as i32,
+        )
+    }
+
+    fn query(&self, position: Vec3, radius: f32) -> Vec<BubbleId> {
+        // Query neighboring cells
+    }
+}
+```
+
+### Bubble Connections (Young-Laplace)
+
+When two bubbles touch, the shared wall curvature is determined by pressure difference:
+
+```rust
+/// Young-Laplace: ΔP = 4γ/R (for soap bubble with two interfaces)
+let p_a = 4.0 * surface_tension / bubble_a.radius;
+let p_b = 4.0 * surface_tension / bubble_b.radius;
+
+/// Shared wall curvature: R_wall = 2γ / |ΔP|
+let wall_curvature = if delta_p.abs() > 1e-6 {
+    2.0 * surface_tension / delta_p
+} else {
+    f32::INFINITY  // Flat wall for equal-sized bubbles
+};
+```
+
+### Instance Rendering Preparation
+
+Per-instance data for GPU instancing (future optimization):
+
+```rust
+#[repr(C)]
+pub struct BubbleInstance {
+    pub model_0: [f32; 4],    // Model matrix row 0
+    pub model_1: [f32; 4],    // Model matrix row 1
+    pub model_2: [f32; 4],    // Model matrix row 2
+    pub model_3: [f32; 4],    // Model matrix row 3
+    pub radius: f32,
+    pub aspect_ratio: f32,
+    pub thickness_nm: f32,
+    pub refractive_index: f32,
+}
+```
+
+### Lesson Learned
+
+1. Spatial hashing is essential for N-body simulations - O(1) vs O(n²)
+2. Young-Laplace equation governs shared wall geometry between bubbles
+3. Semi-implicit Euler integration is stable for soft-body physics
+4. Separating physics (FoamSimulator) from rendering (FoamRenderer) enables flexibility
+5. Incremental integration (UI toggle, then rendering) reduces risk
 
 ---
 
