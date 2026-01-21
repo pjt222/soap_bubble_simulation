@@ -17,6 +17,58 @@
 
 use crate::config::SimulationConfig;
 
+/// Represents a Thick Film Element (TFE) front propagating from the edge.
+/// TFEs are thin regions that form at Plateau borders and propagate inward.
+#[derive(Debug, Clone)]
+pub struct TfeFront {
+    /// Azimuthal position of the front center (radians)
+    pub phi_center: f64,
+    /// Current radial extent (how far from equator the front has propagated)
+    /// 0.0 = at equator, PI/2 = reached pole
+    pub extent: f64,
+    /// Angular width of this front (radians in phi direction)
+    pub width: f64,
+    /// Propagation velocity (radians per second)
+    pub velocity: f64,
+}
+
+impl TfeFront {
+    /// Create a new TFE front at the equator.
+    pub fn new(phi_center: f64, width: f64, velocity: f64) -> Self {
+        Self {
+            phi_center,
+            extent: 0.0,
+            width,
+            velocity,
+        }
+    }
+
+    /// Advance the front by dt seconds.
+    pub fn advance(&mut self, dt: f64) {
+        self.extent = (self.extent + self.velocity * dt).min(std::f64::consts::FRAC_PI_2);
+    }
+
+    /// Check if a point (theta, phi) is behind this TFE front.
+    /// Returns true if the point should have reduced thickness.
+    pub fn contains(&self, theta: f64, phi: f64) -> bool {
+        // Distance from equator (theta = PI/2)
+        let dist_from_equator = (theta - std::f64::consts::FRAC_PI_2).abs();
+
+        // Check if within the front's extent
+        if dist_from_equator > self.extent {
+            return false;
+        }
+
+        // Check if within the front's angular width (with wrapping)
+        let mut phi_diff = (phi - self.phi_center).abs();
+        if phi_diff > std::f64::consts::PI {
+            phi_diff = 2.0 * std::f64::consts::PI - phi_diff;
+        }
+
+        phi_diff < self.width / 2.0
+    }
+}
+
 /// A 2D grid storing film thickness values in spherical coordinates.
 ///
 /// The grid uses (theta, phi) coordinates where:
@@ -136,7 +188,8 @@ impl ThicknessField {
 /// Simulator for soap film drainage under gravity.
 ///
 /// Evolves the film thickness field over time using a finite difference
-/// discretization of the drainage equation.
+/// discretization of the drainage equation. Includes marginal regeneration
+/// (TFE front propagation) for more realistic drainage patterns.
 #[derive(Debug)]
 pub struct DrainageSimulator {
     /// Current thickness field
@@ -165,6 +218,23 @@ pub struct DrainageSimulator {
 
     /// Current simulation time (s)
     current_time: f64,
+
+    // === Marginal Regeneration (TFE) Fields ===
+
+    /// Active TFE fronts propagating from the equator
+    tfe_fronts: Vec<TfeFront>,
+
+    /// TFE thickness ratio (Monier 2025: 0.8-0.9)
+    tfe_thickness_ratio: f64,
+
+    /// Whether marginal regeneration is enabled
+    marginal_regeneration_enabled: bool,
+
+    /// Time until next TFE front spawns
+    next_tfe_spawn_time: f64,
+
+    /// Average interval between TFE spawns (seconds)
+    tfe_spawn_interval: f64,
 }
 
 impl DrainageSimulator {
@@ -190,6 +260,12 @@ impl DrainageSimulator {
             critical_thickness: config.bubble.critical_thickness_nm * 1e-9,
             bubble_radius: config.bubble_radius(),
             current_time: 0.0,
+            // Marginal regeneration defaults
+            tfe_fronts: Vec::new(),
+            tfe_thickness_ratio: 0.85,  // Monier 2025: 0.8-0.9
+            marginal_regeneration_enabled: true,
+            next_tfe_spawn_time: 0.5,  // First TFE after 0.5s
+            tfe_spawn_interval: 2.0,   // New TFE every ~2s
         }
     }
 
@@ -288,7 +364,76 @@ impl DrainageSimulator {
         // Handle poles: average neighboring values
         self.update_poles();
 
+        // Apply marginal regeneration (TFE fronts)
+        if self.marginal_regeneration_enabled {
+            self.update_marginal_regeneration(dt);
+        }
+
         self.current_time += dt;
+    }
+
+    /// Update marginal regeneration: spawn new TFE fronts and apply thickness reduction.
+    fn update_marginal_regeneration(&mut self, dt: f64) {
+        // Maybe spawn a new TFE front
+        self.next_tfe_spawn_time -= dt;
+        if self.next_tfe_spawn_time <= 0.0 {
+            self.spawn_tfe_front();
+            // Randomize next spawn time (0.5x to 1.5x base interval)
+            let random_factor = 0.5 + (self.current_time * 12.345).sin().abs();
+            self.next_tfe_spawn_time = self.tfe_spawn_interval * random_factor;
+        }
+
+        // Advance existing fronts
+        for front in &mut self.tfe_fronts {
+            front.advance(dt);
+        }
+
+        // Remove fronts that have reached the poles
+        self.tfe_fronts.retain(|f| f.extent < std::f64::consts::FRAC_PI_2 * 0.95);
+
+        // Apply TFE thickness reduction
+        let num_theta = self.thickness.num_theta();
+        let num_phi = self.thickness.num_phi();
+        let delta_theta = self.thickness.delta_theta();
+        let delta_phi = self.thickness.delta_phi();
+
+        for theta_index in 0..num_theta {
+            let theta = theta_index as f64 * delta_theta;
+
+            for phi_index in 0..num_phi {
+                let phi = phi_index as f64 * delta_phi;
+
+                // Check if this point is inside any TFE front
+                for front in &self.tfe_fronts {
+                    if front.contains(theta, phi) {
+                        // Gradually reduce thickness toward TFE ratio
+                        let current = self.thickness.get(theta_index, phi_index);
+                        // Target is base_thickness * ratio, but we don't know base
+                        // So we apply the ratio incrementally per timestep
+                        let reduction_rate = (1.0 - self.tfe_thickness_ratio) * 0.5; // per second
+                        let new_thickness = current * (1.0 - reduction_rate * dt);
+                        self.thickness.set(theta_index, phi_index, new_thickness);
+                        break; // Only apply one front per point
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn a new TFE front at a random azimuthal position.
+    fn spawn_tfe_front(&mut self) {
+        // Pseudo-random position based on time
+        let phi = (self.current_time * 7.89 + 1.23).sin().abs() * 2.0 * std::f64::consts::PI;
+        let width = 0.3 + (self.current_time * 3.21).sin().abs() * 0.4; // 0.3 to 0.7 radians
+        let velocity = 0.05 + (self.current_time * 5.67).cos().abs() * 0.05; // 0.05 to 0.1 rad/s
+
+        let front = TfeFront::new(phi, width, velocity);
+        self.tfe_fronts.push(front);
+
+        // Limit number of active fronts
+        if self.tfe_fronts.len() > 8 {
+            self.tfe_fronts.remove(0);
+        }
     }
 
     /// Update pole values by averaging neighboring ring.
@@ -391,6 +536,39 @@ impl DrainageSimulator {
             *value = initial_thickness;
         }
         self.current_time = 0.0;
+        // Also reset marginal regeneration state
+        self.tfe_fronts.clear();
+        self.next_tfe_spawn_time = 0.5;
+    }
+
+    // === Marginal Regeneration Control ===
+
+    /// Enable or disable marginal regeneration.
+    pub fn set_marginal_regeneration(&mut self, enabled: bool) {
+        self.marginal_regeneration_enabled = enabled;
+        if !enabled {
+            self.tfe_fronts.clear();
+        }
+    }
+
+    /// Check if marginal regeneration is enabled.
+    pub fn marginal_regeneration_enabled(&self) -> bool {
+        self.marginal_regeneration_enabled
+    }
+
+    /// Set the TFE thickness ratio (Monier 2025 suggests 0.8-0.9).
+    pub fn set_tfe_thickness_ratio(&mut self, ratio: f64) {
+        self.tfe_thickness_ratio = ratio.clamp(0.5, 0.95);
+    }
+
+    /// Get the current TFE thickness ratio.
+    pub fn tfe_thickness_ratio(&self) -> f64 {
+        self.tfe_thickness_ratio
+    }
+
+    /// Get the number of active TFE fronts.
+    pub fn active_tfe_count(&self) -> usize {
+        self.tfe_fronts.len()
     }
 }
 
