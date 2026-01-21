@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
-use crate::physics::geometry::{SphereMesh, Vertex, bond_number, aspect_ratio_from_bond};
+use crate::physics::geometry::{LodMeshCache, SphereMesh, Vertex};
 use crate::render::camera::Camera;
 use crate::export::image_export;
 
@@ -125,6 +125,11 @@ pub struct RenderPipeline {
     // Gravity deformation
     pub deformation_enabled: bool,
     pub aspect_ratio: f32,  // 1.0 = sphere, <1.0 = oblate (flattened)
+    // LOD system
+    lod_cache: LodMeshCache,
+    current_lod_level: u32,
+    lod_enabled: bool,
+    lod_thresholds: [f32; 4],  // Distance thresholds for LOD transitions [5→4, 4→3, 3→2, 2→1]
 }
 
 impl RenderPipeline {
@@ -316,10 +321,13 @@ impl RenderPipeline {
             cache: None,
         });
 
-        // Create UV sphere mesh (5cm diameter, level 3 = 128 segments, ~32k triangles)
+        // Create UV sphere mesh with LOD support (5cm diameter)
         let radius = 0.025;
         let subdivision_level = 3_u32;
-        let mesh = SphereMesh::new(radius, subdivision_level);
+        let mut lod_cache = LodMeshCache::new(radius, 1.0);
+
+        // Get initial mesh from LOD cache
+        let mesh = lod_cache.get_mesh(subdivision_level);
 
         // Create vertex buffer
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -396,6 +404,11 @@ impl RenderPipeline {
             // Gravity deformation (disabled by default)
             deformation_enabled: false,
             aspect_ratio: 1.0,  // Perfect sphere
+            // LOD system
+            lod_cache,
+            current_lod_level: subdivision_level,
+            lod_enabled: false,  // Disabled by default, user can enable
+            lod_thresholds: [0.08, 0.15, 0.30, 0.60],  // Distance thresholds in meters
         }
     }
 
@@ -436,12 +449,18 @@ impl RenderPipeline {
         }
         self.deformation_enabled = enabled;
         self.aspect_ratio = new_ratio;
+
+        // Update LOD cache with new aspect ratio (invalidates cached meshes)
+        self.lod_cache.update(self.radius, new_ratio);
+
+        // Regenerate current mesh
         self.regenerate_mesh();
     }
 
     /// Regenerate mesh with current parameters (subdivision level, aspect ratio)
     fn regenerate_mesh(&mut self) {
-        let mesh = SphereMesh::new_ellipsoid(self.radius, self.subdivision_level, self.aspect_ratio);
+        // Use LOD cache for mesh generation
+        let mesh = self.lod_cache.get_mesh(self.subdivision_level);
 
         self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -456,6 +475,70 @@ impl RenderPipeline {
         });
 
         self.num_indices = mesh.indices.len() as u32;
+    }
+
+    /// Select appropriate LOD level based on camera distance
+    fn select_lod_level(&self) -> u32 {
+        let distance = self.camera.distance;
+
+        if distance < self.lod_thresholds[0] {
+            5 // Closest: highest detail
+        } else if distance < self.lod_thresholds[1] {
+            4
+        } else if distance < self.lod_thresholds[2] {
+            3
+        } else if distance < self.lod_thresholds[3] {
+            2
+        } else {
+            1 // Farthest: lowest detail
+        }
+    }
+
+    /// Update LOD based on current camera distance (call each frame when LOD enabled)
+    fn update_lod(&mut self) {
+        if !self.lod_enabled {
+            return;
+        }
+
+        let new_level = self.select_lod_level();
+        if new_level != self.current_lod_level {
+            self.switch_lod(new_level);
+        }
+    }
+
+    /// Switch to a different LOD level
+    fn switch_lod(&mut self, level: u32) {
+        let level = level.clamp(1, 5);
+        if level == self.current_lod_level {
+            return;
+        }
+
+        self.current_lod_level = level;
+        self.subdivision_level = level;
+
+        // Get mesh from cache and create new GPU buffers
+        let mesh = self.lod_cache.get_mesh(level);
+
+        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: mesh.vertex_bytes(),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: mesh.index_bytes(),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.num_indices = mesh.indices.len() as u32;
+
+        log::debug!(
+            "LOD switched to level {} ({} triangles) at distance {:.3}m",
+            level,
+            self.num_indices / 3,
+            self.camera.distance
+        );
     }
 
     fn create_depth_texture(
@@ -601,6 +684,9 @@ impl RenderPipeline {
     /// Update time for animation
     pub fn update(&mut self, dt: f32) {
         self.bubble_uniform.time += dt;
+
+        // LOD update based on camera distance
+        self.update_lod();
 
         // Camera rotation animation (orbits around Y axis)
         if self.rotation_playing {
@@ -787,6 +873,10 @@ impl RenderPipeline {
         // MSAA extraction
         let mut msaa_samples = self.msaa_samples;
 
+        // LOD extraction
+        let mut lod_enabled = self.lod_enabled;
+        let current_lod_level = self.current_lod_level;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -837,6 +927,9 @@ impl RenderPipeline {
                 &mut edge_smoothing_mode,
                 // MSAA parameter
                 &mut msaa_samples,
+                // LOD parameters
+                &mut lod_enabled,
+                current_lod_level,
             );
         });
 
@@ -919,6 +1012,9 @@ impl RenderPipeline {
         if msaa_samples != self.msaa_samples {
             self.set_msaa_samples(msaa_samples);
         }
+
+        // Handle LOD enable/disable
+        self.lod_enabled = lod_enabled;
 
         // Handle egui platform output
         self.egui_state.handle_platform_output(window, egui_output.platform_output);
@@ -1183,6 +1279,9 @@ impl RenderPipeline {
         edge_smoothing_mode: &mut u32,
         // MSAA parameter
         msaa_samples: &mut u32,
+        // LOD parameters
+        lod_enabled: &mut bool,
+        current_lod_level: u32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1266,8 +1365,16 @@ impl RenderPipeline {
                 ui.heading("Mesh & Background");
                 ui.separator();
 
-                ui.add(egui::Slider::new(subdivision, 1..=5)
-                    .text("Mesh detail"));
+                ui.checkbox(lod_enabled, "Auto LOD");
+
+                if *lod_enabled {
+                    // Show current LOD level when auto-LOD is enabled
+                    ui.label(format!("LOD Level: {} ({} tri)", current_lod_level, num_triangles));
+                } else {
+                    // Manual subdivision control when LOD is disabled
+                    ui.add(egui::Slider::new(subdivision, 1..=5)
+                        .text("Mesh detail"));
+                }
 
                 ui.horizontal(|ui| {
                     ui.label("Background:");

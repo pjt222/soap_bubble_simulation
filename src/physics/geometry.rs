@@ -241,6 +241,85 @@ impl SphereMesh {
     }
 }
 
+/// LOD mesh cache for storing pre-generated meshes at different detail levels.
+///
+/// Generates meshes lazily on first access and caches them for reuse.
+/// Cache is invalidated when aspect_ratio or radius changes.
+pub struct LodMeshCache {
+    /// Cached meshes for levels 1-5 (index 0 = level 1, index 4 = level 5)
+    meshes: [Option<SphereMesh>; 5],
+    /// Current aspect ratio (invalidates cache if changed)
+    aspect_ratio: f32,
+    /// Bubble radius
+    radius: f32,
+}
+
+impl LodMeshCache {
+    /// Create a new LOD cache with given parameters.
+    ///
+    /// Meshes are generated lazily on first access.
+    pub fn new(radius: f32, aspect_ratio: f32) -> Self {
+        Self {
+            meshes: [None, None, None, None, None],
+            aspect_ratio,
+            radius,
+        }
+    }
+
+    /// Get or generate mesh for given LOD level (1-5).
+    ///
+    /// Meshes are cached after first generation.
+    pub fn get_mesh(&mut self, level: u32) -> &SphereMesh {
+        let index = (level.clamp(1, 5) - 1) as usize;
+
+        if self.meshes[index].is_none() {
+            let mesh = SphereMesh::new_ellipsoid(self.radius, level, self.aspect_ratio);
+            log::debug!(
+                "Generated LOD {} mesh: {} triangles",
+                level,
+                mesh.triangle_count()
+            );
+            self.meshes[index] = Some(mesh);
+        }
+
+        self.meshes[index].as_ref().unwrap()
+    }
+
+    /// Invalidate the entire cache.
+    ///
+    /// Call this when aspect_ratio or radius changes.
+    pub fn invalidate(&mut self) {
+        self.meshes = [None, None, None, None, None];
+    }
+
+    /// Update parameters and invalidate cache if they changed.
+    ///
+    /// Returns true if cache was invalidated.
+    pub fn update(&mut self, radius: f32, aspect_ratio: f32) -> bool {
+        let radius_changed = (self.radius - radius).abs() > 1e-6;
+        let aspect_changed = (self.aspect_ratio - aspect_ratio).abs() > 1e-6;
+
+        if radius_changed || aspect_changed {
+            self.radius = radius;
+            self.aspect_ratio = aspect_ratio;
+            self.invalidate();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the current aspect ratio.
+    pub fn aspect_ratio(&self) -> f32 {
+        self.aspect_ratio
+    }
+
+    /// Get the current radius.
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@ This document captures important lessons learned during the development of the s
 5. [Thin-Film Interference Implementation](#thin-film-interference-implementation)
 6. [Animation: Camera Rotation vs Geometry Rotation](#animation-camera-rotation-vs-geometry-rotation)
 7. [MSAA (Multi-Sample Anti-Aliasing) Implementation](#msaa-multi-sample-anti-aliasing-implementation)
+8. [LOD (Level of Detail) System](#lod-level-of-detail-system)
 
 ---
 
@@ -485,3 +486,129 @@ let (color_view, resolve_target) = if msaa_samples > 1 {
 3. All multisampled textures (color + depth) must have matching sample counts
 4. egui and other 2D overlays should render in a separate pass after MSAA resolve
 5. Pipeline recreation is required to change MSAA at runtime
+
+---
+
+## LOD (Level of Detail) System
+
+### Problem
+
+Fixed mesh resolution (~32k triangles) regardless of camera distance wastes GPU resources when the bubble is far away and provides insufficient detail when very close.
+
+### Solution
+
+Implement a lazy-caching LOD system with distance-based automatic switching.
+
+### Architecture
+
+```rust
+/// Lazy-caching mesh storage for LOD levels 1-5
+pub struct LodMeshCache {
+    meshes: [Option<SphereMesh>; 5],  // Generated on first access
+    aspect_ratio: f32,                 // Cache invalidation key
+    radius: f32,
+}
+
+impl LodMeshCache {
+    pub fn get_mesh(&mut self, level: u32) -> &SphereMesh {
+        // Lazy generation: only create mesh when first requested
+        if self.meshes[index].is_none() {
+            self.meshes[index] = Some(SphereMesh::new_ellipsoid(...));
+        }
+        self.meshes[index].as_ref().unwrap()
+    }
+}
+```
+
+### Distance Thresholds
+
+Based on camera distance to bubble center:
+
+| Distance | LOD Level | Segments | Triangles |
+|----------|-----------|----------|-----------|
+| < 0.08m  | 5         | 512      | ~524k     |
+| 0.08-0.15m | 4       | 256      | ~131k     |
+| 0.15-0.30m | 3       | 128      | ~32k      |
+| 0.30-0.60m | 2       | 64       | ~8k       |
+| > 0.60m  | 1         | 32       | ~2k       |
+
+Formula: `segments = 16 * 2^level`, triangles ≈ `2 * segments²`
+
+### Key Implementation Details
+
+**1. Lazy Generation**
+Meshes are only generated when first accessed, not all at startup:
+```rust
+pub fn get_mesh(&mut self, level: u32) -> &SphereMesh {
+    let index = (level.clamp(1, 5) - 1) as usize;
+    if self.meshes[index].is_none() {
+        self.meshes[index] = Some(SphereMesh::new_ellipsoid(...));
+    }
+    self.meshes[index].as_ref().unwrap()
+}
+```
+
+**2. Cache Invalidation**
+When aspect ratio changes (deformation), all cached meshes must be regenerated:
+```rust
+pub fn update(&mut self, radius: f32, aspect_ratio: f32) -> bool {
+    if parameters_changed {
+        self.invalidate();  // Clear all cached meshes
+        true
+    } else {
+        false
+    }
+}
+```
+
+**3. Buffer Recreation on LOD Switch**
+GPU buffers are immutable, so switching LOD requires creating new buffers:
+```rust
+fn switch_lod(&mut self, level: u32) {
+    let mesh = self.lod_cache.get_mesh(level);
+
+    // Create new GPU buffers (old ones are dropped)
+    self.vertex_buffer = device.create_buffer_init(...);
+    self.index_buffer = device.create_buffer_init(...);
+    self.num_indices = mesh.indices.len() as u32;
+}
+```
+
+**4. Per-Frame LOD Check**
+LOD selection runs every frame but buffer recreation only happens on level change:
+```rust
+fn update_lod(&mut self) {
+    if !self.lod_enabled { return; }
+
+    let new_level = self.select_lod_level();
+    if new_level != self.current_lod_level {
+        self.switch_lod(new_level);  // Only on actual change
+    }
+}
+```
+
+### UI Integration
+
+When Auto LOD is enabled, the manual subdivision slider is hidden:
+```rust
+ui.checkbox(lod_enabled, "Auto LOD");
+if *lod_enabled {
+    ui.label(format!("LOD Level: {} ({} tri)", level, triangles));
+} else {
+    ui.add(egui::Slider::new(subdivision, 1..=5).text("Mesh detail"));
+}
+```
+
+### Performance Considerations
+
+1. **Memory**: Only active LOD level consumes GPU memory; cache stores CPU-side mesh data
+2. **Switching Cost**: Buffer creation is O(vertices), but happens infrequently
+3. **No Popping**: Instant switching works well for smooth sphere; geomorphing optional
+
+### Lesson Learned
+
+1. Lazy generation avoids startup cost for unused LOD levels
+2. Cache invalidation is critical when mesh parameters (aspect ratio) change
+3. Distance thresholds should be tuned based on screen coverage, not absolute distance
+4. For simple geometry like spheres, instant LOD switching is acceptable without blending
+5. Separating mesh cache from GPU buffers allows flexible memory management
