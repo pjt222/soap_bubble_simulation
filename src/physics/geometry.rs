@@ -87,24 +87,38 @@ impl Vertex {
     }
 }
 
-/// Sphere mesh for GPU rendering
+/// Sphere/Ellipsoid mesh for GPU rendering
 ///
-/// Generates an icosphere by subdividing an icosahedron. This produces
-/// a more uniform triangle distribution than a UV sphere, which is better
-/// for physics simulation and avoids polar distortion.
+/// Generates a UV sphere or oblate ellipsoid mesh. When aspect_ratio < 1.0,
+/// the mesh is flattened in the Y direction to simulate gravity deformation.
 pub struct SphereMesh {
     /// Vertex data for the mesh
     pub vertices: Vec<Vertex>,
     /// Triangle indices (3 per triangle)
     pub indices: Vec<u32>,
-    /// Radius of the sphere
+    /// Equatorial radius of the sphere/ellipsoid
     pub radius: f32,
     /// Subdivision level used to generate the mesh
     pub subdivision_level: u32,
+    /// Aspect ratio (polar/equatorial). 1.0 = sphere, <1.0 = oblate (flattened)
+    pub aspect_ratio: f32,
+}
+
+/// Calculate Bond number for bubble deformation
+/// Bo = ρgL² / γ where L is characteristic length (diameter)
+pub fn bond_number(density: f32, gravity: f32, diameter: f32, surface_tension: f32) -> f32 {
+    density * gravity * diameter * diameter / surface_tension
+}
+
+/// Calculate aspect ratio from Bond number
+/// For small Bo: aspect_ratio ≈ 1 - 0.1 * Bo
+/// Clamped to reasonable range [0.7, 1.0]
+pub fn aspect_ratio_from_bond(bond: f32) -> f32 {
+    (1.0 - 0.1 * bond).clamp(0.7, 1.0)
 }
 
 impl SphereMesh {
-    /// Create a new UV sphere mesh
+    /// Create a new UV sphere mesh (perfect sphere)
     ///
     /// # Arguments
     /// * `radius` - Radius of the sphere
@@ -116,21 +130,43 @@ impl SphereMesh {
     ///   * 4: 256 segments (131,072 triangles)
     ///   * 5: 512 segments (524,288 triangles)
     pub fn new(radius: f32, subdivision_level: u32) -> Self {
+        Self::new_ellipsoid(radius, subdivision_level, 1.0)
+    }
+
+    /// Create a new ellipsoid mesh with specified aspect ratio
+    ///
+    /// # Arguments
+    /// * `radius` - Equatorial radius (x and z axes)
+    /// * `subdivision_level` - Controls resolution
+    /// * `aspect_ratio` - Polar/equatorial ratio. 1.0 = sphere, <1.0 = oblate (flattened by gravity)
+    pub fn new_ellipsoid(radius: f32, subdivision_level: u32, aspect_ratio: f32) -> Self {
         let segments = 16 * (1 << subdivision_level);
-        let (vertices, indices) = Self::generate_uv_sphere(radius, segments, segments / 2);
+        let (vertices, indices) = Self::generate_uv_ellipsoid(radius, segments, segments / 2, aspect_ratio);
 
         Self {
             vertices,
             indices,
             radius,
             subdivision_level,
+            aspect_ratio,
         }
     }
 
-    /// Generate a UV sphere mesh (latitude/longitude grid)
-    fn generate_uv_sphere(radius: f32, lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+    /// Generate a UV ellipsoid mesh (latitude/longitude grid)
+    /// For aspect_ratio = 1.0, generates a perfect sphere
+    /// For aspect_ratio < 1.0, generates an oblate spheroid (flattened at poles)
+    fn generate_uv_ellipsoid(radius: f32, lon_segments: u32, lat_segments: u32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+
+        // Radii: equatorial (x, z) and polar (y)
+        let r_eq = radius;           // equatorial radius
+        let r_pol = radius * aspect_ratio;  // polar radius (smaller for oblate)
+
+        // For ellipsoid normal calculation: n = (x/a², y/b², z/a²) normalized
+        // where a = r_eq, b = r_pol
+        let inv_a2 = 1.0 / (r_eq * r_eq);
+        let inv_b2 = 1.0 / (r_pol * r_pol);
 
         // Generate vertices
         for lat in 0..=lat_segments {
@@ -143,13 +179,17 @@ impl SphereMesh {
                 let sin_phi = phi.sin();
                 let cos_phi = phi.cos();
 
-                // Position on unit sphere
-                let x = sin_theta * cos_phi;
-                let y = cos_theta;
-                let z = sin_theta * sin_phi;
+                // Position on ellipsoid
+                let x = r_eq * sin_theta * cos_phi;
+                let y = r_pol * cos_theta;
+                let z = r_eq * sin_theta * sin_phi;
 
-                let position = Vec3::new(x, y, z) * radius;
-                let normal = Vec3::new(x, y, z);
+                let position = Vec3::new(x, y, z);
+
+                // Normal for ellipsoid: gradient of (x²/a² + y²/b² + z²/a² - 1)
+                // = (2x/a², 2y/b², 2z/a²), normalized
+                let normal = Vec3::new(x * inv_a2, y * inv_b2, z * inv_a2).normalize();
+
                 let uv = [lon as f32 / lon_segments as f32, lat as f32 / lat_segments as f32];
 
                 vertices.push(Vertex::new(position, normal, uv));

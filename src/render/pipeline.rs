@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
-use crate::physics::geometry::{SphereMesh, Vertex};
+use crate::physics::geometry::{SphereMesh, Vertex, bond_number, aspect_ratio_from_bond};
 use crate::render::camera::Camera;
 use crate::export::image_export;
 
@@ -107,6 +107,9 @@ pub struct RenderPipeline {
     drainage_simulator: Option<DrainageSimulator>,
     pub physics_drainage_enabled: bool,
     drainage_time_scale: f32,
+    // Gravity deformation
+    pub deformation_enabled: bool,
+    pub aspect_ratio: f32,  // 1.0 = sphere, <1.0 = oblate (flattened)
 }
 
 impl RenderPipeline {
@@ -366,6 +369,9 @@ impl RenderPipeline {
             drainage_simulator: None,
             physics_drainage_enabled: false,
             drainage_time_scale: 100.0,  // Speed up simulation for visible effect
+            // Gravity deformation (disabled by default)
+            deformation_enabled: false,
+            aspect_ratio: 1.0,  // Perfect sphere
         }
     }
 
@@ -394,8 +400,24 @@ impl RenderPipeline {
             return; // No change or too high
         }
         self.subdivision_level = level;
+        self.regenerate_mesh();
+    }
 
-        let mesh = SphereMesh::new(self.radius, level);
+    /// Set gravity deformation (aspect ratio)
+    /// aspect_ratio: 1.0 = sphere, <1.0 = oblate (flattened at poles)
+    pub fn set_deformation(&mut self, enabled: bool, aspect_ratio: f32) {
+        let new_ratio = if enabled { aspect_ratio.clamp(0.7, 1.0) } else { 1.0 };
+        if (self.aspect_ratio - new_ratio).abs() < 0.001 && self.deformation_enabled == enabled {
+            return; // No significant change
+        }
+        self.deformation_enabled = enabled;
+        self.aspect_ratio = new_ratio;
+        self.regenerate_mesh();
+    }
+
+    /// Regenerate mesh with current parameters (subdivision level, aspect ratio)
+    fn regenerate_mesh(&mut self) {
+        let mesh = SphereMesh::new_ellipsoid(self.radius, self.subdivision_level, self.aspect_ratio);
 
         self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -630,6 +652,10 @@ impl RenderPipeline {
         let mut reset_drainage = false;
         let has_drainage_sim = self.drainage_simulator.is_some();
 
+        // Deformation extraction
+        let mut deformation_enabled = self.deformation_enabled;
+        let mut aspect_ratio = self.aspect_ratio;
+
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
                 ctx,
@@ -673,6 +699,9 @@ impl RenderPipeline {
                 drainage_sim_time,
                 &mut reset_drainage,
                 has_drainage_sim,
+                // Deformation parameters
+                &mut deformation_enabled,
+                &mut aspect_ratio,
             );
         });
 
@@ -741,6 +770,11 @@ impl RenderPipeline {
         // Handle drainage reset request
         if reset_drainage {
             self.reset_drainage(500.0);  // Reset to 500nm
+        }
+
+        // Handle deformation changes
+        if deformation_enabled != self.deformation_enabled || (aspect_ratio - self.aspect_ratio).abs() > 0.001 {
+            self.set_deformation(deformation_enabled, aspect_ratio);
         }
 
         // Handle egui platform output
@@ -998,6 +1032,9 @@ impl RenderPipeline {
         drainage_sim_time: f64,
         reset_drainage: &mut bool,
         has_drainage_sim: bool,
+        // Deformation parameters
+        deformation_enabled: &mut bool,
+        aspect_ratio: &mut f32,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1149,6 +1186,21 @@ impl RenderPipeline {
                         } else {
                             ui.label("Initializing...");
                         }
+                    }
+                });
+
+                ui.collapsing("Gravity Deformation", |ui| {
+                    ui.checkbox(deformation_enabled, "Enable deformation");
+
+                    if *deformation_enabled {
+                        ui.add(egui::Slider::new(aspect_ratio, 0.7..=1.0)
+                            .text("Aspect ratio")
+                            .fixed_decimals(2));
+
+                        ui.separator();
+                        let deform_percent = (1.0 - *aspect_ratio) * 100.0;
+                        ui.label(format!("Flattening: {:.1}%", deform_percent));
+                        ui.label("(1.0 = sphere, <1.0 = oblate)");
                     }
                 });
 
