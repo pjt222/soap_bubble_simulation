@@ -46,11 +46,12 @@ impl BubbleInstance {
         let translation = Mat4::from_translation(bubble.position);
         let model = translation * scale;
 
+        // WGSL mat4x4 constructor takes COLUMNS, so we pass columns not rows
         Self {
-            model_0: model.row(0).to_array(),
-            model_1: model.row(1).to_array(),
-            model_2: model.row(2).to_array(),
-            model_3: model.row(3).to_array(),
+            model_0: model.col(0).to_array(),
+            model_1: model.col(1).to_array(),
+            model_2: model.col(2).to_array(),
+            model_3: model.col(3).to_array(),
             radius: bubble.radius,
             aspect_ratio: bubble.aspect_ratio,
             thickness_nm: bubble.thickness_nm,
@@ -302,15 +303,15 @@ mod tests {
         let bubble = Bubble::new(0, Vec3::new(1.0, 2.0, 3.0), 1.0);
         let instance = BubbleInstance::from_bubble(&bubble);
 
-        // Translation is in the 4th column (index 3) of each row
-        // For a translation*scale matrix with radius=1.0:
-        // row(0) = [sx, 0, 0, tx] → model_0[3] = tx
-        // row(1) = [0, sy, 0, ty] → model_1[3] = ty
-        // row(2) = [0, 0, sz, tz] → model_2[3] = tz
-        // row(3) = [0, 0, 0, 1]   → model_3[3] = 1.0
-        assert!((instance.model_0[3] - 1.0).abs() < 1e-6, "tx should be 1.0");
-        assert!((instance.model_1[3] - 2.0).abs() < 1e-6, "ty should be 2.0");
-        assert!((instance.model_2[3] - 3.0).abs() < 1e-6, "tz should be 3.0");
+        // WGSL expects columns, so we pass columns:
+        // col(0) = [sx, 0, 0, 0]   → model_0
+        // col(1) = [0, sy, 0, 0]   → model_1
+        // col(2) = [0, 0, sz, 0]   → model_2
+        // col(3) = [tx, ty, tz, 1] → model_3
+        // Translation is in model_3 (the 4th column)
+        assert!((instance.model_3[0] - 1.0).abs() < 1e-6, "tx should be 1.0");
+        assert!((instance.model_3[1] - 2.0).abs() < 1e-6, "ty should be 2.0");
+        assert!((instance.model_3[2] - 3.0).abs() < 1e-6, "tz should be 3.0");
         assert!((instance.model_3[3] - 1.0).abs() < 1e-6, "w should be 1.0");
     }
 }

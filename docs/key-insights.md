@@ -1134,3 +1134,70 @@ struct BubbleUniform {
 1. Small visual tweaks (edge smoothing) can significantly improve perceived quality
 2. Providing multiple options lets users choose their preferred aesthetic
 3. The smoothstep function (`3x² - 2x³`) is a standard shader technique for natural-looking transitions
+
+---
+
+## WGSL Matrix Column-Major Convention
+
+### Problem
+
+Instanced rendering showed all bubbles at the same position (appearing as one "shrinking" bubble) despite correct instance data being uploaded.
+
+### Root Cause
+
+**WGSL's `mat4x4` constructor interprets vec4 arguments as columns, not rows.**
+
+```wgsl
+// WGSL interprets these as COLUMNS
+let model_matrix = mat4x4<f32>(
+    instance.model_0,  // column 0
+    instance.model_1,  // column 1
+    instance.model_2,  // column 2
+    instance.model_3,  // column 3
+);
+```
+
+But the Rust code was passing rows:
+
+```rust
+// WRONG: Passing rows
+Self {
+    model_0: model.row(0).to_array(),
+    model_1: model.row(1).to_array(),
+    ...
+}
+```
+
+For a translation matrix, the translation vector is stored in **column 3** (indices [0][3], [1][3], [2][3] in row-major), but appears in **row 3** when accessed by rows. This mismatch caused:
+- Translation to end up in the wrong place
+- All bubbles rendered at/near origin
+- Incorrect scaling
+
+### Solution
+
+Pass columns instead of rows:
+
+```rust
+// CORRECT: Passing columns (matches WGSL expectation)
+Self {
+    model_0: model.col(0).to_array(),
+    model_1: model.col(1).to_array(),
+    model_2: model.col(2).to_array(),
+    model_3: model.col(3).to_array(),
+    ...
+}
+```
+
+Now `model_3` contains `[tx, ty, tz, 1.0]` - the translation vector.
+
+### Additional Fix: Uniform Struct Mismatch
+
+The instanced shader also had a different uniform struct (`FoamUniform`) than the bind group provided (`BubbleUniform`). This caused all uniform values to be misinterpreted. The fix was to use the same struct layout in both shaders.
+
+### Lesson Learned
+
+1. WGSL `mat4x4<f32>(v0, v1, v2, v3)` treats arguments as **columns**, not rows
+2. glam's `Mat4::col(n)` returns column n; use this when passing to WGSL
+3. Translation is in column 3: `mat[3] = vec4(tx, ty, tz, 1.0)`
+4. When sharing bind groups between pipelines, uniform structs must have identical layouts
+5. Always write tests that verify matrix data is in the expected locations

@@ -7,8 +7,11 @@ struct CameraUniform {
     _padding: f32,
 };
 
-// Shared visual parameters for all bubbles
-struct FoamUniform {
+// Must match BubbleUniform from bubble.wgsl (shared bind group)
+struct BubbleUniform {
+    // Visual properties (9 floats)
+    refractive_index: f32,
+    base_thickness_nm: f32,
     time: f32,
     interference_intensity: f32,
     base_alpha: f32,
@@ -16,15 +19,28 @@ struct FoamUniform {
     background_r: f32,
     background_g: f32,
     background_b: f32,
+
+    // Film dynamics parameters (4 floats)
+    film_time: f32,
     swirl_intensity: f32,
     drainage_speed: f32,
     pattern_scale: f32,
+
+    // Bubble position in world space (3 floats) - ignored for instanced rendering
+    position_x: f32,
+    position_y: f32,
+    position_z: f32,
+
+    // Edge smoothing mode (0 = linear, 1 = smoothstep, 2 = power)
     edge_smoothing_mode: u32,
-    _padding: u32,
+    // Padding for 16-byte alignment
+    _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(0) @binding(1) var<uniform> foam: FoamUniform;
+@group(0) @binding(1) var<uniform> bubble: BubbleUniform;
 
 // Per-vertex data (from mesh)
 struct VertexInput {
@@ -207,8 +223,8 @@ fn get_film_thickness(normal: vec3<f32>, base_thickness: f32, time: f32) -> f32 
     let drainage_factor = 0.3 * (1.0 - normal.y) * 0.5;
 
     // Swirling patterns using noise
-    let noise_pos = normal * foam.pattern_scale + vec3<f32>(time * 0.1, 0.0, 0.0);
-    let swirl = fbm(noise_pos, 3) * foam.swirl_intensity * 0.2;
+    let noise_pos = normal * bubble.pattern_scale + vec3<f32>(time * 0.1, 0.0, 0.0);
+    let swirl = fbm(noise_pos, 3) * bubble.swirl_intensity * 0.2;
 
     // Combine factors
     return base_thickness * (1.0 - drainage_factor + swirl);
@@ -227,7 +243,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cos_theta = max(dot(normal, view_dir), 0.001);
 
     // Get film thickness with variation
-    let thickness = get_film_thickness(normal, in.thickness_nm, foam.time);
+    let thickness = get_film_thickness(normal, in.thickness_nm, bubble.time);
 
     // Calculate interference for RGB wavelengths
     let r = interference_for_wavelength(thickness, WAVELENGTH_R, cos_theta, in.refractive_index);
@@ -237,20 +253,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = vec3<f32>(r, g, b);
 
     // Blend with background color
-    let background = vec3<f32>(foam.background_r, foam.background_g, foam.background_b);
-    color = mix(background, color, foam.interference_intensity);
+    let background = vec3<f32>(bubble.background_r, bubble.background_g, bubble.background_b);
+    color = mix(background, color, bubble.interference_intensity);
 
     // Edge smoothing for alpha
     let edge_factor = 1.0 - cos_theta;
     var smooth_edge: f32;
-    if (foam.edge_smoothing_mode == 1u) {
+    if (bubble.edge_smoothing_mode == 1u) {
         smooth_edge = edge_factor * edge_factor * (3.0 - 2.0 * edge_factor);
-    } else if (foam.edge_smoothing_mode == 2u) {
+    } else if (bubble.edge_smoothing_mode == 2u) {
         smooth_edge = pow(edge_factor, 1.5);
     } else {
         smooth_edge = edge_factor;
     }
-    let alpha = foam.base_alpha + foam.edge_alpha * smooth_edge;
+    let alpha = bubble.base_alpha + bubble.edge_alpha * smooth_edge;
 
     return vec4<f32>(color, alpha);
 }
