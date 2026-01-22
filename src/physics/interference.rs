@@ -114,7 +114,7 @@ pub struct FresnelCoefficients {
 /// # Example
 ///
 /// ```
-/// use soap_bubble_simulation::physics::interference::InterferenceCalculator;
+/// use soap_bubble_sim::physics::interference::InterferenceCalculator;
 ///
 /// let calculator = InterferenceCalculator::new(1.33);
 ///
@@ -366,7 +366,7 @@ impl InterferenceCalculator {
     /// # Example
     ///
     /// ```
-    /// use soap_bubble_simulation::physics::interference::InterferenceCalculator;
+    /// use soap_bubble_sim::physics::interference::InterferenceCalculator;
     ///
     /// let calculator = InterferenceCalculator::default_soap_film();
     ///

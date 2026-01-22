@@ -140,7 +140,10 @@ pub struct RenderPipeline {
     foam_simulator: Option<FoamSimulator>,
     foam_renderer: FoamRenderer,
     pub foam_enabled: bool,
+    pub foam_paused: bool,
     foam_time_scale: f32,
+    // Instanced rendering pipeline for multi-bubble foam
+    instanced_pipeline: wgpu::RenderPipeline,
 }
 
 impl RenderPipeline {
@@ -332,6 +335,60 @@ impl RenderPipeline {
             cache: None,
         });
 
+        // Load instanced shader for multi-bubble foam rendering
+        let instanced_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Bubble Instanced Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble_instanced.wgsl").into()),
+        });
+
+        // Create instanced render pipeline with vertex + instance buffers
+        let instanced_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Instanced Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &instanced_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[
+                    Vertex::buffer_layout(),
+                    crate::render::foam_renderer::BubbleInstance::buffer_layout(),
+                ],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &instanced_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Draw both sides of the bubble
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         // Create UV sphere mesh with LOD support (5cm diameter)
         let radius = 0.025;
         let subdivision_level = 3_u32;
@@ -434,11 +491,13 @@ impl RenderPipeline {
             // GPU drainage simulation
             gpu_drainage,
             gpu_drainage_enabled: false,
-            // Foam system (disabled by default)
+            // Foam system (disabled by default, paused by default)
             foam_simulator: None,
             foam_renderer,
             foam_enabled: false,
+            foam_paused: true,
             foam_time_scale: 1.0,
+            instanced_pipeline,
         }
     }
 
@@ -498,6 +557,7 @@ impl RenderPipeline {
 
     /// Enable or disable foam mode.
     pub fn set_foam_enabled(&mut self, enabled: bool) {
+        log::info!("set_foam_enabled({})", enabled);
         self.foam_enabled = enabled;
         if enabled && self.foam_simulator.is_none() {
             self.init_foam_simulator();
@@ -507,7 +567,11 @@ impl RenderPipeline {
     /// Add a bubble to the foam simulation.
     pub fn add_foam_bubble(&mut self, radius: f32) {
         if let Some(ref mut sim) = self.foam_simulator {
+            let before = sim.bubble_count();
             sim.add_random_bubble((radius * 0.8, radius * 1.2));
+            log::info!("Added bubble: {} -> {} bubbles", before, sim.bubble_count());
+        } else {
+            log::warn!("add_foam_bubble called but foam_simulator is None");
         }
     }
 
@@ -855,10 +919,13 @@ impl RenderPipeline {
         // Multi-bubble foam simulation
         if self.foam_enabled {
             if let Some(ref mut sim) = self.foam_simulator {
-                let scaled_dt = dt * self.foam_time_scale;
-                sim.step(scaled_dt);
+                // Only step physics when not paused
+                if !self.foam_paused {
+                    let scaled_dt = dt * self.foam_time_scale;
+                    sim.step(scaled_dt);
+                }
 
-                // Update foam renderer with current bubble positions
+                // Always update renderer to show current state
                 self.foam_renderer.update_from_cluster(&sim.cluster);
                 self.foam_renderer.upload(&self.queue);
             }
@@ -972,6 +1039,7 @@ impl RenderPipeline {
 
         // Foam system extraction
         let mut foam_enabled = self.foam_enabled;
+        let mut foam_paused = self.foam_paused;
         let mut foam_time_scale = self.foam_time_scale;
         let foam_stats = self.foam_stats();
         let mut add_bubble_requested = false;
@@ -1041,6 +1109,7 @@ impl RenderPipeline {
                 &mut marangoni_coeff,
                 // Foam parameters
                 &mut foam_enabled,
+                &mut foam_paused,
                 &mut foam_time_scale,
                 foam_stats,
                 &mut add_bubble_requested,
@@ -1159,6 +1228,7 @@ impl RenderPipeline {
         if foam_enabled != self.foam_enabled {
             self.set_foam_enabled(foam_enabled);
         }
+        self.foam_paused = foam_paused;
         self.foam_time_scale = foam_time_scale;
         if add_bubble_requested {
             self.add_foam_bubble(self.radius * 0.8);
@@ -1242,11 +1312,21 @@ impl RenderPipeline {
                 timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            // Use instanced pipeline for multi-bubble foam, regular pipeline for single bubble
+            if self.foam_enabled && !self.foam_renderer.is_empty() {
+                render_pass.set_pipeline(&self.instanced_pipeline);
+                render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.foam_renderer.instance_buffer().slice(..));
+                render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..self.foam_renderer.instance_count());
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            }
         }
 
         // Render egui (2D overlay - no depth testing needed, renders to resolved swap chain)
@@ -1451,6 +1531,7 @@ impl RenderPipeline {
         marangoni_coeff: &mut f32,
         // Foam parameters
         foam_enabled: &mut bool,
+        foam_paused: &mut bool,
         foam_time_scale: &mut f32,
         foam_stats: (usize, usize),
         add_bubble_requested: &mut bool,
@@ -1698,6 +1779,13 @@ impl RenderPipeline {
                     ui.checkbox(foam_enabled, "Enable foam mode");
 
                     if *foam_enabled {
+                        ui.horizontal(|ui| {
+                            let pause_text = if *foam_paused { "\u{25B6} Start" } else { "\u{23F8} Pause" };
+                            if ui.button(pause_text).clicked() {
+                                *foam_paused = !*foam_paused;
+                            }
+                        });
+
                         ui.add(egui::Slider::new(foam_time_scale, 0.1..=5.0)
                             .text("Time scale")
                             .fixed_decimals(1));

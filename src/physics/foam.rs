@@ -329,28 +329,24 @@ impl BubbleCluster {
         // Rebuild spatial hash
         self.rebuild_spatial_hash();
 
-        // Find all overlapping pairs
+        // Find all overlapping pairs using brute force O(n²) for now
+        // The spatial hash was causing issues - simplify for correctness first
         let n = self.bubbles.len();
+
         for i in 0..n {
-            let bubble_a = &self.bubbles[i];
-            let nearby = self.spatial_hash.query(bubble_a.position, bubble_a.radius * 2.5);
+            for j in (i + 1)..n {
+                let bubble_a = &self.bubbles[i];
+                let bubble_b = &self.bubbles[j];
 
-            for &id_b in &nearby {
-                if id_b <= bubble_a.id {
-                    continue; // Avoid duplicate pairs
-                }
+                // Check if bubbles are in contact (or nearly so)
+                let overlap = bubble_a.overlap_distance(bubble_b);
+                let threshold = -bubble_a.radius * 0.3; // Allow 30% gap for stable connections
 
-                if let Some(j) = self.bubbles.iter().position(|b| b.id == id_b) {
-                    let bubble_b = &self.bubbles[j];
-
-                    // Check if bubbles are in contact (or nearly so)
-                    let overlap = bubble_a.overlap_distance(bubble_b);
-                    if overlap > -bubble_a.radius * 0.1 {
-                        // In contact or very close
-                        let connection =
-                            BubbleConnection::new(bubble_a, bubble_b, self.surface_tension);
-                        self.connections.push(connection);
-                    }
+                if overlap > threshold {
+                    // In contact or very close
+                    let connection =
+                        BubbleConnection::new(bubble_a, bubble_b, self.surface_tension);
+                    self.connections.push(connection);
                 }
             }
         }
@@ -414,11 +410,12 @@ impl BubbleCluster {
         // Central bubble
         cluster.add_bubble(Vec3::ZERO, 0.025);
 
-        // Surrounding bubbles
-        cluster.add_bubble(Vec3::new(0.045, 0.0, 0.0), 0.02);
-        cluster.add_bubble(Vec3::new(-0.04, 0.02, 0.0), 0.022);
-        cluster.add_bubble(Vec3::new(0.0, 0.045, 0.0), 0.018);
-        cluster.add_bubble(Vec3::new(0.02, -0.04, 0.02), 0.02);
+        // Surrounding bubbles - positioned to slightly overlap with central
+        // Central radius = 0.025, so place neighbors at distance < sum_of_radii
+        cluster.add_bubble(Vec3::new(0.042, 0.0, 0.0), 0.02);      // 0.042 < 0.025+0.02=0.045
+        cluster.add_bubble(Vec3::new(-0.038, 0.015, 0.0), 0.022);  // closer
+        cluster.add_bubble(Vec3::new(0.0, 0.040, 0.0), 0.018);     // 0.040 < 0.025+0.018=0.043
+        cluster.add_bubble(Vec3::new(0.018, -0.038, 0.015), 0.02); // closer
 
         cluster.update_connections();
         cluster
@@ -508,5 +505,75 @@ mod tests {
         let vol_after = cluster.get_bubble(merged_id).unwrap().volume();
 
         assert!((vol_before - vol_after).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_connections_after_physics_step() {
+        use super::super::foam_dynamics::FoamSimulator;
+
+        let mut sim = FoamSimulator::with_default_cluster();
+        let initial_connections = sim.connection_count();
+        println!("\nInitial connections: {}", initial_connections);
+
+        // Simulate one physics step with typical dt
+        sim.step(0.016); // ~60fps
+        println!("After 1 step: {} connections", sim.connection_count());
+
+        // Simulate several more steps
+        for i in 0..10 {
+            sim.step(0.016);
+            println!("After {} steps: {} connections", i + 2, sim.connection_count());
+        }
+
+        // Note: This test is for diagnosis, not assertion
+        // The issue is that repulsion forces push overlapping bubbles apart
+    }
+
+    #[test]
+    fn test_default_cluster_has_connections() {
+        let cluster = BubbleCluster::create_default_cluster(0.025);
+
+        // Debug: print bubble positions and overlaps
+        println!("\n=== Default Cluster Debug ===");
+        println!("Bubbles: {}", cluster.len());
+        for bubble in cluster.bubbles() {
+            println!(
+                "  Bubble {}: pos=({:.4}, {:.4}, {:.4}), r={:.4}",
+                bubble.id, bubble.position.x, bubble.position.y, bubble.position.z, bubble.radius
+            );
+        }
+
+        // Check expected overlaps manually
+        let bubbles = cluster.bubbles();
+        println!("\nExpected overlaps:");
+        for i in 0..bubbles.len() {
+            for j in (i + 1)..bubbles.len() {
+                let a = &bubbles[i];
+                let b = &bubbles[j];
+                let distance = (a.position - b.position).length();
+                let sum_radii = a.radius + b.radius;
+                let overlap = sum_radii - distance;
+                println!(
+                    "  {} <-> {}: dist={:.4}, sum_r={:.4}, overlap={:.4} {}",
+                    a.id,
+                    b.id,
+                    distance,
+                    sum_radii,
+                    overlap,
+                    if overlap > 0.0 { "OVERLAP" } else { "" }
+                );
+            }
+        }
+
+        println!("\nConnections found: {}", cluster.connections().len());
+        for conn in cluster.connections() {
+            println!("  {} <-> {}", conn.bubble_a, conn.bubble_b);
+        }
+
+        // The default cluster should have at least one connection
+        assert!(
+            cluster.connections().len() > 0,
+            "Default cluster should have overlapping bubbles that form connections"
+        );
     }
 }

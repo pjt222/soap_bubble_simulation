@@ -302,10 +302,15 @@ mod tests {
         let bubble = Bubble::new(0, Vec3::new(1.0, 2.0, 3.0), 1.0);
         let instance = BubbleInstance::from_bubble(&bubble);
 
-        // Check translation is in the last column (row-major order)
-        // model_3 should be [1.0, 2.0, 3.0, 1.0] for unit scale
-        assert!((instance.model_3[0] - 1.0).abs() < 1e-6);
-        assert!((instance.model_3[1] - 2.0).abs() < 1e-6);
-        assert!((instance.model_3[2] - 3.0).abs() < 1e-6);
+        // Translation is in the 4th column (index 3) of each row
+        // For a translation*scale matrix with radius=1.0:
+        // row(0) = [sx, 0, 0, tx] → model_0[3] = tx
+        // row(1) = [0, sy, 0, ty] → model_1[3] = ty
+        // row(2) = [0, 0, sz, tz] → model_2[3] = tz
+        // row(3) = [0, 0, 0, 1]   → model_3[3] = 1.0
+        assert!((instance.model_0[3] - 1.0).abs() < 1e-6, "tx should be 1.0");
+        assert!((instance.model_1[3] - 2.0).abs() < 1e-6, "ty should be 2.0");
+        assert!((instance.model_2[3] - 3.0).abs() < 1e-6, "tz should be 3.0");
+        assert!((instance.model_3[3] - 1.0).abs() < 1e-6, "w should be 1.0");
     }
 }

@@ -39,9 +39,9 @@ impl FoamSimulator {
             viscosity: 0.001,
             density: 1000.0,
             gravity: Vec3::new(0.0, -9.81, 0.0),
-            van_der_waals_strength: 1e-12,
-            repulsion_stiffness: 100.0,
-            damping: 0.95,
+            van_der_waals_strength: 0.001,
+            repulsion_stiffness: 5.0,
+            damping: 0.8, // Increased damping for stability
             coalescence_enabled: false,
             coalescence_threshold: 0.5,
         }
@@ -128,6 +128,16 @@ impl FoamSimulator {
             force -= direction * repulsion;
         }
 
+        // Contact adhesion force: keeps nearly-touching bubbles in soft contact
+        // Only applies near contact (small overlap or small gap), not deep interpenetration
+        let contact_threshold = sum_radii * 1.2; // 20% tolerance for wider range
+        let min_distance = sum_radii * 0.95; // Only adhesion for shallow overlap (<5%)
+        if distance < contact_threshold && distance > min_distance {
+            let adhesion_strength = 2.0; // Surface-tension-based adhesion
+            let adhesion = adhesion_strength * (contact_threshold - distance);
+            force += direction * adhesion; // Pull towards contact
+        }
+
         // Force on A is opposite to force on B (Newton's third law)
         (force, -force)
     }
@@ -157,6 +167,14 @@ impl FoamSimulator {
             let acceleration = forces[i] / mass;
             bubble.velocity += acceleration * dt;
             bubble.velocity *= self.damping;
+
+            // Clamp velocity to prevent runaway behavior
+            // Max velocity ~0.1 m/s is reasonable for soap bubbles
+            let max_speed = 0.1;
+            let speed = bubble.velocity.length();
+            if speed > max_speed {
+                bubble.velocity *= max_speed / speed;
+            }
 
             // Update position
             bubble.position += bubble.velocity * dt;
@@ -212,10 +230,10 @@ impl FoamSimulator {
     pub fn add_random_bubble(&mut self, radius_range: (f32, f32)) {
         use std::f32::consts::PI;
 
-        // Random position on a sphere around the origin
+        // Random position close to existing bubbles
         let theta = rand_f32() * 2.0 * PI;
         let phi = rand_f32() * PI;
-        let spawn_distance = 0.1; // 10cm from center
+        let spawn_distance = 0.05; // 5cm from center (closer to default cluster)
 
         let position = Vec3::new(
             spawn_distance * phi.sin() * theta.cos(),
@@ -226,6 +244,9 @@ impl FoamSimulator {
         let radius = radius_range.0 + rand_f32() * (radius_range.1 - radius_range.0);
 
         self.cluster.add_bubble(position, radius);
+
+        // Immediately update connections after adding
+        self.cluster.update_connections();
     }
 
     /// Reset the simulation with a new default cluster.

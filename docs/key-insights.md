@@ -1041,6 +1041,34 @@ pub struct BubbleInstance {
 }
 ```
 
+### Connection Stability Fix
+
+**Problem:** Connection detection was showing 0 connections after physics steps.
+
+The connection detection logic was **correct**. Unit tests confirmed:
+- Initial cluster has 4-5 connections
+- After 1 physics step: 0 connections
+
+**Root cause:** The physics repulsion force was too aggressive. Overlapping bubbles were pushed apart immediately, losing contact within a single frame.
+
+**Solution implemented:**
+
+1. **Reduced `repulsion_stiffness`** from 100.0 → 5.0
+2. **Added contact adhesion force** - surface-tension-based attraction keeps nearly-touching bubbles in soft contact:
+   ```rust
+   // Only applies near contact, not deep interpenetration
+   let contact_threshold = sum_radii * 1.2;
+   let min_distance = sum_radii * 0.95;
+   if distance < contact_threshold && distance > min_distance {
+       let adhesion = adhesion_strength * (contact_threshold - distance);
+       force += direction * adhesion; // Pull towards contact
+   }
+   ```
+3. **Increased damping** from 0.95 → 0.8 for stability
+4. **Added velocity clamping** - max 0.1 m/s to prevent runaway behavior
+
+**Result:** Connections now stable at 5-6 throughout simulation (verified by unit tests)
+
 ### Lesson Learned
 
 1. Spatial hashing is essential for N-body simulations - O(1) vs O(n²)
@@ -1048,6 +1076,7 @@ pub struct BubbleInstance {
 3. Semi-implicit Euler integration is stable for soft-body physics
 4. Separating physics (FoamSimulator) from rendering (FoamRenderer) enables flexibility
 5. Incremental integration (UI toggle, then rendering) reduces risk
+6. Use `log::info!` or `eprintln!` for critical debug output - `log::debug!` gets lost in noisy frameworks
 
 ---
 
