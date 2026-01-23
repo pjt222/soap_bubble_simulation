@@ -87,6 +87,10 @@ pub struct RenderPipeline {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    // Unit sphere mesh for foam instanced rendering (radius 1.0)
+    foam_vertex_buffer: wgpu::Buffer,
+    foam_index_buffer: wgpu::Buffer,
+    foam_num_indices: u32,
     camera_buffer: wgpu::Buffer,
     bubble_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -473,6 +477,25 @@ impl RenderPipeline {
 
         let num_indices = mesh.indices.len() as u32;
 
+        // Create unit sphere mesh for foam instanced rendering
+        // Using radius 1.0 so the instance model matrix can scale to correct size
+        use crate::physics::geometry::SphereMesh;
+        let foam_mesh = SphereMesh::new(1.0, 3);
+
+        let foam_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Foam Vertex Buffer"),
+            contents: foam_mesh.vertex_bytes(),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let foam_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Foam Index Buffer"),
+            contents: foam_mesh.index_bytes(),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let foam_num_indices = foam_mesh.indices.len() as u32;
+
         // Initialize egui
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -505,6 +528,9 @@ impl RenderPipeline {
             vertex_buffer,
             index_buffer,
             num_indices,
+            foam_vertex_buffer,
+            foam_index_buffer,
+            foam_num_indices,
             camera_buffer,
             bubble_buffer,
             bind_group,
@@ -1380,13 +1406,14 @@ impl RenderPipeline {
 
             // Use instanced pipeline for multi-bubble foam, regular pipeline for single bubble
             if self.foam_enabled && !self.foam_renderer.is_empty() {
-                // Render bubbles
+                // Render bubbles using unit sphere mesh (radius 1.0)
+                // Instance model matrix scales to correct bubble size
                 render_pass.set_pipeline(&self.instanced_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(0, self.foam_vertex_buffer.slice(..));
                 render_pass.set_vertex_buffer(1, self.foam_renderer.instance_buffer().slice(..));
-                render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..self.foam_renderer.instance_count());
+                render_pass.set_index_buffer(self.foam_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.foam_num_indices, 0, 0..self.foam_renderer.instance_count());
 
                 // Render shared walls (Plateau borders) between touching bubbles
                 if self.shared_wall_renderer.has_walls() {
