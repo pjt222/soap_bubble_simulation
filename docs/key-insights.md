@@ -16,6 +16,11 @@ This document captures important lessons learned during the development of the s
 10. [Marangoni Effect Implementation](#marangoni-effect-implementation)
 11. [Multi-Bubble Foam System](#multi-bubble-foam-system)
 12. [Edge Smoothing Modes](#edge-smoothing-modes)
+13. [WGSL Matrix Column-Major Convention](#wgsl-matrix-column-major-convention)
+14. [Headless Rendering Pipeline for Testing](#headless-rendering-pipeline-for-testing)
+15. [Shared Wall (Plateau Border) Rendering](#shared-wall-plateau-border-rendering)
+16. [Screenshot Comparison Testing](#screenshot-comparison-testing)
+17. [Camera Input Simulation Tests](#camera-input-simulation-tests)
 
 ---
 
@@ -1201,3 +1206,412 @@ The instanced shader also had a different uniform struct (`FoamUniform`) than th
 3. Translation is in column 3: `mat[3] = vec4(tx, ty, tz, 1.0)`
 4. When sharing bind groups between pipelines, uniform structs must have identical layouts
 5. Always write tests that verify matrix data is in the expected locations
+
+---
+
+## Headless Rendering Pipeline for Testing
+
+### Problem
+
+GPU-based rendering requires a window/display to test, making automated testing difficult in CI environments and preventing screenshot-based regression tests.
+
+### Solution
+
+Implement a headless render pipeline that renders to an offscreen texture without requiring a window, then extracts pixel data for verification.
+
+### Architecture
+
+```rust
+pub struct HeadlessRenderPipeline {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    render_texture: wgpu::Texture,       // Offscreen target
+    render_texture_view: wgpu::TextureView,
+    depth_texture_view: wgpu::TextureView,
+    render_pipeline: wgpu::RenderPipeline,
+    // ... buffers and bind groups
+    pub camera: Camera,
+    pub bubble_uniform: BubbleUniform,
+}
+```
+
+### Key Implementation Details
+
+**1. Adapter Without Surface**
+
+Request adapter without requiring a compatible surface:
+
+```rust
+let adapter = instance
+    .request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,  // No surface for headless
+        force_fallback_adapter: false,
+    })
+    .await?;
+```
+
+**2. Offscreen Render Texture**
+
+Create a texture with `RENDER_ATTACHMENT | COPY_SRC` usage:
+
+```rust
+let render_texture = device.create_texture(&wgpu::TextureDescriptor {
+    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    // ...
+});
+```
+
+**3. Pixel Extraction with Alignment**
+
+GPU texture rows must be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT` (256 bytes). Remove padding when reading:
+
+```rust
+pub fn render_to_buffer(&mut self) -> Vec<u8> {
+    self.render();
+
+    // Calculate aligned row size
+    let bytes_per_pixel = 4u32;
+    let unpadded_bytes_per_row = self.width * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+
+    // Copy texture to staging buffer
+    encoder.copy_texture_to_buffer(...);
+
+    // Map and read, removing row padding
+    for row in 0..self.height {
+        let start = (row * padded_bytes_per_row) as usize;
+        let end = start + (self.width * bytes_per_pixel) as usize;
+        pixels.extend_from_slice(&data[start..end]);
+    }
+
+    pixels
+}
+```
+
+**4. Staging Buffer for CPU Read**
+
+GPU textures can't be read directly. Use a staging buffer:
+
+```rust
+let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+    // ...
+});
+
+// Copy texture → buffer
+encoder.copy_texture_to_buffer(texture_info, buffer_info, extent);
+
+// Map buffer for CPU access
+buffer_slice.map_async(wgpu::MapMode::Read, callback);
+device.poll(wgpu::Maintain::Wait);
+let data = buffer_slice.get_mapped_range();
+```
+
+### Lesson Learned
+
+1. Headless rendering requires `compatible_surface: None` in adapter request
+2. Row alignment (256 bytes) must be handled when reading pixel data
+3. Staging buffers are required to read GPU texture data on the CPU
+4. `device.poll(wgpu::Maintain::Wait)` blocks until async operations complete
+5. Graceful fallback (`Option<Self>`) handles systems without GPU
+
+---
+
+## Shared Wall (Plateau Border) Rendering
+
+### Problem
+
+When rendering foam clusters, shared walls between touching bubbles need to be visualized with proper thin-film interference. These walls are curved (spherical caps) due to pressure differences between bubbles.
+
+### Solution
+
+Implement a dedicated wall shader with instanced disk geometry that applies spherical cap displacement based on curvature radius.
+
+### Wall Instance Data
+
+```rust
+#[repr(C)]
+pub struct WallInstance {
+    pub model_0: [f32; 4],    // Model matrix columns
+    pub model_1: [f32; 4],
+    pub model_2: [f32; 4],
+    pub model_3: [f32; 4],
+    pub disk_radius: f32,      // Intersection circle radius
+    pub curvature_radius: f32, // From Young-Laplace equation
+    pub thickness_nm: f32,
+    pub refractive_index: f32,
+}
+```
+
+### Spherical Cap Geometry
+
+The vertex shader displaces flat disk vertices into a spherical cap:
+
+```wgsl
+// Scale vertex position by disk radius
+var local_pos = vertex.position * instance.disk_radius;
+
+// Spherical cap displacement: z = R - sqrt(R² - r²)
+let r_world = radial_dist * instance.disk_radius;
+let R = abs(instance.curvature_radius);
+
+if (R > 0.001 && r_world < R) {
+    var z_displacement = R - sqrt(R * R - r_world * r_world);
+
+    // Curvature sign determines direction
+    if (instance.curvature_radius < 0.0) {
+        z_displacement = -z_displacement;
+    }
+    local_pos.z = z_displacement;
+}
+```
+
+### Sphere-Sphere Intersection Radius
+
+Calculate the radius of the intersection circle where two bubbles meet:
+
+```rust
+pub fn intersection_radius(r_a: f32, r_b: f32, d: f32) -> f32 {
+    // Only valid if bubbles overlap
+    if d >= r_a + r_b || d <= (r_a - r_b).abs() {
+        return 0.0;
+    }
+
+    // From sphere-sphere intersection geometry:
+    // r² = r_a² - x²  where x is distance from center A to intersection plane
+    // x = (d² + r_a² - r_b²) / (2d)
+    let x = (d * d + r_a * r_a - r_b * r_b) / (2.0 * d);
+    (r_a * r_a - x * x).max(0.0).sqrt()
+}
+```
+
+### Orientation Matrix
+
+Build a rotation matrix to align local +Z with the wall normal:
+
+```rust
+pub fn rotation_from_z_to_direction(target: Vec3) -> Mat4 {
+    let z_axis = Vec3::Z;
+    if target.dot(z_axis).abs() > 0.9999 {
+        // Parallel or anti-parallel
+        if target.z > 0.0 {
+            Mat4::IDENTITY
+        } else {
+            Mat4::from_rotation_x(std::f32::consts::PI)
+        }
+    } else {
+        let rotation_axis = z_axis.cross(target).normalize();
+        let angle = z_axis.dot(target).acos();
+        Mat4::from_axis_angle(rotation_axis, angle)
+    }
+}
+```
+
+### Lesson Learned
+
+1. Spherical cap formula: `z = R - sqrt(R² - r²)` for dome displacement
+2. Curvature radius sign indicates direction (toward bubble A or B)
+3. Edge fade (`smoothstep(0.7, 1.0, radial_dist)`) prevents hard cutoffs at disk edges
+4. Double-sided rendering (flip normal based on view direction) handles both faces
+5. Intersection radius calculation comes from sphere-sphere intersection geometry
+
+---
+
+## Screenshot Comparison Testing
+
+### Problem
+
+Visual regression testing for GPU rendering requires comparing rendered output against known-good "golden" images while accounting for acceptable GPU precision differences.
+
+### Solution
+
+Implement a screenshot comparison framework with tolerance for per-pixel color differences and overall change ratio.
+
+### Architecture
+
+```rust
+pub struct ScreenshotComparator {
+    golden_dir: PathBuf,
+    tolerance: f64,          // Fraction of pixels that can differ (0.0-1.0)
+    color_tolerance: u8,     // Per-channel difference threshold
+}
+
+pub enum ComparisonError {
+    NewGoldenCreated(PathBuf),  // First run creates baseline
+    ImagesDiffer { name, diff_ratio, tolerance },
+    DimensionMismatch { expected, actual },
+    LoadError(String),
+}
+```
+
+### Key Implementation Details
+
+**1. Pixel Difference Calculation**
+
+Allow small color differences due to GPU precision:
+
+```rust
+fn pixels_differ(&self, a: &[u8], b: &[u8]) -> bool {
+    // RGBA channels
+    for i in 0..4 {
+        let diff = (a[i] as i16 - b[i] as i16).abs() as u8;
+        if diff > self.color_tolerance {
+            return true;
+        }
+    }
+    false
+}
+```
+
+**2. Automatic Golden Creation**
+
+First test run creates the baseline:
+
+```rust
+pub fn compare(&self, name: &str, actual: &[u8], width: u32, height: u32)
+    -> Result<(), ComparisonError>
+{
+    let golden_path = self.golden_path(name);
+
+    if !golden_path.exists() {
+        // Save as new golden image
+        self.save_image(&golden_path, actual, width, height)?;
+        return Err(ComparisonError::NewGoldenCreated(golden_path));
+    }
+
+    // Load and compare...
+}
+```
+
+**3. Diff Image Generation**
+
+Generate visual diff for debugging failures:
+
+```rust
+fn generate_diff_image(golden: &RgbaImage, actual: &RgbaImage) -> RgbaImage {
+    let mut diff = ImageBuffer::new(width, height);
+    for (x, y, pixel) in diff.enumerate_pixels_mut() {
+        let g = golden.get_pixel(x, y);
+        let a = actual.get_pixel(x, y);
+        if pixels_differ(g, a) {
+            *pixel = Rgba([255, 0, 0, 255]);  // Red for differences
+        } else {
+            *pixel = Rgba([0, 255, 0, 128]);  // Green for matching
+        }
+    }
+    diff
+}
+```
+
+### Test Structure
+
+```rust
+#[test]
+fn test_default_bubble_appearance() {
+    let mut pipeline = pollster::block_on(HeadlessRenderPipeline::new(256, 256))
+        .expect("GPU required");
+
+    let pixels = pipeline.render_to_buffer();
+
+    let comparator = ScreenshotComparator::new(GOLDEN_DIR, 0.01);
+    comparator.compare("default_bubble", &pixels, 256, 256).unwrap();
+}
+```
+
+### Lesson Learned
+
+1. Color tolerance (~5 units) handles GPU precision differences across hardware
+2. First test run creates golden images - commit these to version control
+3. Diff images aid debugging visual regression failures
+4. Low tolerance (1-2%) catches meaningful changes while allowing minor variance
+5. Dimension mismatch is a separate error case - catch it early
+
+---
+
+## Camera Input Simulation Tests
+
+### Problem
+
+Testing camera behavior (orbit, zoom, bounds) requires simulating user input without an actual window or mouse events.
+
+### Solution
+
+Add unit tests that directly call camera methods with various input values and verify expected state changes.
+
+### Test Categories
+
+**1. Orbit Direction Tests**
+
+```rust
+#[test]
+fn test_orbit_increases_yaw() {
+    let mut camera = Camera::new(1.0);
+    let initial_yaw = camera.yaw;
+    camera.orbit(100.0, 0.0);  // Positive X = rotate right
+    assert!(camera.yaw > initial_yaw);
+}
+```
+
+**2. Pitch Clamping Tests**
+
+```rust
+#[test]
+fn test_pitch_clamping_upper() {
+    let mut camera = Camera::new(1.0);
+    camera.orbit(0.0, 10000.0);  // Extreme upward
+    let max_pitch = PI / 2.0 - 0.01;
+    assert!(camera.pitch <= max_pitch, "Pitch should be clamped below PI/2");
+}
+```
+
+**3. Zoom Bounds Tests**
+
+```rust
+#[test]
+fn test_zoom_min_bound() {
+    let mut camera = Camera::new(1.0);
+    camera.zoom(1000.0);  // Extreme zoom in
+    assert!(camera.distance >= 0.05, "Distance should not go below 0.05");
+}
+```
+
+**4. Matrix Validity Tests**
+
+```rust
+#[test]
+fn test_view_matrix_is_valid() {
+    let camera = Camera::new(1.0);
+    let view = camera.view_matrix();
+    let det = view.determinant();
+    assert!(det.abs() > 0.001, "View matrix should be invertible");
+}
+```
+
+**5. Input Sequence Simulation**
+
+```rust
+#[test]
+fn test_input_sequence_simulation() {
+    let mut camera = Camera::new(1.0);
+
+    // Simulate drag: 100px over 10 frames
+    for _ in 0..10 {
+        camera.orbit(10.0, 5.0);
+    }
+
+    // Verify expected final state
+    assert!(camera.yaw > initial_yaw);
+    assert!(camera.pitch > initial_pitch);
+}
+```
+
+### Lesson Learned
+
+1. Direct method testing bypasses windowing system complexity
+2. Extreme values (10000.0) efficiently test clamping behavior
+3. Matrix determinant check validates transform is invertible
+4. Position comparison after orbit verifies the camera actually moved
+5. Sequence tests simulate realistic user interactions

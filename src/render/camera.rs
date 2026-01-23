@@ -138,4 +138,213 @@ mod tests {
         // CameraUniform should be properly aligned for GPU
         assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
     }
+
+    // === Input Simulation Tests (Phase 2) ===
+
+    #[test]
+    fn test_orbit_increases_yaw() {
+        let mut camera = Camera::new(1.0);
+        let initial_yaw = camera.yaw;
+        camera.orbit(100.0, 0.0);
+        assert!(
+            camera.yaw > initial_yaw,
+            "Yaw should increase with positive delta_x"
+        );
+    }
+
+    #[test]
+    fn test_orbit_decreases_yaw() {
+        let mut camera = Camera::new(1.0);
+        let initial_yaw = camera.yaw;
+        camera.orbit(-100.0, 0.0);
+        assert!(
+            camera.yaw < initial_yaw,
+            "Yaw should decrease with negative delta_x"
+        );
+    }
+
+    #[test]
+    fn test_orbit_changes_position() {
+        let mut camera = Camera::new(1.0);
+        let initial_pos = camera.position();
+        camera.orbit(50.0, 50.0);
+        let final_pos = camera.position();
+        assert!(
+            (initial_pos - final_pos).length() > 0.001,
+            "Camera position should change after orbit"
+        );
+    }
+
+    #[test]
+    fn test_pitch_clamping_upper() {
+        let mut camera = Camera::new(1.0);
+        camera.orbit(0.0, 10000.0); // Large upward rotation
+        let max_pitch = PI / 2.0 - 0.01;
+        assert!(
+            camera.pitch <= max_pitch,
+            "Pitch should be clamped below PI/2: got {}",
+            camera.pitch
+        );
+    }
+
+    #[test]
+    fn test_pitch_clamping_lower() {
+        let mut camera = Camera::new(1.0);
+        camera.orbit(0.0, -10000.0); // Large downward rotation
+        let min_pitch = -(PI / 2.0 - 0.01);
+        assert!(
+            camera.pitch >= min_pitch,
+            "Pitch should be clamped above -PI/2: got {}",
+            camera.pitch
+        );
+    }
+
+    #[test]
+    fn test_zoom_in_decreases_distance() {
+        let mut camera = Camera::new(1.0);
+        let initial_distance = camera.distance;
+        camera.zoom(2.0); // Positive delta zooms in
+        assert!(
+            camera.distance < initial_distance,
+            "Distance should decrease when zooming in"
+        );
+    }
+
+    #[test]
+    fn test_zoom_out_increases_distance() {
+        let mut camera = Camera::new(1.0);
+        let initial_distance = camera.distance;
+        camera.zoom(-2.0); // Negative delta zooms out
+        assert!(
+            camera.distance > initial_distance,
+            "Distance should increase when zooming out"
+        );
+    }
+
+    #[test]
+    fn test_zoom_min_bound() {
+        let mut camera = Camera::new(1.0);
+        camera.zoom(1000.0); // Extreme zoom in
+        assert!(
+            camera.distance >= 0.05,
+            "Distance should not go below 0.05: got {}",
+            camera.distance
+        );
+    }
+
+    #[test]
+    fn test_zoom_max_bound() {
+        let mut camera = Camera::new(1.0);
+        camera.zoom(-1000.0); // Extreme zoom out
+        assert!(
+            camera.distance <= 10.0,
+            "Distance should not exceed 10.0: got {}",
+            camera.distance
+        );
+    }
+
+    #[test]
+    fn test_aspect_ratio_update() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        assert!((camera.aspect - 16.0 / 9.0).abs() < 0.001);
+
+        camera.set_aspect(4.0 / 3.0);
+        assert!((camera.aspect - 4.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_view_matrix_is_valid() {
+        let camera = Camera::new(1.0);
+        let view = camera.view_matrix();
+        // View matrix should be invertible (determinant != 0)
+        let det = view.determinant();
+        assert!(det.abs() > 0.001, "View matrix should be invertible");
+    }
+
+    #[test]
+    fn test_projection_matrix_is_valid() {
+        let camera = Camera::new(1.0);
+        let proj = camera.projection_matrix();
+        // Projection matrix should be invertible
+        let det = proj.determinant();
+        assert!(det.abs() > 0.001, "Projection matrix should be invertible");
+    }
+
+    #[test]
+    fn test_input_sequence_simulation() {
+        let mut camera = Camera::new(1.0);
+        let initial_pos = camera.position();
+
+        // Simulate a drag sequence: move right 100px in 10 steps
+        for _ in 0..10 {
+            camera.orbit(10.0, 5.0);
+        }
+
+        // Simulate zoom
+        camera.zoom(2.0);
+
+        // Verify final state
+        let final_pos = camera.position();
+
+        // Position should have changed
+        assert!(
+            (initial_pos - final_pos).length() > 0.01,
+            "Camera should have moved significantly"
+        );
+
+        // Camera position should still be at camera.distance from target
+        let distance_from_target = (final_pos - camera.target).length();
+        assert!(
+            (distance_from_target - camera.distance).abs() < 0.001,
+            "Camera should remain at correct distance from target"
+        );
+    }
+
+    #[test]
+    fn test_orbit_360_degrees() {
+        let mut camera = Camera::new(1.0);
+
+        // Full 360 degree rotation should bring camera back near original position
+        let initial_pos = camera.position();
+
+        // 360 degrees = 2*PI radians, orbit sensitivity is 0.01
+        // So we need delta_x such that delta_x * 0.01 = 2*PI
+        // delta_x = 2*PI / 0.01 = ~628
+        for _ in 0..628 {
+            camera.orbit(1.0, 0.0);
+        }
+
+        let final_pos = camera.position();
+
+        // Should be approximately back to start
+        assert!(
+            (initial_pos - final_pos).length() < 0.1,
+            "360 degree rotation should return to approximate start position"
+        );
+    }
+
+    #[test]
+    fn test_camera_uniform_contents() {
+        let camera = Camera::new(1.0);
+        let uniform = camera.uniform();
+
+        // Camera position should match
+        let pos = camera.position();
+        assert!((uniform.camera_pos[0] - pos.x).abs() < 0.001);
+        assert!((uniform.camera_pos[1] - pos.y).abs() < 0.001);
+        assert!((uniform.camera_pos[2] - pos.z).abs() < 0.001);
+
+        // View-projection matrix should match
+        let vp = camera.view_projection_matrix();
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (uniform.view_proj[i][j] - vp.col(i)[j]).abs() < 0.001,
+                    "View-projection matrix mismatch at [{},{}]",
+                    i,
+                    j
+                );
+            }
+        }
+    }
 }

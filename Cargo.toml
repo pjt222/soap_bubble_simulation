@@ -34,6 +34,9 @@ egui = "0.31"
 egui-wgpu = "0.31"
 egui-winit = "0.31"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
 [profile.release]
 opt-level = 3
 lto = true

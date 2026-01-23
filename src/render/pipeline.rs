@@ -6,11 +6,11 @@ use std::path::Path;
 
 use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
-use crate::physics::geometry::{LodMeshCache, SphereMesh, Vertex};
+use crate::physics::geometry::{LodMeshCache, Vertex};
 use crate::physics::foam_dynamics::FoamSimulator;
 use crate::render::camera::Camera;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
-use crate::render::foam_renderer::FoamRenderer;
+use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
 use crate::export::image_export;
 
 /// Bubble-specific uniform data
@@ -144,6 +144,9 @@ pub struct RenderPipeline {
     foam_time_scale: f32,
     // Instanced rendering pipeline for multi-bubble foam
     instanced_pipeline: wgpu::RenderPipeline,
+    // Wall rendering for Plateau borders between bubbles
+    wall_pipeline: wgpu::RenderPipeline,
+    shared_wall_renderer: SharedWallRenderer,
 }
 
 impl RenderPipeline {
@@ -389,6 +392,63 @@ impl RenderPipeline {
             cache: None,
         });
 
+        // Load wall shader for Plateau border rendering
+        let wall_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Wall Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wall.wgsl").into()),
+        });
+
+        // Create wall render pipeline (double-sided, no culling)
+        let wall_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Wall Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &wall_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[
+                    WallVertex::buffer_layout(),
+                    WallInstance::buffer_layout(),
+                ],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &wall_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Double-sided rendering for walls
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Initialize shared wall renderer
+        let shared_wall_renderer = SharedWallRenderer::new(&device, 128);
+
         // Create UV sphere mesh with LOD support (5cm diameter)
         let radius = 0.025;
         let subdivision_level = 3_u32;
@@ -498,6 +558,8 @@ impl RenderPipeline {
             foam_paused: true,
             foam_time_scale: 1.0,
             instanced_pipeline,
+            wall_pipeline,
+            shared_wall_renderer,
         }
     }
 
@@ -582,12 +644,12 @@ impl RenderPipeline {
         }
     }
 
-    /// Get foam statistics (bubble count, connections).
-    pub fn foam_stats(&self) -> (usize, usize) {
+    /// Get foam statistics (bubble count, connections, walls).
+    pub fn foam_stats(&self) -> (usize, usize, usize) {
         if let Some(ref sim) = self.foam_simulator {
-            (sim.bubble_count(), sim.connection_count())
+            (sim.bubble_count(), sim.connection_count(), self.shared_wall_renderer.instance_count() as usize)
         } else {
-            (0, 0)
+            (0, 0, 0)
         }
     }
 
@@ -928,6 +990,10 @@ impl RenderPipeline {
                 // Always update renderer to show current state
                 self.foam_renderer.update_from_cluster(&sim.cluster);
                 self.foam_renderer.upload(&self.queue);
+
+                // Generate and upload shared wall (Plateau border) instances
+                self.shared_wall_renderer.generate_walls(&sim.cluster);
+                self.shared_wall_renderer.upload(&self.queue);
             }
         }
 
@@ -1041,7 +1107,7 @@ impl RenderPipeline {
         let mut foam_enabled = self.foam_enabled;
         let mut foam_paused = self.foam_paused;
         let mut foam_time_scale = self.foam_time_scale;
-        let foam_stats = self.foam_stats();
+        let foam_stats = self.foam_stats();  // (bubbles, connections, walls)
         let mut add_bubble_requested = false;
         let mut reset_foam_requested = false;
 
@@ -1314,12 +1380,27 @@ impl RenderPipeline {
 
             // Use instanced pipeline for multi-bubble foam, regular pipeline for single bubble
             if self.foam_enabled && !self.foam_renderer.is_empty() {
+                // Render bubbles
                 render_pass.set_pipeline(&self.instanced_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 render_pass.set_vertex_buffer(1, self.foam_renderer.instance_buffer().slice(..));
                 render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..self.foam_renderer.instance_count());
+
+                // Render shared walls (Plateau borders) between touching bubbles
+                if self.shared_wall_renderer.has_walls() {
+                    render_pass.set_pipeline(&self.wall_pipeline);
+                    render_pass.set_bind_group(0, &self.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, self.shared_wall_renderer.vertex_buffer().slice(..));
+                    render_pass.set_vertex_buffer(1, self.shared_wall_renderer.instance_buffer().slice(..));
+                    render_pass.set_index_buffer(self.shared_wall_renderer.index_buffer().slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(
+                        0..self.shared_wall_renderer.num_mesh_indices(),
+                        0,
+                        0..self.shared_wall_renderer.instance_count()
+                    );
+                }
             } else {
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
@@ -1380,15 +1461,15 @@ impl RenderPipeline {
 
             // Copy texture to buffer
             encoder.copy_texture_to_buffer(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyBuffer {
+                wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
-                    layout: wgpu::ImageDataLayout {
+                    layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_bytes_per_row),
                         rows_per_image: Some(self.config.height),
@@ -1533,7 +1614,7 @@ impl RenderPipeline {
         foam_enabled: &mut bool,
         foam_paused: &mut bool,
         foam_time_scale: &mut f32,
-        foam_stats: (usize, usize),
+        foam_stats: (usize, usize, usize),  // (bubbles, connections, walls)
         add_bubble_requested: &mut bool,
         reset_foam_requested: &mut bool,
     ) {
@@ -1793,6 +1874,7 @@ impl RenderPipeline {
                         ui.separator();
                         ui.label(format!("Bubbles: {}", foam_stats.0));
                         ui.label(format!("Connections: {}", foam_stats.1));
+                        ui.label(format!("Walls: {}", foam_stats.2));
 
                         ui.horizontal(|ui| {
                             if ui.button("Add Bubble").clicked() {
@@ -1805,7 +1887,7 @@ impl RenderPipeline {
 
                         ui.separator();
                         ui.label("N-body bubble dynamics");
-                        ui.label("with Van der Waals forces");
+                        ui.label("with Plateau borders");
                     }
                 });
 
@@ -1914,15 +1996,15 @@ impl RenderPipeline {
 
         // Copy texture to buffer
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &output.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &staging_buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),

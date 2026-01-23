@@ -91,7 +91,7 @@ pub struct GPUDrainageSimulator {
     /// Bind groups for alternating buffer access
     bind_groups: [wgpu::BindGroup; 2],
     /// Bind group layout (for potential rebinding)
-    bind_group_layout: wgpu::BindGroupLayout,
+    _bind_group_layout: wgpu::BindGroupLayout,
     /// Current drainage parameters
     params: DrainageParams,
     /// Current simulation time (seconds)
@@ -317,7 +317,7 @@ impl GPUDrainageSimulator {
             params_buffer,
             compute_pipeline,
             bind_groups,
-            bind_group_layout,
+            _bind_group_layout: bind_group_layout,
             params,
             current_time: 0.0,
             enabled: false,
