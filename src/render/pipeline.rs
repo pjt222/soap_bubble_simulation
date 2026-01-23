@@ -2107,3 +2107,74 @@ impl RenderPipeline {
         (self.config.width, self.config.height)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bubble_uniform_default_values() {
+        let uniform = BubbleUniform::default();
+
+        // Visual properties
+        assert!((uniform.refractive_index - 1.33).abs() < 1e-6, "refractive_index");
+        assert!((uniform.base_thickness_nm - 500.0).abs() < 1e-6, "base_thickness_nm");
+        assert!((uniform.interference_intensity - 4.0).abs() < 1e-6, "interference_intensity");
+        assert!((uniform.base_alpha - 0.3).abs() < 1e-6, "base_alpha");
+        assert!((uniform.edge_alpha - 0.6).abs() < 1e-6, "edge_alpha");
+
+        // Film dynamics - these are critical for animation
+        assert!((uniform.film_time - 0.0).abs() < 1e-6, "film_time should start at 0");
+        assert!((uniform.swirl_intensity - 1.0).abs() < 1e-6, "swirl_intensity");
+        assert!((uniform.drainage_speed - 0.5).abs() < 1e-6, "drainage_speed");
+        assert!((uniform.pattern_scale - 1.0).abs() < 1e-6, "pattern_scale");
+    }
+
+    #[test]
+    fn test_bubble_uniform_film_dynamics_present() {
+        // Verify all film dynamics fields exist and are accessible
+        let mut uniform = BubbleUniform::default();
+
+        // These should compile and be modifiable
+        uniform.film_time = 10.0;
+        uniform.swirl_intensity = 2.0;
+        uniform.drainage_speed = 0.5;
+        uniform.pattern_scale = 3.0;
+
+        assert!((uniform.film_time - 10.0).abs() < 1e-6);
+        assert!((uniform.swirl_intensity - 2.0).abs() < 1e-6);
+        assert!((uniform.drainage_speed - 0.5).abs() < 1e-6);
+        assert!((uniform.pattern_scale - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bubble_uniform_size_alignment() {
+        // Verify struct is properly aligned for GPU
+        // Total size should be 80 bytes (20 floats = 80 bytes)
+        assert_eq!(
+            std::mem::size_of::<BubbleUniform>(),
+            80,
+            "BubbleUniform should be 80 bytes for GPU alignment"
+        );
+    }
+
+    #[test]
+    fn test_bubble_uniform_field_offsets() {
+        // Verify critical fields are at expected offsets for shader compatibility
+        use std::mem::offset_of;
+
+        // Visual properties (first 9 floats = 36 bytes)
+        assert_eq!(offset_of!(BubbleUniform, refractive_index), 0);
+        assert_eq!(offset_of!(BubbleUniform, base_thickness_nm), 4);
+        assert_eq!(offset_of!(BubbleUniform, time), 8);
+        assert_eq!(offset_of!(BubbleUniform, interference_intensity), 12);
+        assert_eq!(offset_of!(BubbleUniform, base_alpha), 16);
+        assert_eq!(offset_of!(BubbleUniform, edge_alpha), 20);
+
+        // Film dynamics (floats 10-13, bytes 36-52)
+        assert_eq!(offset_of!(BubbleUniform, film_time), 36);
+        assert_eq!(offset_of!(BubbleUniform, swirl_intensity), 40);
+        assert_eq!(offset_of!(BubbleUniform, drainage_speed), 44);
+        assert_eq!(offset_of!(BubbleUniform, pattern_scale), 48);
+    }
+}

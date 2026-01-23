@@ -84,12 +84,23 @@ cargo run --release -- --config path/to/config.json
 cargo run --release -- --thickness 600 --diameter 0.08
 ```
 
-### WSL2 Users
+### WSL2 / WSLg Users
+
+WSLg (Windows Subsystem for Linux GUI) is recommended for running the simulation on Windows.
 
 ```bash
-# Set X11 backend explicitly
-WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 ./target/release/soap-bubble-sim
+# Recommended: Run with WSLg (Wayland) - requires XDG_RUNTIME_DIR
+XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir cargo run --release
+
+# Alternative: Force X11 backend (if Wayland fails)
+WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 cargo run --release
+
+# If WSLg isn't available, use an X server (VcXsrv, X410):
+export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0
+cargo run --release
 ```
+
+**Note:** WSLg uses software rendering (llvmpipe) which may cause occasional connection drops. If the app crashes unexpectedly, simply restart it.
 
 ### Controls
 
@@ -189,6 +200,26 @@ When integrating egui with a 3D scene using depth testing:
 - The egui renderer's depth format must match the render pass configuration
 - Either both use `Some(Depth32Float)` or both use `None`
 - Mismatch causes validation errors at runtime
+
+### Instanced Rendering for Foam Bubbles
+
+When implementing GPU instancing for multi-bubble foam rendering, several issues arose:
+
+**Double-scaling bug:** The foam bubbles rendered at ~1/40th their correct size because:
+- The vertex buffer mesh had radius 0.025m (from LodMeshCache)
+- The instance model matrix applied another scale of 0.025
+- Result: 0.025 × 0.025 = 0.000625m (nearly invisible)
+
+**Solution:** Create a dedicated **unit sphere mesh** (radius 1.0) for instanced rendering, so the model matrix scale works correctly.
+
+**Shader parity:** The instanced shader must match the single-bubble shader exactly:
+- Use the same **simplex noise** implementation (not simplified hash-based noise)
+- Use `bubble.film_time` (not `bubble.time`) for film dynamics animation
+- Use **7-point spectral sampling** with CIE color matching (not 3-wavelength RGB)
+- Use **reflected** Airy intensity formula: `I = F·sin²(δ/2) / (1 + F·sin²(δ/2))`
+  - Not transmitted: `I = 1 / (1 + F·sin²(δ/2))` which produces nearly uniform colors
+
+**Instance data:** Each bubble passes its own `thickness_nm` and `refractive_index` via instance attributes, while shared parameters (`film_time`, `swirl_intensity`, `drainage_speed`, `pattern_scale`) come from the uniform buffer.
 
 ## References
 

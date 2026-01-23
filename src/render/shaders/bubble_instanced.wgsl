@@ -114,120 +114,233 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 const PI: f32 = 3.14159265358979323846;
 
-// Standard RGB wavelengths (nm)
-const WAVELENGTH_R: f32 = 650.0;
-const WAVELENGTH_G: f32 = 532.0;
-const WAVELENGTH_B: f32 = 450.0;
-
 // ============================================================================
-// Thin-Film Interference (Airy Formula)
+// Thin-Film Interference (matches bubble.wgsl)
 // ============================================================================
 
-// Snell's law: compute transmission angle cosine
-fn snells_law_cos_theta_t(cos_theta_i: f32, n_ratio: f32) -> f32 {
-    let sin_theta_i_sq = 1.0 - cos_theta_i * cos_theta_i;
-    let sin_theta_t_sq = sin_theta_i_sq * n_ratio * n_ratio;
-
-    if (sin_theta_t_sq > 1.0) {
-        return 0.0; // Total internal reflection
-    }
-
-    return sqrt(1.0 - sin_theta_t_sq);
-}
-
-// Fresnel reflectance (Schlick approximation)
-fn fresnel_schlick(cos_theta: f32, n_film: f32) -> f32 {
+// Snell's law: calculate transmission angle cosine
+fn snells_law(cos_theta_i: f32, n_film: f32) -> f32 {
     let n_air = 1.0;
-    let r0 = ((n_air - n_film) / (n_air + n_film)) * ((n_air - n_film) / (n_air + n_film));
-    return r0 + (1.0 - r0) * pow(1.0 - cos_theta, 5.0);
+    let sin_theta_i = sqrt(max(0.0, 1.0 - cos_theta_i * cos_theta_i));
+    let sin_theta_t = sin_theta_i * n_air / n_film;
+    return sqrt(max(0.0, 1.0 - sin_theta_t * sin_theta_t));
 }
 
-// Airy formula for thin-film interference intensity
-fn airy_intensity(delta: f32, reflectance: f32) -> f32 {
-    let F = 4.0 * reflectance / ((1.0 - reflectance) * (1.0 - reflectance));
-    let sin_half_delta = sin(delta / 2.0);
-    return 1.0 / (1.0 + F * sin_half_delta * sin_half_delta);
+// Full Fresnel equations with s and p polarization
+fn fresnel_full(cos_theta_i: f32, cos_theta_t: f32, n1: f32, n2: f32) -> vec2<f32> {
+    let n1_cos_i = n1 * cos_theta_i;
+    let n2_cos_t = n2 * cos_theta_t;
+    let r_s_num = n1_cos_i - n2_cos_t;
+    let r_s_den = n1_cos_i + n2_cos_t;
+    let r_s = r_s_num / max(r_s_den, 0.0001);
+
+    let n2_cos_i = n2 * cos_theta_i;
+    let n1_cos_t = n1 * cos_theta_t;
+    let r_p_num = n2_cos_i - n1_cos_t;
+    let r_p_den = n2_cos_i + n1_cos_t;
+    let r_p = r_p_num / max(r_p_den, 0.0001);
+
+    return vec2<f32>(r_s * r_s, r_p * r_p);
 }
 
-// Full interference calculation for one wavelength
-fn interference_for_wavelength(
-    thickness_nm: f32,
-    wavelength: f32,
-    cos_theta_i: f32,
-    n_film: f32
-) -> f32 {
-    let n_ratio = 1.0 / n_film;
-    let cos_theta_t = snells_law_cos_theta_t(cos_theta_i, n_ratio);
+// Unpolarized Fresnel reflectance (average of s and p)
+fn fresnel_unpolarized(cos_theta_i: f32, cos_theta_t: f32, n1: f32, n2: f32) -> f32 {
+    let R = fresnel_full(cos_theta_i, cos_theta_t, n1, n2);
+    return (R.x + R.y) * 0.5;
+}
 
-    // Optical path difference
+// Calculate finesse coefficient F from reflectance
+fn finesse_coefficient(reflectance: f32) -> f32 {
+    let one_minus_r = max(1.0 - reflectance, 0.001);
+    return 4.0 * reflectance / (one_minus_r * one_minus_r);
+}
+
+// Airy formula for multi-bounce interference
+fn airy_interference(phase: f32, reflectance: f32) -> f32 {
+    let F = finesse_coefficient(reflectance);
+    let sin_half_phase = sin(phase * 0.5);
+    let sin2 = sin_half_phase * sin_half_phase;
+    let numerator = F * sin2;
+    let denominator = 1.0 + F * sin2;
+    return numerator / max(denominator, 0.001);
+}
+
+// CIE 1931 color matching functions (Gaussian approximation)
+fn cie_color_matching(wavelength: f32) -> vec3<f32> {
+    let x = 1.056 * exp(-0.5 * pow((wavelength - 599.8) / 37.9, 2.0))
+          + 0.362 * exp(-0.5 * pow((wavelength - 442.0) / 16.0, 2.0))
+          - 0.065 * exp(-0.5 * pow((wavelength - 501.1) / 20.4, 2.0));
+    let y = 0.821 * exp(-0.5 * pow((wavelength - 568.8) / 46.9, 2.0))
+          + 0.286 * exp(-0.5 * pow((wavelength - 530.9) / 31.1, 2.0));
+    let z = 1.217 * exp(-0.5 * pow((wavelength - 437.0) / 11.8, 2.0))
+          + 0.681 * exp(-0.5 * pow((wavelength - 459.0) / 26.0, 2.0));
+    return vec3<f32>(max(x, 0.0), max(y, 0.0), max(z, 0.0));
+}
+
+// Convert XYZ to linear sRGB
+fn xyz_to_rgb(xyz: vec3<f32>) -> vec3<f32> {
+    let r =  3.2404542 * xyz.x - 1.5371385 * xyz.y - 0.4985314 * xyz.z;
+    let g = -0.9692660 * xyz.x + 1.8760108 * xyz.y + 0.0415560 * xyz.z;
+    let b =  0.0556434 * xyz.x - 0.2040259 * xyz.y + 1.0572252 * xyz.z;
+    return vec3<f32>(r, g, b);
+}
+
+// Calculate thin-film interference color using 7-point spectral sampling
+fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec3<f32> {
+    let wavelengths = array<f32, 7>(400.0, 450.0, 500.0, 550.0, 600.0, 650.0, 700.0);
+
+    // Transmission angle from Snell's law
+    let cos_theta_t = snells_law(cos_theta, n_film);
+
+    // Full Fresnel reflection with polarization
+    let fresnel = fresnel_unpolarized(cos_theta, cos_theta_t, 1.0, n_film);
+
+    // Optical path
     let optical_path = 2.0 * n_film * thickness_nm * cos_theta_t;
 
-    // Phase difference (including π shift from reflection at denser medium)
-    let delta = 2.0 * PI * optical_path / wavelength + PI;
+    // Accumulate XYZ tristimulus values
+    var xyz = vec3<f32>(0.0);
 
-    // Fresnel reflectance
-    let R = fresnel_schlick(cos_theta_i, n_film);
+    for (var i = 0u; i < 7u; i = i + 1u) {
+        let wavelength = wavelengths[i];
+        let phase = 2.0 * PI * optical_path / wavelength + PI;
+        let intensity = airy_interference(phase, fresnel);
+        let cie = cie_color_matching(wavelength);
+        xyz = xyz + cie * intensity;
+    }
 
-    return airy_intensity(delta, R);
+    // Normalize and convert to RGB
+    xyz = xyz / 7.0;
+    var rgb = xyz_to_rgb(xyz);
+    rgb = rgb * bubble.interference_intensity;
+    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // ============================================================================
-// Simplex Noise (simplified 3D version)
+// Simplex Noise Implementation (3D) - matches bubble.wgsl
+// Based on Stefan Gustavson's implementation, adapted for WGSL
 // ============================================================================
 
-fn hash(p: vec3<f32>) -> f32 {
-    var p3 = fract(p * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+// Permutation polynomial hash
+fn permute(x: vec4<f32>) -> vec4<f32> {
+    return ((x * 34.0 + 1.0) * x) % 289.0;
 }
 
-fn noise_3d(p: vec3<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-
-    return mix(
-        mix(mix(hash(i + vec3<f32>(0.0, 0.0, 0.0)),
-                hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
-            mix(hash(i + vec3<f32>(0.0, 1.0, 0.0)),
-                hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
-        mix(mix(hash(i + vec3<f32>(0.0, 0.0, 1.0)),
-                hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
-            mix(hash(i + vec3<f32>(0.0, 1.0, 1.0)),
-                hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y),
-        u.z
-    );
+fn taylor_inv_sqrt(r: vec4<f32>) -> vec4<f32> {
+    return 1.79284291400159 - 0.85373472095314 * r;
 }
 
-fn fbm(p: vec3<f32>, octaves: i32) -> f32 {
+// 3D Simplex noise
+fn simplex_noise_3d(v: vec3<f32>) -> f32 {
+    let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
+    let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);
+
+    // First corner
+    var i = floor(v + dot(v, vec3<f32>(C.y)));
+    let x0 = v - i + dot(i, vec3<f32>(C.x));
+
+    // Other corners
+    let g = step(x0.yzx, x0.xyz);
+    let l = 1.0 - g;
+    let i1 = min(g.xyz, l.zxy);
+    let i2 = max(g.xyz, l.zxy);
+
+    let x1 = x0 - i1 + C.x;
+    let x2 = x0 - i2 + C.y;
+    let x3 = x0 - D.yyy;
+
+    // Permutations
+    i = i % 289.0;
+    let p = permute(permute(permute(
+        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
+      + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
+      + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
+
+    // Gradients: 7x7 points over a square, mapped onto an octahedron
+    let n_ = 0.142857142857; // 1.0/7.0
+    let ns = n_ * D.wyz - D.xzx;
+
+    let j = p - 49.0 * floor(p * ns.z * ns.z);
+
+    let x_ = floor(j * ns.z);
+    let y_ = floor(j - 7.0 * x_);
+
+    let x = x_ * ns.x + ns.yyyy;
+    let y = y_ * ns.x + ns.yyyy;
+    let h = 1.0 - abs(x) - abs(y);
+
+    let b0 = vec4<f32>(x.xy, y.xy);
+    let b1 = vec4<f32>(x.zw, y.zw);
+
+    let s0 = floor(b0) * 2.0 + 1.0;
+    let s1 = floor(b1) * 2.0 + 1.0;
+    let sh = -step(h, vec4<f32>(0.0));
+
+    let a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    let a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    var p0 = vec3<f32>(a0.xy, h.x);
+    var p1 = vec3<f32>(a0.zw, h.y);
+    var p2 = vec3<f32>(a1.xy, h.z);
+    var p3 = vec3<f32>(a1.zw, h.w);
+
+    // Normalise gradients
+    let norm = taylor_inv_sqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    // Mix final noise value
+    var m = max(0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
+    m = m * m;
+    return 42.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+
+// Fractal Brownian Motion - layered noise for natural patterns
+fn fbm_noise(p: vec3<f32>, octaves: i32) -> f32 {
     var value = 0.0;
     var amplitude = 0.5;
     var frequency = 1.0;
     var pos = p;
 
-    for (var i = 0; i < octaves; i++) {
-        value += amplitude * noise_3d(pos * frequency);
+    for (var i = 0; i < octaves; i = i + 1) {
+        value += amplitude * simplex_noise_3d(pos * frequency);
         amplitude *= 0.5;
         frequency *= 2.0;
     }
-
     return value;
 }
 
 // ============================================================================
-// Film Thickness Variation
+// Film Thickness Calculation (matches bubble.wgsl exactly)
 // ============================================================================
 
-fn get_film_thickness(normal: vec3<f32>, base_thickness: f32, time: f32) -> f32 {
-    // Drainage: film thins at top (normal.y > 0) due to gravity
-    let drainage_factor = 0.3 * (1.0 - normal.y) * 0.5;
+fn get_film_thickness(normal: vec3<f32>, base_thickness: f32) -> f32 {
+    let t = bubble.film_time;
+    let scale = bubble.pattern_scale;
+    let swirl = bubble.swirl_intensity;
 
-    // Swirling patterns using noise
-    let noise_pos = normal * bubble.pattern_scale + vec3<f32>(time * 0.1, 0.0, 0.0);
-    let swirl = fbm(noise_pos, 3) * bubble.swirl_intensity * 0.2;
+    // Animated drainage - film collects at bottom, progresses over time
+    let drain_progress = min(t * bubble.drainage_speed * 0.1, 1.0);
+    let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
 
-    // Combine factors
-    return base_thickness * (1.0 - drainage_factor + swirl);
+    // Organic noise pattern using simplex FBM
+    // Slowly animate the noise field for flowing effect
+    let noise_time = t * 0.08;
+    let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
+    let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
+
+    // Secondary swirling pattern - faster, smaller scale
+    let swirl_angle = t * 0.5;
+    let sx = normal.x * cos(swirl_angle) - normal.z * sin(swirl_angle);
+    let sz = normal.x * sin(swirl_angle) + normal.z * cos(swirl_angle);
+    let swirl_noise = simplex_noise_3d(vec3<f32>(sx, normal.y, sz) * 5.0 + vec3<f32>(t * 0.2)) * swirl * 0.05;
+
+    // Gravity ripples - waves propagating downward (reduced, organic noise dominates)
+    let wave = 0.02 * swirl * sin(normal.y * scale * 8.0 - t * 2.0) * (1.0 - abs(normal.y));
+
+    return base_thickness * (1.0 - drainage + organic_noise + swirl_noise - wave);
 }
 
 // ============================================================================
@@ -236,27 +349,19 @@ fn get_film_thickness(normal: vec3<f32>, base_thickness: f32, time: f32) -> f32 
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Renormalize interpolated normal
     let normal = normalize(in.normal);
+
+    // View direction
     let view_dir = normalize(camera.camera_pos - in.world_pos);
 
-    // Viewing angle (angle from normal)
-    let cos_theta = max(dot(normal, view_dir), 0.001);
+    // Angle between view and surface normal (abs handles back-facing)
+    let cos_theta = abs(dot(view_dir, normal));
 
-    // Get film thickness with variation
-    let thickness = get_film_thickness(normal, in.thickness_nm, bubble.time);
+    // Get film thickness with variation (uses bubble.film_time internally)
+    let thickness = get_film_thickness(normal, in.thickness_nm);
 
-    // Calculate interference for RGB wavelengths
-    let r = interference_for_wavelength(thickness, WAVELENGTH_R, cos_theta, in.refractive_index);
-    let g = interference_for_wavelength(thickness, WAVELENGTH_G, cos_theta, in.refractive_index);
-    let b = interference_for_wavelength(thickness, WAVELENGTH_B, cos_theta, in.refractive_index);
-
-    var color = vec3<f32>(r, g, b);
-
-    // Blend with background color
-    let background = vec3<f32>(bubble.background_r, bubble.background_g, bubble.background_b);
-    color = mix(background, color, bubble.interference_intensity);
-
-    // Edge smoothing for alpha
+    // Alpha: more transparent when looking straight on, more visible at edges
     let edge_factor = 1.0 - cos_theta;
     var smooth_edge: f32;
     if (bubble.edge_smoothing_mode == 1u) {
@@ -268,5 +373,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let alpha = bubble.base_alpha + bubble.edge_alpha * smooth_edge;
 
-    return vec4<f32>(color, alpha);
+    // Black film detection: Newton's black appears when film thins below ~30nm
+    if (thickness < 30.0) {
+        return vec4<f32>(0.02, 0.02, 0.02, alpha * 0.5);
+    }
+
+    // Calculate interference color using spectral sampling
+    let interference_color = thin_film_interference(
+        thickness,
+        cos_theta,
+        in.refractive_index
+    );
+
+    // Base bubble color (slight bluish tint)
+    let base_color = vec3<f32>(0.95, 0.97, 1.0);
+
+    // Combine base with interference
+    let final_color = base_color * 0.1 + interference_color;
+
+    return vec4<f32>(final_color, alpha);
 }

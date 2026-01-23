@@ -712,4 +712,65 @@ mod tests {
         let result = rot.transform_vector3(Vec3::Z);
         assert!((result - (-Vec3::Z)).length() < 1e-5);
     }
+
+    #[test]
+    fn test_instance_captures_film_properties() {
+        // Create bubble with custom film properties
+        let mut bubble = Bubble::new(0, Vec3::new(0.0, 0.0, 0.0), 0.025);
+        bubble.thickness_nm = 600.0;
+        bubble.refractive_index = 1.4;
+
+        let instance = BubbleInstance::from_bubble(&bubble);
+
+        // Verify film properties are captured in instance data
+        assert!(
+            (instance.thickness_nm - 600.0).abs() < 1e-6,
+            "thickness_nm should be 600.0, got {}",
+            instance.thickness_nm
+        );
+        assert!(
+            (instance.refractive_index - 1.4).abs() < 1e-6,
+            "refractive_index should be 1.4, got {}",
+            instance.refractive_index
+        );
+    }
+
+    #[test]
+    fn test_bubble_default_film_properties() {
+        // Verify Bubble has reasonable defaults for film properties
+        let bubble = Bubble::new(0, Vec3::ZERO, 0.025);
+
+        assert!(
+            (bubble.thickness_nm - 500.0).abs() < 1e-6,
+            "Default thickness_nm should be 500.0, got {}",
+            bubble.thickness_nm
+        );
+        assert!(
+            (bubble.refractive_index - 1.33).abs() < 1e-6,
+            "Default refractive_index should be 1.33, got {}",
+            bubble.refractive_index
+        );
+    }
+
+    #[test]
+    fn test_instance_captures_all_bubble_properties() {
+        // Verify all bubble properties are passed to instance
+        let mut bubble = Bubble::new(42, Vec3::new(1.0, 2.0, 3.0), 0.05);
+        bubble.aspect_ratio = 0.8;
+        bubble.thickness_nm = 750.0;
+        bubble.refractive_index = 1.35;
+
+        let instance = BubbleInstance::from_bubble(&bubble);
+
+        // Check all properties
+        assert!((instance.radius - 0.05).abs() < 1e-6, "radius mismatch");
+        assert!((instance.aspect_ratio - 0.8).abs() < 1e-6, "aspect_ratio mismatch");
+        assert!((instance.thickness_nm - 750.0).abs() < 1e-6, "thickness_nm mismatch");
+        assert!((instance.refractive_index - 1.35).abs() < 1e-6, "refractive_index mismatch");
+
+        // Verify translation in model matrix (column 3)
+        assert!((instance.model_3[0] - 1.0).abs() < 1e-6, "translation x mismatch");
+        assert!((instance.model_3[1] - 2.0).abs() < 1e-6, "translation y mismatch");
+        assert!((instance.model_3[2] - 3.0).abs() < 1e-6, "translation z mismatch");
+    }
 }
