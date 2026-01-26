@@ -140,6 +140,51 @@ pub struct FoamParameters {
     /// Physics simulation time scale multiplier
     #[serde(default = "default_time_scale")]
     pub time_scale: f64,
+
+    // Generation parameters
+    /// Positioning mode (0=Random, 1=SimpleCubic, 2=BCC, 3=FCC, 4=HCP, 5=PoissonDisk)
+    #[serde(default)]
+    pub positioning_mode: u8,
+
+    /// Spacing between grid positions (meters)
+    #[serde(default = "default_spacing")]
+    pub spacing: f64,
+
+    /// Jitter amount for lattice positions (0.0 to 1.0)
+    #[serde(default = "default_jitter")]
+    pub jitter: f64,
+
+    /// Size distribution (0=Uniform, 1=Normal, 2=LogNormal, 3=SchulzFlory, 4=Bimodal)
+    #[serde(default)]
+    pub size_distribution: u8,
+
+    /// Mean radius for normal/log-normal distributions (meters)
+    #[serde(default = "default_mean_radius")]
+    pub mean_radius: f64,
+
+    /// Standard deviation for normal distribution (meters)
+    #[serde(default = "default_std_dev")]
+    pub std_dev: f64,
+
+    /// Sigma parameter for log-normal distribution
+    #[serde(default = "default_sigma")]
+    pub sigma: f64,
+
+    /// Polydispersity index for Schulz-Flory (PDI = Mw/Mn, must be > 1)
+    #[serde(default = "default_pdi")]
+    pub pdi: f64,
+
+    /// Ratio of first peak for bimodal distribution (0.0 to 1.0)
+    #[serde(default = "default_bimodal_ratio")]
+    pub bimodal_ratio: f64,
+
+    /// Mean of second peak for bimodal distribution (meters)
+    #[serde(default = "default_bimodal_mean2")]
+    pub bimodal_mean2: f64,
+
+    /// Standard deviation of second peak for bimodal distribution (meters)
+    #[serde(default = "default_bimodal_std2")]
+    pub bimodal_std2: f64,
 }
 
 fn default_max_bubbles() -> u32 {
@@ -170,6 +215,42 @@ fn default_time_scale() -> f64 {
     1.0
 }
 
+fn default_spacing() -> f64 {
+    0.05 // 5cm
+}
+
+fn default_jitter() -> f64 {
+    0.1
+}
+
+fn default_mean_radius() -> f64 {
+    0.022 // 2.2cm
+}
+
+fn default_std_dev() -> f64 {
+    0.005 // 5mm
+}
+
+fn default_sigma() -> f64 {
+    0.3
+}
+
+fn default_pdi() -> f64 {
+    1.5
+}
+
+fn default_bimodal_ratio() -> f64 {
+    0.5
+}
+
+fn default_bimodal_mean2() -> f64 {
+    0.028 // 2.8cm
+}
+
+fn default_bimodal_std2() -> f64 {
+    0.003 // 3mm
+}
+
 impl Default for FoamParameters {
     fn default() -> Self {
         Self {
@@ -182,6 +263,17 @@ impl Default for FoamParameters {
             min_radius: default_min_radius(),
             max_radius: default_max_radius(),
             time_scale: default_time_scale(),
+            positioning_mode: 0,
+            spacing: default_spacing(),
+            jitter: default_jitter(),
+            size_distribution: 0,
+            mean_radius: default_mean_radius(),
+            std_dev: default_std_dev(),
+            sigma: default_sigma(),
+            pdi: default_pdi(),
+            bimodal_ratio: default_bimodal_ratio(),
+            bimodal_mean2: default_bimodal_mean2(),
+            bimodal_std2: default_bimodal_std2(),
         }
     }
 }

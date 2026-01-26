@@ -32,14 +32,27 @@ struct BubbleUniform {
 
     // Edge smoothing mode (0 = linear, 1 = smoothstep, 2 = power)
     edge_smoothing_mode: u32,
+
+    // Branched flow parameters (light focusing through film thickness variations)
+    branched_flow_enabled: u32,
+    branched_flow_intensity: f32,
+    branched_flow_scale: f32,
+    branched_flow_sharpness: f32,
+    // Light direction for branched flow (normalized)
+    light_dir_x: f32,
+    light_dir_y: f32,
+    light_dir_z: f32,
     // Padding for 16-byte alignment
     _padding1: u32,
-    _padding2: u32,
-    _padding3: u32,
 };
+
+// Branched flow texture dimensions
+const BRANCHED_TEX_WIDTH: u32 = 256u;
+const BRANCHED_TEX_HEIGHT: u32 = 128u;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> bubble: BubbleUniform;
+@group(0) @binding(2) var<storage, read> branched_flow_texture: array<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -195,6 +208,77 @@ fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let wave = 0.02 * swirl * sin(normal.y * scale * 8.0 - t * 2.0) * (1.0 - abs(normal.y));
 
     return base * (1.0 - drainage + organic_noise + swirl_noise - wave);
+}
+
+// ============================================================================
+// Branched Flow / Caustic Computation
+// ============================================================================
+
+// Convert normal direction to UV coordinates for branched flow texture sampling
+fn normal_to_branched_uv(n: vec3<f32>) -> vec2<f32> {
+    let phi = atan2(n.z, n.x);  // -PI to PI
+    let theta = acos(clamp(n.y, -1.0, 1.0));  // 0 to PI
+    let u = (phi + 3.14159265) / (2.0 * 3.14159265);  // 0 to 1
+    let v = theta / 3.14159265;  // 0 to 1
+    return vec2<f32>(u, v);
+}
+
+// Sample branched flow texture with bilinear interpolation
+fn sample_branched_flow_texture(uv: vec2<f32>) -> f32 {
+    let fx = uv.x * f32(BRANCHED_TEX_WIDTH - 1u);
+    let fy = uv.y * f32(BRANCHED_TEX_HEIGHT - 1u);
+
+    let x0 = i32(floor(fx));
+    let y0 = i32(floor(fy));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+
+    let width = i32(BRANCHED_TEX_WIDTH);
+    let height = i32(BRANCHED_TEX_HEIGHT);
+
+    // Wrap x (phi is periodic), clamp y
+    let sx0 = ((x0 % width) + width) % width;
+    let sx1 = ((x1 % width) + width) % width;
+    let sy0 = clamp(y0, 0, height - 1);
+    let sy1 = clamp(y1, 0, height - 1);
+
+    let idx00 = u32(sy0 * width + sx0);
+    let idx10 = u32(sy0 * width + sx1);
+    let idx01 = u32(sy1 * width + sx0);
+    let idx11 = u32(sy1 * width + sx1);
+
+    let c00 = branched_flow_texture[idx00];
+    let c10 = branched_flow_texture[idx10];
+    let c01 = branched_flow_texture[idx01];
+    let c11 = branched_flow_texture[idx11];
+
+    let c0 = mix(c00, c10, tx);
+    let c1 = mix(c01, c11, tx);
+    return mix(c0, c1, ty);
+}
+
+// Get branched flow intensity from ray-traced texture
+// The compute shader traces rays from a laser entry point through the film,
+// bending based on thickness gradients, and accumulates intensity in a texture
+fn compute_branched_flow(normal: vec3<f32>, time: f32) -> f32 {
+    if (bubble.branched_flow_enabled == 0u) {
+        return 0.0;
+    }
+
+    // Sample the pre-computed branched flow texture
+    let uv = normal_to_branched_uv(normal);
+    var intensity = sample_branched_flow_texture(uv);
+
+    // Apply intensity scaling
+    intensity *= bubble.branched_flow_intensity;
+
+    // Apply sharpness (power function for contrast)
+    intensity = pow(intensity, bubble.branched_flow_sharpness);
+
+    return clamp(intensity, 0.0, 3.0);
 }
 
 // Snell's law: calculate transmission angle cosine
@@ -374,7 +458,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let base_color = vec3<f32>(0.95, 0.97, 1.0);
 
     // Combine base with interference
-    let final_color = base_color * 0.1 + interference_color;
+    var final_color = base_color * 0.1 + interference_color;
+
+    // Add branched flow effect - bright light filaments within the film
+    let branched_flow = compute_branched_flow(normal, bubble.film_time);
+    if (branched_flow > 0.0) {
+        // Branched flow appears as bright white/gold filaments
+        // Color shifts slightly based on thickness (chromatic caustics)
+        let caustic_hue = vec3<f32>(1.0, 0.95, 0.85); // Warm white
+        let caustic_color = caustic_hue * branched_flow;
+        final_color = final_color + caustic_color;
+    }
 
     return vec4<f32>(final_color, alpha);
 }

@@ -253,6 +253,12 @@ impl FoamSimulator {
     pub fn reset(&mut self) {
         self.cluster = BubbleCluster::create_default_cluster(self.surface_tension);
     }
+
+    /// Reset the simulation with a new cluster generated from parameters.
+    pub fn reset_with_params(&mut self, params: &super::foam_generation::GenerationParams) {
+        let generator = super::foam_generation::FoamGenerator::new(params.clone());
+        self.cluster = generator.generate(self.surface_tension);
+    }
 }
 
 /// Simple pseudo-random number generator (0.0 to 1.0).

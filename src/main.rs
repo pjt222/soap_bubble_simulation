@@ -63,10 +63,11 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // Create window
+        // Create window (start maximized to avoid resize artifacts on WSLg)
         let window_attributes = Window::default_attributes()
             .with_title("Soap Bubble Simulation")
-            .with_inner_size(LogicalSize::new(1280, 720));
+            .with_inner_size(LogicalSize::new(1280, 720))
+            .with_maximized(true);
 
         let window = Arc::new(
             event_loop

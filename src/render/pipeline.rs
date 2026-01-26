@@ -11,6 +11,7 @@ use crate::physics::foam_dynamics::FoamSimulator;
 use crate::render::camera::Camera;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
 use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
+use crate::render::branched_flow::{BranchedFlowSimulator, create_branched_flow_buffer};
 use crate::export::image_export;
 
 /// Bubble-specific uniform data
@@ -41,10 +42,17 @@ pub struct BubbleUniform {
 
     // Edge smoothing mode (0 = linear, 1 = smoothstep, 2 = power)
     pub edge_smoothing_mode: u32,
+    // Branched flow parameters (light focusing through film thickness variations)
+    pub branched_flow_enabled: u32,
+    pub branched_flow_intensity: f32,
+    pub branched_flow_scale: f32,
+    pub branched_flow_sharpness: f32,
+    // Light direction for branched flow (normalized)
+    pub light_dir_x: f32,
+    pub light_dir_y: f32,
+    pub light_dir_z: f32,
     // Padding for 16-byte alignment
     pub _padding1: u32,
-    pub _padding2: u32,
-    pub _padding3: u32,
 }
 
 impl Default for BubbleUniform {
@@ -70,9 +78,16 @@ impl Default for BubbleUniform {
             position_z: 0.0,
             // Edge smoothing (default to smoothstep for smooth edges)
             edge_smoothing_mode: 1,
+            // Branched flow (disabled by default)
+            branched_flow_enabled: 0,
+            branched_flow_intensity: 1.0,
+            branched_flow_scale: 5.0,
+            branched_flow_sharpness: 2.0,
+            // Light direction (default: from upper-right, normalized)
+            light_dir_x: 0.577,  // 1/sqrt(3)
+            light_dir_y: 0.577,
+            light_dir_z: 0.577,
             _padding1: 0,
-            _padding2: 0,
-            _padding3: 0,
         }
     }
 }
@@ -146,11 +161,18 @@ pub struct RenderPipeline {
     pub foam_enabled: bool,
     pub foam_paused: bool,
     foam_time_scale: f32,
+    // Foam generation parameters
+    foam_generation_params: crate::physics::foam_generation::GenerationParams,
     // Instanced rendering pipeline for multi-bubble foam
     instanced_pipeline: wgpu::RenderPipeline,
     // Wall rendering for Plateau borders between bubbles
     wall_pipeline: wgpu::RenderPipeline,
     shared_wall_renderer: SharedWallRenderer,
+    // Caustic / branched flow rendering
+    caustic_renderer: crate::render::caustics::CausticRenderer,
+    // Ray-traced branched flow simulation
+    branched_flow_simulator: BranchedFlowSimulator,
+    branched_flow_buffer: wgpu::Buffer,
 }
 
 impl RenderPipeline {
@@ -213,6 +235,7 @@ impl RenderPipeline {
         surface.configure(&device, &config);
 
         // Default MSAA sample count
+        // Default MSAA sample count
         let msaa_samples = 4_u32;
 
         // Create depth texture (MSAA)
@@ -241,6 +264,9 @@ impl RenderPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create branched flow texture buffer (needed early for bind group)
+        let branched_flow_buffer = create_branched_flow_buffer(&device);
+
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -264,6 +290,17 @@ impl RenderPipeline {
                     },
                     count: None,
                 },
+                // Branched flow texture (storage buffer, read-only in fragment shader)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
             label: Some("bind_group_layout"),
         });
@@ -279,6 +316,10 @@ impl RenderPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: bubble_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: branched_flow_buffer.as_entire_binding(),
                 },
             ],
             label: Some("bind_group"),
@@ -519,6 +560,24 @@ impl RenderPipeline {
         // Initialize foam renderer
         let foam_renderer = FoamRenderer::new(&device, 64);
 
+        // Initialize caustic renderer
+        let caustic_renderer = crate::render::caustics::CausticRenderer::new(
+            &device,
+            &camera_buffer,
+            &bind_group_layout,
+            gpu_drainage.current_thickness_buffer(),
+            surface_format,
+            wgpu::TextureFormat::Depth32Float,
+            msaa_samples,
+        );
+
+        // Initialize branched flow simulator (ray-traced light propagation)
+        let branched_flow_simulator = BranchedFlowSimulator::new(
+            &device,
+            gpu_drainage.current_thickness_buffer(),
+            &branched_flow_buffer,
+        );
+
         Self {
             surface,
             device,
@@ -583,9 +642,13 @@ impl RenderPipeline {
             foam_enabled: false,
             foam_paused: true,
             foam_time_scale: 1.0,
+            foam_generation_params: crate::physics::foam_generation::GenerationParams::default(),
             instanced_pipeline,
             wall_pipeline,
             shared_wall_renderer,
+            caustic_renderer,
+            branched_flow_simulator,
+            branched_flow_buffer,
         }
     }
 
@@ -637,9 +700,17 @@ impl RenderPipeline {
     /// Initialize the foam simulator for multi-bubble mode.
     pub fn init_foam_simulator(&mut self) {
         if self.foam_simulator.is_none() {
-            let simulator = FoamSimulator::with_default_cluster();
+            use crate::physics::foam_generation::FoamGenerator;
+            let generator = FoamGenerator::new(self.foam_generation_params.clone());
+            let cluster = generator.generate(0.025);
+            let mut simulator = FoamSimulator::new(cluster);
+            simulator.cluster.update_connections();
             self.foam_simulator = Some(simulator);
-            log::info!("Foam simulator initialized with default cluster");
+            log::info!(
+                "Foam simulator initialized with {:?} positioning, {:?} sizes",
+                self.foam_generation_params.positioning_mode,
+                self.foam_generation_params.size_distribution
+            );
         }
     }
 
@@ -667,6 +738,28 @@ impl RenderPipeline {
     pub fn reset_foam(&mut self) {
         if let Some(ref mut sim) = self.foam_simulator {
             sim.reset();
+        }
+    }
+
+    /// Regenerate foam with current generation parameters.
+    pub fn regenerate_foam(&mut self) {
+        if let Some(ref mut sim) = self.foam_simulator {
+            sim.reset_with_params(&self.foam_generation_params);
+            log::info!(
+                "Regenerated foam: {} bubbles with {:?} positioning, {:?} sizes",
+                sim.bubble_count(),
+                self.foam_generation_params.positioning_mode,
+                self.foam_generation_params.size_distribution
+            );
+        } else {
+            // Initialize with generation parameters
+            use crate::physics::foam_generation::FoamGenerator;
+            let generator = FoamGenerator::new(self.foam_generation_params.clone());
+            let cluster = generator.generate(0.025);
+            let mut simulator = FoamSimulator::new(cluster);
+            simulator.cluster.update_connections();
+            self.foam_simulator = Some(simulator);
+            log::info!("Foam simulator created with generation parameters");
         }
     }
 
@@ -810,7 +903,11 @@ impl RenderPipeline {
 
     /// Handle window resize
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
+        if new_size.width > 0 && new_size.height > 0 &&
+           (new_size.width != self.config.width || new_size.height != self.config.height) {
+            // Wait for GPU to finish any pending work before recreating resources
+            self.device.poll(wgpu::Maintain::Wait);
+
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
@@ -1129,6 +1226,25 @@ impl RenderPipeline {
         let mut marangoni_enabled = self.gpu_drainage.marangoni_enabled;
         let mut marangoni_coeff = self.gpu_drainage.params().marangoni_coeff;
 
+        // Caustic parameters extraction
+        let mut caustics_enabled = self.caustic_renderer.enabled;
+        let mut caustic_intensity = self.caustic_renderer.params.caustic_intensity;
+        let mut caustic_sharpness = self.caustic_renderer.params.caustic_sharpness;
+        let mut ground_y = self.caustic_renderer.params.ground_y;
+
+        // Branched flow parameters extraction (ray-traced laser through film)
+        let mut branched_flow_enabled = self.branched_flow_simulator.enabled;
+        let mut branched_flow_intensity = self.bubble_uniform.branched_flow_intensity;
+        let mut branched_flow_sharpness = self.bubble_uniform.branched_flow_sharpness;
+        // Laser entry point (spherical coordinates)
+        let entry = self.branched_flow_simulator.params.entry_point;
+        let mut laser_azimuth = entry[2].atan2(entry[0]).to_degrees();
+        let mut laser_elevation = entry[1].asin().to_degrees();
+        // Beam parameters
+        let mut beam_spread = self.branched_flow_simulator.params.spread_angle.to_degrees();
+        let mut bend_strength = self.branched_flow_simulator.params.bend_strength;
+        let mut num_rays = self.branched_flow_simulator.params.num_rays;
+
         // Foam system extraction
         let mut foam_enabled = self.foam_enabled;
         let mut foam_paused = self.foam_paused;
@@ -1136,6 +1252,8 @@ impl RenderPipeline {
         let foam_stats = self.foam_stats();  // (bubbles, connections, walls)
         let mut add_bubble_requested = false;
         let mut reset_foam_requested = false;
+        let mut foam_gen_params = self.foam_generation_params.clone();
+        let mut regenerate_foam_requested = false;
 
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             Self::build_ui_inner(
@@ -1199,6 +1317,20 @@ impl RenderPipeline {
                 // Marangoni parameters
                 &mut marangoni_enabled,
                 &mut marangoni_coeff,
+                // Caustic parameters
+                &mut caustics_enabled,
+                &mut caustic_intensity,
+                &mut caustic_sharpness,
+                &mut ground_y,
+                // Branched flow parameters (ray-traced laser)
+                &mut branched_flow_enabled,
+                &mut branched_flow_intensity,
+                &mut branched_flow_sharpness,
+                &mut laser_azimuth,
+                &mut laser_elevation,
+                &mut beam_spread,
+                &mut bend_strength,
+                &mut num_rays,
                 // Foam parameters
                 &mut foam_enabled,
                 &mut foam_paused,
@@ -1206,6 +1338,9 @@ impl RenderPipeline {
                 foam_stats,
                 &mut add_bubble_requested,
                 &mut reset_foam_requested,
+                // Foam generation parameters
+                &mut foam_gen_params,
+                &mut regenerate_foam_requested,
             );
         });
 
@@ -1316,17 +1451,49 @@ impl RenderPipeline {
             );
         }
 
+        // Handle caustic parameter changes
+        self.caustic_renderer.enabled = caustics_enabled;
+        let caustic_params_changed =
+            (caustic_intensity - self.caustic_renderer.params.caustic_intensity).abs() > 0.001
+            || (caustic_sharpness - self.caustic_renderer.params.caustic_sharpness).abs() > 0.001
+            || (ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001;
+        if caustic_params_changed {
+            self.caustic_renderer.params.caustic_intensity = caustic_intensity;
+            self.caustic_renderer.params.caustic_sharpness = caustic_sharpness;
+            if (ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001 {
+                self.caustic_renderer.set_ground_y(&self.device, ground_y);
+            }
+            self.caustic_renderer.update_params(&self.queue);
+        }
+
+        // Handle branched flow parameter changes (ray-traced laser)
+        self.branched_flow_simulator.enabled = branched_flow_enabled;
+        self.bubble_uniform.branched_flow_enabled = if branched_flow_enabled { 1 } else { 0 };
+        self.bubble_uniform.branched_flow_intensity = branched_flow_intensity;
+        self.bubble_uniform.branched_flow_sharpness = branched_flow_sharpness;
+        // Update laser entry point
+        self.branched_flow_simulator.set_entry_point(laser_azimuth, laser_elevation);
+        // Update beam parameters
+        self.branched_flow_simulator.params.spread_angle = beam_spread.to_radians();
+        self.branched_flow_simulator.params.bend_strength = bend_strength;
+        self.branched_flow_simulator.params.num_rays = num_rays;
+
         // Apply foam parameter changes
         if foam_enabled != self.foam_enabled {
             self.set_foam_enabled(foam_enabled);
         }
         self.foam_paused = foam_paused;
         self.foam_time_scale = foam_time_scale;
+        // Write back foam generation parameters (may have been modified by UI)
+        self.foam_generation_params = foam_gen_params;
         if add_bubble_requested {
             self.add_foam_bubble(self.radius * 0.8);
         }
         if reset_foam_requested {
             self.reset_foam();
+        }
+        if regenerate_foam_requested {
+            self.regenerate_foam();
         }
 
         // Handle egui platform output
@@ -1356,6 +1523,17 @@ impl RenderPipeline {
             // Get frame dt from fps tracking
             let dt = if self.fps > 0.0 { 1.0 / self.fps } else { 1.0 / 60.0 };
             self.gpu_drainage.step(&mut encoder, dt);
+        }
+
+        // Caustic compute pass (after drainage, before render)
+        if self.caustic_renderer.enabled && self.gpu_drainage_enabled {
+            self.caustic_renderer.compute(&mut encoder);
+        }
+
+        // Branched flow compute pass (ray tracing through film)
+        if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
+            self.branched_flow_simulator.step(&mut encoder, self.bubble_uniform.film_time);
+            self.branched_flow_simulator.update_params(&self.queue);
         }
 
         // Update egui buffers
@@ -1434,6 +1612,11 @@ impl RenderPipeline {
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            }
+
+            // Render caustics on ground plane (after bubble, uses additive blending)
+            if self.caustic_renderer.enabled && self.gpu_drainage_enabled {
+                self.caustic_renderer.render(&mut render_pass);
             }
         }
 
@@ -1637,6 +1820,20 @@ impl RenderPipeline {
         // Marangoni parameters
         marangoni_enabled: &mut bool,
         marangoni_coeff: &mut f32,
+        // Caustic parameters
+        caustics_enabled: &mut bool,
+        caustic_intensity: &mut f32,
+        caustic_sharpness: &mut f32,
+        ground_y: &mut f32,
+        // Branched flow parameters (ray-traced laser)
+        branched_flow_enabled: &mut bool,
+        branched_flow_intensity: &mut f32,
+        branched_flow_sharpness: &mut f32,
+        laser_azimuth: &mut f32,
+        laser_elevation: &mut f32,
+        beam_spread: &mut f32,
+        bend_strength: &mut f32,
+        num_rays: &mut u32,
         // Foam parameters
         foam_enabled: &mut bool,
         foam_paused: &mut bool,
@@ -1644,6 +1841,9 @@ impl RenderPipeline {
         foam_stats: (usize, usize, usize),  // (bubbles, connections, walls)
         add_bubble_requested: &mut bool,
         reset_foam_requested: &mut bool,
+        // Foam generation parameters
+        foam_gen_params: &mut crate::physics::foam_generation::GenerationParams,
+        regenerate_foam_requested: &mut bool,
     ) {
         egui::Window::new("Soap Bubble")
             .default_pos([10.0, 10.0])
@@ -1868,6 +2068,86 @@ impl RenderPipeline {
                     ui.label("⚡ Real-time PDE solver");
                 });
 
+                ui.collapsing("Caustics / Branched Flow", |ui| {
+                    // Ground-plane caustics (projected below bubble)
+                    ui.label("Ground Caustics");
+                    ui.checkbox(caustics_enabled, "Enable ground caustics");
+
+                    if *caustics_enabled {
+                        if !*gpu_drainage_enabled {
+                            ui.colored_label(egui::Color32::YELLOW, "⚠ Requires GPU Drainage");
+                        }
+
+                        ui.add(egui::Slider::new(caustic_intensity, 0.5..=5.0)
+                            .text("Intensity")
+                            .fixed_decimals(1));
+
+                        ui.add(egui::Slider::new(caustic_sharpness, 1.0..=3.0)
+                            .text("Sharpness")
+                            .fixed_decimals(1));
+
+                        ui.add(egui::Slider::new(ground_y, -0.15..=-0.05)
+                            .text("Ground height")
+                            .suffix(" m")
+                            .fixed_decimals(2));
+                    }
+
+                    ui.separator();
+
+                    // Ray-traced branched flow (laser propagating WITHIN film)
+                    ui.label("In-Film Laser");
+                    ui.checkbox(branched_flow_enabled, "Enable laser in film");
+
+                    if *branched_flow_enabled {
+                        if !*gpu_drainage_enabled {
+                            ui.colored_label(egui::Color32::YELLOW, "⚠ Requires GPU Drainage");
+                        }
+
+                        ui.label("Injection Point");
+                        ui.add(egui::Slider::new(laser_azimuth, -180.0..=180.0)
+                            .text("Azimuth")
+                            .suffix("°")
+                            .fixed_decimals(0));
+
+                        ui.add(egui::Slider::new(laser_elevation, -90.0..=90.0)
+                            .text("Elevation")
+                            .suffix("°")
+                            .fixed_decimals(0));
+
+                        ui.separator();
+                        ui.label("Beam Properties");
+
+                        ui.add(egui::Slider::new(beam_spread, 1.0..=45.0)
+                            .text("Spread")
+                            .suffix("°")
+                            .fixed_decimals(0));
+
+                        ui.add(egui::Slider::new(bend_strength, 0.1..=20.0)
+                            .text("GRIN bending")
+                            .fixed_decimals(1));
+
+                        ui.add(egui::Slider::new(num_rays, 256..=8192)
+                            .text("Ray count")
+                            .logarithmic(true));
+
+                        ui.separator();
+                        ui.label("Display");
+
+                        ui.add(egui::Slider::new(branched_flow_intensity, 0.1..=5.0)
+                            .text("Brightness")
+                            .fixed_decimals(2));
+
+                        ui.add(egui::Slider::new(branched_flow_sharpness, 0.5..=3.0)
+                            .text("Contrast")
+                            .fixed_decimals(1));
+
+                        ui.separator();
+                        ui.label("Light propagates within");
+                        ui.label("the film layer, bending");
+                        ui.label("toward thicker regions");
+                    }
+                });
+
                 ui.collapsing("Gravity Deformation", |ui| {
                     ui.checkbox(deformation_enabled, "Enable deformation");
 
@@ -1911,6 +2191,151 @@ impl RenderPipeline {
                                 *reset_foam_requested = true;
                             }
                         });
+
+                        ui.separator();
+                        ui.heading("Generation");
+
+                        // Bubble count
+                        let mut bubble_count = foam_gen_params.bubble_count as i32;
+                        if ui.add(egui::Slider::new(&mut bubble_count, 2..=30)
+                            .text("Bubble count")).changed() {
+                            foam_gen_params.bubble_count = bubble_count as u32;
+                        }
+
+                        // Positioning mode dropdown
+                        ui.horizontal(|ui| {
+                            ui.label("Positioning:");
+                            egui::ComboBox::from_id_salt("positioning_mode")
+                                .selected_text(foam_gen_params.positioning_mode.name())
+                                .show_ui(ui, |ui| {
+                                    use crate::physics::foam_generation::PositioningMode;
+                                    for mode in PositioningMode::all() {
+                                        ui.selectable_value(
+                                            &mut foam_gen_params.positioning_mode,
+                                            *mode,
+                                            mode.name()
+                                        );
+                                    }
+                                });
+                        });
+
+                        // Show spacing/jitter for grid modes
+                        use crate::physics::foam_generation::PositioningMode;
+                        let is_grid_mode = matches!(
+                            foam_gen_params.positioning_mode,
+                            PositioningMode::SimpleCubic |
+                            PositioningMode::BodyCenteredCubic |
+                            PositioningMode::FaceCenteredCubic |
+                            PositioningMode::HexagonalClosePacked |
+                            PositioningMode::PoissonDisk
+                        );
+
+                        if is_grid_mode {
+                            ui.add(egui::Slider::new(&mut foam_gen_params.spacing, 0.03..=0.10)
+                                .text("Spacing")
+                                .suffix(" m")
+                                .fixed_decimals(3));
+
+                            ui.add(egui::Slider::new(&mut foam_gen_params.jitter, 0.0..=0.5)
+                                .text("Jitter")
+                                .fixed_decimals(2));
+                        }
+
+                        ui.separator();
+
+                        // Size distribution dropdown
+                        ui.horizontal(|ui| {
+                            ui.label("Size dist:");
+                            egui::ComboBox::from_id_salt("size_distribution")
+                                .selected_text(foam_gen_params.size_distribution.name())
+                                .show_ui(ui, |ui| {
+                                    use crate::physics::foam_generation::SizeDistribution;
+                                    for dist in SizeDistribution::all() {
+                                        ui.selectable_value(
+                                            &mut foam_gen_params.size_distribution,
+                                            *dist,
+                                            dist.name()
+                                        );
+                                    }
+                                });
+                        });
+
+                        // Radius range (always shown)
+                        ui.add(egui::Slider::new(&mut foam_gen_params.min_radius, 0.005..=0.03)
+                            .text("Min radius")
+                            .suffix(" m")
+                            .fixed_decimals(3));
+
+                        ui.add(egui::Slider::new(&mut foam_gen_params.max_radius, 0.02..=0.06)
+                            .text("Max radius")
+                            .suffix(" m")
+                            .fixed_decimals(3));
+
+                        // Context-sensitive sliders based on distribution type
+                        use crate::physics::foam_generation::SizeDistribution;
+                        match foam_gen_params.size_distribution {
+                            SizeDistribution::Normal | SizeDistribution::LogNormal => {
+                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.04)
+                                    .text("Mean radius")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+
+                                if foam_gen_params.size_distribution == SizeDistribution::Normal {
+                                    ui.add(egui::Slider::new(&mut foam_gen_params.std_dev, 0.001..=0.015)
+                                        .text("Std dev")
+                                        .suffix(" m")
+                                        .fixed_decimals(3));
+                                } else {
+                                    ui.add(egui::Slider::new(&mut foam_gen_params.sigma, 0.1..=0.8)
+                                        .text("Sigma")
+                                        .fixed_decimals(2));
+                                }
+                            }
+                            SizeDistribution::SchulzFlory => {
+                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.04)
+                                    .text("Mean radius")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+
+                                ui.add(egui::Slider::new(&mut foam_gen_params.pdi, 1.1..=3.0)
+                                    .text("PDI (Mw/Mn)")
+                                    .fixed_decimals(2));
+                            }
+                            SizeDistribution::Bimodal => {
+                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.03)
+                                    .text("Mean 1")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+
+                                ui.add(egui::Slider::new(&mut foam_gen_params.std_dev, 0.001..=0.01)
+                                    .text("Std 1")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+
+                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_ratio, 0.1..=0.9)
+                                    .text("Ratio")
+                                    .fixed_decimals(2));
+
+                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_mean2, 0.02..=0.05)
+                                    .text("Mean 2")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+
+                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_std2, 0.001..=0.01)
+                                    .text("Std 2")
+                                    .suffix(" m")
+                                    .fixed_decimals(3));
+                            }
+                            SizeDistribution::Uniform => {
+                                // Uniform just uses min/max, already shown above
+                            }
+                        }
+
+                        ui.separator();
+
+                        if ui.button("Regenerate Foam").clicked() {
+                            *regenerate_foam_requested = true;
+                        }
 
                         ui.separator();
                         ui.label("N-body bubble dynamics");

@@ -471,6 +471,11 @@ impl GPUDrainageSimulator {
         &self.thickness_buffers[1 - self.current_buffer]
     }
 
+    /// Alias for current_buffer() - returns thickness buffer for external use.
+    pub fn current_thickness_buffer(&self) -> &wgpu::Buffer {
+        self.current_buffer()
+    }
+
     /// Get grid dimensions.
     pub fn grid_size(&self) -> (u32, u32) {
         (self.params.grid_width, self.params.grid_height)
