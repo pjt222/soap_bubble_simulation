@@ -52,7 +52,7 @@ const BRANCHED_TEX_HEIGHT: u32 = 128u;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> bubble: BubbleUniform;
-@group(0) @binding(2) var<storage, read> branched_flow_texture: array<f32>;
+@group(0) @binding(2) var<storage, read> branched_flow_texture: array<u32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -250,10 +250,11 @@ fn sample_branched_flow_texture(uv: vec2<f32>) -> f32 {
     let idx01 = u32(sy1 * width + sx0);
     let idx11 = u32(sy1 * width + sx1);
 
-    let c00 = branched_flow_texture[idx00];
-    let c10 = branched_flow_texture[idx10];
-    let c01 = branched_flow_texture[idx01];
-    let c11 = branched_flow_texture[idx11];
+    // Decode from fixed-point u32 (encoded as value * 65536.0)
+    let c00 = f32(branched_flow_texture[idx00]) / 65536.0;
+    let c10 = f32(branched_flow_texture[idx10]) / 65536.0;
+    let c01 = f32(branched_flow_texture[idx01]) / 65536.0;
+    let c11 = f32(branched_flow_texture[idx11]) / 65536.0;
 
     let c0 = mix(c00, c10, tx);
     let c1 = mix(c01, c11, tx);

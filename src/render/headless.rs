@@ -8,6 +8,7 @@ use wgpu::util::DeviceExt;
 use crate::physics::geometry::{SphereMesh, Vertex};
 use crate::render::camera::Camera;
 use crate::render::pipeline::BubbleUniform;
+use crate::render::branched_flow::create_branched_flow_buffer;
 
 /// Headless render pipeline for testing without a window
 ///
@@ -131,6 +132,9 @@ impl HeadlessRenderPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create branched flow buffer (needed for shader binding 2)
+        let branched_flow_buffer = create_branched_flow_buffer(&device);
+
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -154,6 +158,16 @@ impl HeadlessRenderPipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
             label: Some("headless_bind_group_layout"),
         });
@@ -169,6 +183,10 @@ impl HeadlessRenderPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: bubble_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: branched_flow_buffer.as_entire_binding(),
                 },
             ],
             label: Some("headless_bind_group"),
