@@ -63,6 +63,33 @@ soap-bubble-sim/
 - **Mouse wheel**: Zoom in/out
 - **Escape**: Exit
 
+## Architecture: Branched Flow & Film Dynamics Sync
+
+The branched flow system traces light rays through the soap film as a 2D waveguide
+(GRIN optics). Rays bend toward thicker regions via `thickness_gradient()`.
+
+**Key insight — dual thickness sources must stay in sync:**
+- The **fragment shader** (`bubble.wgsl`) computes film thickness procedurally:
+  `base * (1 - drainage + fbm_noise + swirl + gravity_ripples)`. This drives the
+  visible iridescent colors.
+- The **compute shader** (`branched_flow_compute.wgsl`) reads a GPU drainage buffer
+  for physical thickness, then applies the *same* noise modulations so ray bending
+  matches the visible surface patterns.
+- Film dynamics parameters (`base_thickness_nm`, `swirl_intensity`, `drainage_speed`,
+  `pattern_scale`) are synced from `BubbleUniform` → `BranchedFlowParams` each frame
+  in `pipeline.rs`.
+
+**Compute shader uses 3 FBM octaves** (vs fragment shader's 4) for performance —
+sufficient for gradient-based ray bending where fine detail averages out.
+
+**Unit consistency:** The drainage buffer stores thickness in meters, scaled by
+`thickness_scale` (1e6) to micrometers. Noise modulations are fractional multipliers
+on the buffer value, so units cancel naturally.
+
+**Struct alignment:** `BranchedFlowParams` is 96 bytes (24 × f32), padded for
+16-byte GPU alignment. The Rust struct and WGSL struct must match exactly — verified
+by `params_struct_size_matches_wgsl_layout` test.
+
 ## Configuration
 
 Parameters in `config/default.json`:

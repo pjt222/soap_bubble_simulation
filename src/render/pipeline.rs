@@ -1477,6 +1477,11 @@ impl RenderPipeline {
         self.branched_flow_simulator.params.spread_angle = beam_spread.to_radians();
         self.branched_flow_simulator.params.bend_strength = bend_strength;
         self.branched_flow_simulator.params.num_rays = num_rays;
+        // Sync film dynamics so branched flow rays bend through the same dynamic landscape
+        self.branched_flow_simulator.params.base_thickness_nm = self.bubble_uniform.base_thickness_nm;
+        self.branched_flow_simulator.params.swirl_intensity = self.bubble_uniform.swirl_intensity;
+        self.branched_flow_simulator.params.drainage_speed = self.bubble_uniform.drainage_speed;
+        self.branched_flow_simulator.params.pattern_scale = self.bubble_uniform.pattern_scale;
 
         // Apply foam parameter changes
         if foam_enabled != self.foam_enabled {
@@ -2122,9 +2127,10 @@ impl RenderPipeline {
                             .suffix("°")
                             .fixed_decimals(0));
 
-                        ui.add(egui::Slider::new(bend_strength, 0.1..=20.0)
+                        ui.add(egui::Slider::new(bend_strength, 0.01..=1.0)
                             .text("GRIN bending")
-                            .fixed_decimals(1));
+                            .logarithmic(true)
+                            .fixed_decimals(3));
 
                         ui.add(egui::Slider::new(num_rays, 256..=8192)
                             .text("Ray count")
@@ -2133,7 +2139,7 @@ impl RenderPipeline {
                         ui.separator();
                         ui.label("Display");
 
-                        ui.add(egui::Slider::new(branched_flow_intensity, 0.1..=5.0)
+                        ui.add(egui::Slider::new(branched_flow_intensity, 0.1..=20.0)
                             .text("Brightness")
                             .fixed_decimals(2));
 
@@ -2575,11 +2581,12 @@ mod tests {
     #[test]
     fn test_bubble_uniform_size_alignment() {
         // Verify struct is properly aligned for GPU
-        // Total size should be 80 bytes (20 floats = 80 bytes)
+        // Total size: 9 visual + 4 film + 3 position + 1 edge_mode + 1 bf_enabled
+        //   + 3 bf_params + 3 light_dir + 1 padding = 25 values * 4 bytes = 100 bytes
         assert_eq!(
             std::mem::size_of::<BubbleUniform>(),
-            80,
-            "BubbleUniform should be 80 bytes for GPU alignment"
+            100,
+            "BubbleUniform should be 100 bytes for GPU alignment"
         );
     }
 

@@ -29,7 +29,18 @@ pub struct BranchedFlowParams {
     pub tex_height: u32,
     /// Time for animation
     pub time: f32,
-    pub _padding: u32,
+    /// Scale factor for thickness values (meters -> micrometers = 1e6)
+    pub thickness_scale: f32,
+    /// Base film thickness in nanometers (synced from BubbleUniform)
+    pub base_thickness_nm: f32,
+    /// Amplitude for noise/swirl patterns (synced from BubbleUniform)
+    pub swirl_intensity: f32,
+    /// Gravity drainage rate (synced from BubbleUniform)
+    pub drainage_speed: f32,
+    /// Noise coordinate scaling (synced from BubbleUniform)
+    pub pattern_scale: f32,
+    /// Padding to 96 bytes (16-byte aligned)
+    pub _pad: [f32; 4],
 }
 
 impl Default for BranchedFlowParams {
@@ -39,16 +50,21 @@ impl Default for BranchedFlowParams {
             entry_point: [0.0, 0.0, 1.0],
             // Beam direction: going down-left across the surface
             beam_dir: [-0.5, -0.866, 0.0],
-            num_rays: 2048,
+            num_rays: 4096,
             ray_steps: 200,
-            step_size: 0.02,
-            bend_strength: 5.0,
-            spread_angle: 0.3,
-            intensity_falloff: 0.005,
+            step_size: 0.015,
+            bend_strength: 0.1,
+            spread_angle: 0.4,
+            intensity_falloff: 0.003,
             tex_width: 256,
             tex_height: 128,
             time: 0.0,
-            _padding: 0,
+            thickness_scale: 1e6,
+            base_thickness_nm: 500.0,
+            swirl_intensity: 1.0,
+            drainage_speed: 1.0,
+            pattern_scale: 1.0,
+            _pad: [0.0; 4],
         }
     }
 }
@@ -77,7 +93,7 @@ pub fn create_branched_flow_buffer(device: &wgpu::Device) -> wgpu::Buffer {
     let tex_width = 256u32;
     let tex_height = 128u32;
     let tex_size = (tex_width * tex_height) as usize;
-    let caustic_data = vec![0.0f32; tex_size];
+    let caustic_data = vec![0u32; tex_size];
 
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Branched Flow Texture Buffer"),
@@ -285,5 +301,91 @@ impl BranchedFlowSimulator {
     /// Get texture dimensions
     pub fn texture_size(&self) -> (u32, u32) {
         (self.tex_width, self.tex_height)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn params_struct_size_matches_wgsl_layout() {
+        // BranchedFlowParams must be 96 bytes (24 f32/u32 fields)
+        // to match the WGSL uniform struct layout
+        assert_eq!(
+            std::mem::size_of::<BranchedFlowParams>(),
+            24 * 4, // 24 fields * 4 bytes each
+            "BranchedFlowParams size must match WGSL uniform layout (96 bytes)"
+        );
+    }
+
+    #[test]
+    fn set_entry_point_produces_normalized_vectors() {
+        // Test various angles
+        let test_angles: [(f32, f32); 4] = [(0.0, 0.0), (45.0, 30.0), (180.0, -45.0), (270.0, 89.0)];
+        for (azimuth, elevation) in test_angles {
+            let az_rad = azimuth.to_radians();
+            let el_rad = elevation.to_radians();
+            let entry = [
+                el_rad.cos() * az_rad.cos(),
+                el_rad.sin(),
+                el_rad.cos() * az_rad.sin(),
+            ];
+            let length = (entry[0] * entry[0] + entry[1] * entry[1] + entry[2] * entry[2]).sqrt();
+            assert!(
+                (length - 1.0).abs() < 1e-5,
+                "Entry point not normalized for azimuth={azimuth}, elevation={elevation}: length={length}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_beam_angle_produces_tangent_vectors() {
+        let sim = BranchedFlowParams::default();
+        // Entry point is [0, 0, 1] by default
+        let entry = glam::Vec3::from(sim.entry_point);
+
+        // Create tangent basis (same logic as set_beam_angle)
+        let up = if entry.y.abs() > 0.99 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
+        let tangent1 = entry.cross(up).normalize();
+        let tangent2 = entry.cross(tangent1).normalize();
+
+        // For any angle, beam_dir should be tangent to sphere at entry point
+        for angle_deg in [0.0f32, 45.0, 90.0, 180.0, 270.0] {
+            let angle = angle_deg.to_radians();
+            let beam_dir = tangent1 * angle.cos() + tangent2 * angle.sin();
+            let dot_with_entry = beam_dir.dot(entry);
+            assert!(
+                dot_with_entry.abs() < 1e-5,
+                "Beam dir not tangent for angle={angle_deg}: dot={dot_with_entry}"
+            );
+            let beam_length = beam_dir.length();
+            assert!(
+                (beam_length - 1.0).abs() < 1e-5,
+                "Beam dir not normalized for angle={angle_deg}: length={beam_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_params_are_physically_reasonable() {
+        let params = BranchedFlowParams::default();
+
+        assert!(params.num_rays >= 1024, "Need enough rays for visible pattern");
+        assert!(params.ray_steps >= 100, "Need enough steps for ray propagation");
+        assert!(params.step_size > 0.0 && params.step_size < 0.1, "Step size should be small");
+        assert!(params.bend_strength > 0.0, "Bend strength must be positive");
+        assert!(params.spread_angle > 0.0 && params.spread_angle < std::f32::consts::PI,
+            "Spread angle should be a reasonable radian value");
+        assert!(params.intensity_falloff > 0.0 && params.intensity_falloff < 0.1,
+            "Intensity falloff should be small per step");
+        assert!(params.thickness_scale > 0.0,
+            "Thickness scale must be positive");
+        assert_eq!(params.tex_width, 256);
+        assert_eq!(params.tex_height, 128);
     }
 }

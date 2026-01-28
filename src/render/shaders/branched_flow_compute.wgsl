@@ -24,12 +24,23 @@ struct BranchedFlowParams {
     tex_height: u32,
     // Time for animation
     time: f32,
-    _padding: u32,
+    // Scale factor for thickness values (meters -> micrometers = 1e6)
+    thickness_scale: f32,
+    // Film dynamics parameters (synced from BubbleUniform)
+    base_thickness_nm: f32,
+    swirl_intensity: f32,
+    drainage_speed: f32,
+    pattern_scale: f32,
+    // Padding to 96 bytes (16-byte aligned)
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: BranchedFlowParams;
 @group(0) @binding(1) var<storage, read> thickness_field: array<f32>;
-@group(0) @binding(2) var<storage, read_write> caustic_texture: array<f32>;
+@group(0) @binding(2) var<storage, read_write> caustic_texture: array<atomic<u32>>;
 
 // Thickness field dimensions (matches GPU drainage grid)
 const THICKNESS_WIDTH: u32 = 128u;
@@ -44,13 +55,138 @@ fn normal_to_uv(n: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u, v);
 }
 
-// Sample thickness at a point on the sphere
+// ============================================================================
+// Simplex Noise Implementation (3D) - ported from bubble.wgsl
+// ============================================================================
+
+fn permute(x: vec4<f32>) -> vec4<f32> {
+    return ((x * 34.0 + 1.0) * x) % 289.0;
+}
+
+fn taylor_inv_sqrt(r: vec4<f32>) -> vec4<f32> {
+    return 1.79284291400159 - 0.85373472095314 * r;
+}
+
+fn simplex_noise_3d(v: vec3<f32>) -> f32 {
+    let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
+    let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);
+
+    var i = floor(v + dot(v, vec3<f32>(C.y)));
+    let x0 = v - i + dot(i, vec3<f32>(C.x));
+
+    let g = step(x0.yzx, x0.xyz);
+    let l = 1.0 - g;
+    let i1 = min(g.xyz, l.zxy);
+    let i2 = max(g.xyz, l.zxy);
+
+    let x1 = x0 - i1 + C.x;
+    let x2 = x0 - i2 + C.y;
+    let x3 = x0 - D.yyy;
+
+    i = i % 289.0;
+    let p = permute(permute(permute(
+        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
+      + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
+      + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
+
+    let n_ = 0.142857142857;
+    let ns = n_ * D.wyz - D.xzx;
+
+    let j = p - 49.0 * floor(p * ns.z * ns.z);
+
+    let x_ = floor(j * ns.z);
+    let y_ = floor(j - 7.0 * x_);
+
+    let x = x_ * ns.x + ns.yyyy;
+    let y = y_ * ns.x + ns.yyyy;
+    let h = 1.0 - abs(x) - abs(y);
+
+    let b0 = vec4<f32>(x.xy, y.xy);
+    let b1 = vec4<f32>(x.zw, y.zw);
+
+    let s0 = floor(b0) * 2.0 + 1.0;
+    let s1 = floor(b1) * 2.0 + 1.0;
+    let sh = -step(h, vec4<f32>(0.0));
+
+    let a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    let a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    var p0 = vec3<f32>(a0.xy, h.x);
+    var p1 = vec3<f32>(a0.zw, h.y);
+    var p2 = vec3<f32>(a1.xy, h.z);
+    var p3 = vec3<f32>(a1.zw, h.w);
+
+    let norm = taylor_inv_sqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    var m = max(0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
+    m = m * m;
+    return 42.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+
+// Fractal Brownian Motion - 3 octaves (cheaper than fragment shader's 4)
+fn fbm_noise(p: vec3<f32>, octaves: i32) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    var pos = p;
+
+    for (var i = 0; i < octaves; i = i + 1) {
+        value += amplitude * simplex_noise_3d(pos * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    return value;
+}
+
+// ============================================================================
+// Thickness Sampling
+// ============================================================================
+
+// Sample thickness at a point on the sphere (scaled from meters to working units)
 fn sample_thickness(normal: vec3<f32>) -> f32 {
     let uv = normal_to_uv(normal);
     let x = u32(uv.x * f32(THICKNESS_WIDTH - 1u));
     let y = u32(uv.y * f32(THICKNESS_HEIGHT - 1u));
     let idx = y * THICKNESS_WIDTH + x;
-    return thickness_field[idx];
+    return thickness_field[idx] * params.thickness_scale;
+}
+
+// Dynamic thickness combining drainage buffer with animated noise modulations
+// Mirrors get_film_thickness() from bubble.wgsl so rays bend through the same landscape
+fn get_dynamic_thickness(normal: vec3<f32>, time: f32) -> f32 {
+    // Base thickness from GPU drainage buffer (physical drainage simulation)
+    let buffer_base = sample_thickness(normal);
+
+    let t = time;
+    let scale = params.pattern_scale;
+    let swirl = params.swirl_intensity;
+
+    // Animated drainage - film collects at bottom, progresses over time
+    let drain_progress = min(t * params.drainage_speed * 0.1, 1.0);
+    let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
+
+    // Organic noise pattern using simplex FBM (3 octaves for compute efficiency)
+    let noise_time = t * 0.08;
+    let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
+    let organic_noise = fbm_noise(noise_coord, 3) * swirl * 0.12;
+
+    // Secondary swirling pattern
+    let swirl_angle = t * 0.5;
+    let sx = normal.x * cos(swirl_angle) - normal.z * sin(swirl_angle);
+    let sz = normal.x * sin(swirl_angle) + normal.z * cos(swirl_angle);
+    let swirl_noise = simplex_noise_3d(vec3<f32>(sx, normal.y, sz) * 5.0 + vec3<f32>(t * 0.2)) * swirl * 0.05;
+
+    // Gravity ripples
+    let wave = 0.02 * swirl * sin(normal.y * scale * 8.0 - t * 2.0) * (1.0 - abs(normal.y));
+
+    // Apply same multiplicative modulations as fragment shader:
+    // fragment: base * (1.0 - drainage + organic_noise + swirl_noise - wave)
+    // Here buffer_base plays the role of "base" — it carries physical drainage from the GPU sim
+    return buffer_base * (1.0 - drainage + organic_noise + swirl_noise - wave);
 }
 
 // Compute thickness gradient at a point (returns gradient in tangent space)
@@ -71,10 +207,10 @@ fn thickness_gradient(normal: vec3<f32>) -> vec2<f32> {
     let n_up = normalize(normal + tangent2 * eps);
     let n_down = normalize(normal - tangent2 * eps);
 
-    let h_right = sample_thickness(n_right);
-    let h_left = sample_thickness(n_left);
-    let h_up = sample_thickness(n_up);
-    let h_down = sample_thickness(n_down);
+    let h_right = get_dynamic_thickness(n_right, params.time);
+    let h_left = get_dynamic_thickness(n_left, params.time);
+    let h_up = get_dynamic_thickness(n_up, params.time);
+    let h_down = get_dynamic_thickness(n_down, params.time);
 
     let grad_x = (h_right - h_left) / (2.0 * eps);
     let grad_y = (h_up - h_down) / (2.0 * eps);
@@ -150,11 +286,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let uv = normal_to_uv(pos);
         let tex_idx = uv_to_tex_idx(uv);
 
-        // Accumulate light intensity where ray passes through
-        // Higher deposit = more visible ray paths
-        let current = caustic_texture[tex_idx];
-        let deposit = intensity * 0.05;  // Increased visibility
-        caustic_texture[tex_idx] = current + deposit;
+        // Accumulate light intensity where ray passes through (atomic to avoid race conditions)
+        let deposit = intensity * 0.05;
+        let deposit_fixed = u32(deposit * 65536.0);
+        atomicAdd(&caustic_texture[tex_idx], deposit_fixed);
 
         // Get thickness gradient at current position
         let grad = thickness_gradient(pos);
@@ -191,7 +326,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Rays may focus where thickness creates "lensing" - boost intensity there
         // High gradient = strong bending = potential caustic
-        if (grad_mag > 0.5) {
+        // Threshold is scale-aware: with thickness_scale=1e6, gradients are ~10+
+        if (grad_mag > 5.0) {
             intensity *= 1.02;  // Slight boost in high-gradient regions
         }
 
@@ -202,7 +338,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 }
 
-// Clear pass - run before ray tracing to reset texture
+// Clear pass - run before ray tracing to fade texture
 @compute @workgroup_size(16, 16)
 fn clear(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (global_id.x >= params.tex_width || global_id.y >= params.tex_height) {
@@ -210,5 +346,8 @@ fn clear(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let idx = global_id.y * params.tex_width + global_id.x;
     // Fade existing values instead of clearing completely (for smooth animation)
-    caustic_texture[idx] = caustic_texture[idx] * 0.95;
+    // Load current value, scale down, store back
+    let current = atomicLoad(&caustic_texture[idx]);
+    let faded = u32(f32(current) * 0.95);
+    atomicStore(&caustic_texture[idx], faded);
 }
