@@ -1,7 +1,12 @@
 // Branched Flow Compute Shader
-// Simulates light rays propagating WITHIN the soap film layer
-// Like a 2D waveguide - light travels laterally through the film,
-// bending based on thickness gradients (gradient-index optics)
+// Simulates branched flow of light through correlated random potential
+// Based on Patsyk et al. 2020 "Observation of branched flow of light"
+//
+// Key physics:
+// - Light propagates through medium with smooth random refractive index variations
+// - Correlation length > wavelength creates branching (not random scattering)
+// - Caustics form where rays converge -> bright branch lines
+// - Pattern is tree-like with successive bifurcations
 
 struct BranchedFlowParams {
     // Laser injection point on bubble surface (normalized direction from center)
@@ -16,7 +21,7 @@ struct BranchedFlowParams {
     num_rays: u32,
     ray_steps: u32,
     step_size: f32,
-    bend_strength: f32,      // How much thickness gradient bends rays (GRIN effect)
+    bend_strength: f32,      // How much potential gradient bends rays
     spread_angle: f32,       // Initial beam spread (radians)
     intensity_falloff: f32,  // Absorption/scattering loss along ray path
     // Output texture size
@@ -31,198 +36,149 @@ struct BranchedFlowParams {
     swirl_intensity: f32,
     drainage_speed: f32,
     pattern_scale: f32,
-    // Padding to 96 bytes (16-byte aligned)
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
-    _pad3: f32,
+    // Particle scattering parameters
+    num_scatterers: u32,      // Number of active scatterers
+    scatterer_strength: f32,  // Base scattering strength
+    scatterer_radius: f32,    // σ in UV space (correlation length)
+    particle_weight: f32,     // Blend: 0=pure GRIN, 1=pure particle
+};
+
+// Scatterer data - represents micelle clusters that deflect light
+struct Scatterer {
+    pos_u: f32,           // UV position (0-1)
+    pos_v: f32,
+    strength: f32,        // Signed: positive attracts, negative repels
+    inv_sigma_sq: f32,    // Precomputed 1/(2σ²)
 };
 
 @group(0) @binding(0) var<uniform> params: BranchedFlowParams;
 @group(0) @binding(1) var<storage, read> thickness_field: array<f32>;
 @group(0) @binding(2) var<storage, read_write> caustic_texture: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read> scatterers: array<Scatterer>;
 
 // Thickness field dimensions (matches GPU drainage grid)
 const THICKNESS_WIDTH: u32 = 128u;
 const THICKNESS_HEIGHT: u32 = 64u;
 
+// Number of cosine modes for random potential (more = finer detail)
+const NUM_POTENTIAL_MODES: i32 = 12;
+
+// Pi constant
+const PI: f32 = 3.14159265359;
+
 // Convert normal direction to UV coordinates for thickness sampling
 fn normal_to_uv(n: vec3<f32>) -> vec2<f32> {
     let phi = atan2(n.z, n.x);  // -PI to PI
     let theta = acos(clamp(n.y, -1.0, 1.0));  // 0 to PI
-    let u = (phi + 3.14159265) / (2.0 * 3.14159265);  // 0 to 1
-    let v = theta / 3.14159265;  // 0 to 1
+    let u = (phi + PI) / (2.0 * PI);  // 0 to 1
+    let v = theta / PI;  // 0 to 1
     return vec2<f32>(u, v);
 }
 
 // ============================================================================
-// Simplex Noise Implementation (3D) - ported from bubble.wgsl
+// Hash functions for deterministic pseudo-random numbers
 // ============================================================================
 
-fn permute(x: vec4<f32>) -> vec4<f32> {
-    return ((x * 34.0 + 1.0) * x) % 289.0;
+fn hash11(p: f32) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += p3 * (p3 + 33.33);
+    return fract((p3 + p3) * p3);
 }
 
-fn taylor_inv_sqrt(r: vec4<f32>) -> vec4<f32> {
-    return 1.79284291400159 - 0.85373472095314 * r;
+fn hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
-fn simplex_noise_3d(v: vec3<f32>) -> f32 {
-    let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
-    let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);
-
-    var i = floor(v + dot(v, vec3<f32>(C.y)));
-    let x0 = v - i + dot(i, vec3<f32>(C.x));
-
-    let g = step(x0.yzx, x0.xyz);
-    let l = 1.0 - g;
-    let i1 = min(g.xyz, l.zxy);
-    let i2 = max(g.xyz, l.zxy);
-
-    let x1 = x0 - i1 + C.x;
-    let x2 = x0 - i2 + C.y;
-    let x3 = x0 - D.yyy;
-
-    i = i % 289.0;
-    let p = permute(permute(permute(
-        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
-      + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
-      + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
-
-    let n_ = 0.142857142857;
-    let ns = n_ * D.wyz - D.xzx;
-
-    let j = p - 49.0 * floor(p * ns.z * ns.z);
-
-    let x_ = floor(j * ns.z);
-    let y_ = floor(j - 7.0 * x_);
-
-    let x = x_ * ns.x + ns.yyyy;
-    let y = y_ * ns.x + ns.yyyy;
-    let h = 1.0 - abs(x) - abs(y);
-
-    let b0 = vec4<f32>(x.xy, y.xy);
-    let b1 = vec4<f32>(x.zw, y.zw);
-
-    let s0 = floor(b0) * 2.0 + 1.0;
-    let s1 = floor(b1) * 2.0 + 1.0;
-    let sh = -step(h, vec4<f32>(0.0));
-
-    let a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-    let a1 = b1.xzyw + s1.xzyw * sh.zzww;
-
-    var p0 = vec3<f32>(a0.xy, h.x);
-    var p1 = vec3<f32>(a0.zw, h.y);
-    var p2 = vec3<f32>(a1.xy, h.z);
-    var p3 = vec3<f32>(a1.zw, h.w);
-
-    let norm = taylor_inv_sqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
-    p0 *= norm.x;
-    p1 *= norm.y;
-    p2 *= norm.z;
-    p3 *= norm.w;
-
-    var m = max(0.6 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
-    m = m * m;
-    return 42.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
-}
-
-// Fractal Brownian Motion - 3 octaves (cheaper than fragment shader's 4)
-fn fbm_noise(p: vec3<f32>, octaves: i32) -> f32 {
-    var value = 0.0;
-    var amplitude = 0.5;
-    var frequency = 1.0;
-    var pos = p;
-
-    for (var i = 0; i < octaves; i = i + 1) {
-        value += amplitude * simplex_noise_3d(pos * frequency);
-        amplitude *= 0.5;
-        frequency *= 2.0;
-    }
-    return value;
+fn hash31(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 // ============================================================================
-// Thickness Sampling
+// Film Thickness as Optical Potential
+// The actual soap film thickness creates the correlated disorder for branching
+// Thicker regions = higher refractive index = rays bend toward them (GRIN optics)
 // ============================================================================
 
-// Sample thickness at a point on the sphere (scaled from meters to working units)
-fn sample_thickness(normal: vec3<f32>) -> f32 {
-    let uv = normal_to_uv(normal);
-    let x = u32(uv.x * f32(THICKNESS_WIDTH - 1u));
-    let y = u32(uv.y * f32(THICKNESS_HEIGHT - 1u));
+// Sample film thickness at UV position (uses the GPU drainage buffer)
+fn sample_thickness_at_uv(uv: vec2<f32>) -> f32 {
+    let x = u32(clamp(uv.x, 0.0, 1.0) * f32(THICKNESS_WIDTH - 1u));
+    let y = u32(clamp(uv.y, 0.0, 1.0) * f32(THICKNESS_HEIGHT - 1u));
     let idx = y * THICKNESS_WIDTH + x;
-    return thickness_field[idx] * params.thickness_scale;
+    return thickness_field[idx];
 }
 
-// Dynamic thickness combining drainage buffer with animated noise modulations
-// Mirrors get_film_thickness() from bubble.wgsl so rays bend through the same landscape
-fn get_dynamic_thickness(normal: vec3<f32>, time: f32) -> f32 {
-    // Base thickness from GPU drainage buffer (physical drainage simulation)
-    let buffer_base = sample_thickness(normal);
+// Compute thickness gradient at UV position
+// This drives ray bending - rays curve toward thicker regions
+fn thickness_gradient_uv(uv: vec2<f32>) -> vec2<f32> {
+    let eps = 0.01;  // Sampling distance in UV space
 
-    let t = time;
-    let scale = params.pattern_scale;
-    let swirl = params.swirl_intensity;
+    let h_right = sample_thickness_at_uv(uv + vec2<f32>(eps, 0.0));
+    let h_left = sample_thickness_at_uv(uv - vec2<f32>(eps, 0.0));
+    let h_up = sample_thickness_at_uv(uv + vec2<f32>(0.0, eps));
+    let h_down = sample_thickness_at_uv(uv - vec2<f32>(0.0, eps));
 
-    // Animated drainage - film collects at bottom, progresses over time
-    let drain_progress = min(t * params.drainage_speed * 0.1, 1.0);
-    let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
-
-    // Organic noise pattern using simplex FBM (3 octaves for compute efficiency)
-    let noise_time = t * 0.08;
-    let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
-    let organic_noise = fbm_noise(noise_coord, 3) * swirl * 0.12;
-
-    // Secondary swirling pattern
-    let swirl_angle = t * 0.5;
-    let sx = normal.x * cos(swirl_angle) - normal.z * sin(swirl_angle);
-    let sz = normal.x * sin(swirl_angle) + normal.z * cos(swirl_angle);
-    let swirl_noise = simplex_noise_3d(vec3<f32>(sx, normal.y, sz) * 5.0 + vec3<f32>(t * 0.2)) * swirl * 0.05;
-
-    // Gravity ripples
-    let wave = 0.02 * swirl * sin(normal.y * scale * 8.0 - t * 2.0) * (1.0 - abs(normal.y));
-
-    // Apply same multiplicative modulations as fragment shader:
-    // fragment: base * (1.0 - drainage + organic_noise + swirl_noise - wave)
-    // Here buffer_base plays the role of "base" — it carries physical drainage from the GPU sim
-    return buffer_base * (1.0 - drainage + organic_noise + swirl_noise - wave);
-}
-
-// Compute thickness gradient at a point (returns gradient in tangent space)
-fn thickness_gradient(normal: vec3<f32>) -> vec2<f32> {
-    let eps = 0.02;
-
-    // Get tangent basis
-    var up = vec3<f32>(0.0, 1.0, 0.0);
-    if (abs(dot(normal, up)) > 0.99) {
-        up = vec3<f32>(1.0, 0.0, 0.0);
-    }
-    let tangent1 = normalize(cross(normal, up));
-    let tangent2 = normalize(cross(normal, tangent1));
-
-    // Sample neighbors
-    let n_right = normalize(normal + tangent1 * eps);
-    let n_left = normalize(normal - tangent1 * eps);
-    let n_up = normalize(normal + tangent2 * eps);
-    let n_down = normalize(normal - tangent2 * eps);
-
-    let h_right = get_dynamic_thickness(n_right, params.time);
-    let h_left = get_dynamic_thickness(n_left, params.time);
-    let h_up = get_dynamic_thickness(n_up, params.time);
-    let h_down = get_dynamic_thickness(n_down, params.time);
-
+    // Gradient points toward increasing thickness
+    // Scale to make gradient more significant for ray bending
     let grad_x = (h_right - h_left) / (2.0 * eps);
     let grad_y = (h_up - h_down) / (2.0 * eps);
 
     return vec2<f32>(grad_x, grad_y);
 }
 
-// Simple hash for random numbers
-fn hash(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+// ============================================================================
+// Particle Scattering Forces
+// Discrete scatterers (micelle clusters) create local deflections
+// This causes rays to diverge, cross, and form tree-like caustic branches
+// ============================================================================
+
+// Compute force from a single scatterer using Gaussian soft potential
+// V(r) = V0 * exp(-r²/2σ²)
+// F = -∇V = V0 * (r/σ²) * exp(-r²/2σ²) (points toward/away from scatterer)
+fn scatterer_force(ray_uv: vec2<f32>, s: Scatterer) -> vec2<f32> {
+    let delta = ray_uv - vec2<f32>(s.pos_u, s.pos_v);
+    let r_sq = dot(delta, delta);
+
+    // Cutoff at ~3σ for efficiency (exp(-4.5) ≈ 0.01)
+    // inv_sigma_sq = 1/(2σ²), so cutoff is when r² > 4.5 / inv_sigma_sq = 9σ²
+    if (r_sq > 4.5 / s.inv_sigma_sq) {
+        return vec2<f32>(0.0);
+    }
+
+    let exp_term = exp(-r_sq * s.inv_sigma_sq);
+    // Force direction: delta points from scatterer to ray
+    // For positive strength (attractive): force points toward scatterer (negative delta)
+    // For negative strength (repulsive): force points away from scatterer (positive delta)
+    // The formula gives: F = strength * delta * inv_sigma_sq * 2 * exp_term
+    // which for positive strength creates attraction (ray bends toward scatterer)
+    return delta * s.strength * s.inv_sigma_sq * 2.0 * exp_term;
+}
+
+// Sum forces from all scatterers
+fn total_scatterer_force(ray_uv: vec2<f32>) -> vec2<f32> {
+    var force = vec2<f32>(0.0);
+    let n = min(params.num_scatterers, 2048u);  // Clamp to max supported
+
+    for (var i = 0u; i < n; i++) {
+        force += scatterer_force(ray_uv, scatterers[i]);
+    }
+
+    return force;
+}
+
+// ============================================================================
+// Thickness-based potential (alternative mode using actual film thickness)
+// ============================================================================
+
+fn sample_thickness(normal: vec3<f32>) -> f32 {
+    let uv = normal_to_uv(normal);
+    let x = u32(uv.x * f32(THICKNESS_WIDTH - 1u));
+    let y = u32(uv.y * f32(THICKNESS_HEIGHT - 1u));
+    let idx = y * THICKNESS_WIDTH + x;
+    return thickness_field[idx] * params.thickness_scale;
 }
 
 // Convert UV to output texture index
@@ -232,6 +188,45 @@ fn uv_to_tex_idx(uv: vec2<f32>) -> u32 {
     return y * params.tex_width + x;
 }
 
+// Bilinear splatting - distribute deposit across 4 neighboring pixels
+// This creates smooth, anti-aliased branches instead of pixelated steps
+fn deposit_bilinear(uv: vec2<f32>, intensity: f32) {
+    let fx = clamp(uv.x, 0.0, 1.0) * f32(params.tex_width - 1u);
+    let fy = clamp(uv.y, 0.0, 1.0) * f32(params.tex_height - 1u);
+
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, params.tex_width - 1u);
+    let y1 = min(y0 + 1u, params.tex_height - 1u);
+
+    // Fractional position within pixel
+    let sx = fx - floor(fx);
+    let sy = fy - floor(fy);
+
+    // Bilinear weights
+    let w00 = (1.0 - sx) * (1.0 - sy);
+    let w10 = sx * (1.0 - sy);
+    let w01 = (1.0 - sx) * sy;
+    let w11 = sx * sy;
+
+    // Deposit to all 4 neighboring pixels with appropriate weights
+    let base_deposit = intensity * 256.0;
+
+    let idx00 = y0 * params.tex_width + x0;
+    let idx10 = y0 * params.tex_width + x1;
+    let idx01 = y1 * params.tex_width + x0;
+    let idx11 = y1 * params.tex_width + x1;
+
+    atomicAdd(&caustic_texture[idx00], u32(base_deposit * w00));
+    atomicAdd(&caustic_texture[idx10], u32(base_deposit * w10));
+    atomicAdd(&caustic_texture[idx01], u32(base_deposit * w01));
+    atomicAdd(&caustic_texture[idx11], u32(base_deposit * w11));
+}
+
+// ============================================================================
+// Main ray tracing kernel - Kick-Drift model for branched flow
+// ============================================================================
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ray_idx = global_id.x;
@@ -239,23 +234,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Entry point on sphere
+    // Entry point on sphere (laser injection point)
     let entry_point = normalize(vec3<f32>(
         params.entry_point_x,
         params.entry_point_y,
         params.entry_point_z
     ));
 
-    // Initial beam direction (should be tangent to sphere)
+    // Initial beam direction (tangent to sphere)
     let beam_dir_raw = vec3<f32>(
         params.beam_dir_x,
         params.beam_dir_y,
         params.beam_dir_z
     );
-    // Project to tangent plane and normalize
     let beam_dir = normalize(beam_dir_raw - entry_point * dot(beam_dir_raw, entry_point));
 
-    // Get tangent basis at entry point
+    // Get tangent basis at entry point for local 2D coordinates
     var up = vec3<f32>(0.0, 1.0, 0.0);
     if (abs(dot(entry_point, up)) > 0.99) {
         up = vec3<f32>(1.0, 0.0, 0.0);
@@ -263,91 +257,96 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let tangent1 = normalize(cross(entry_point, up));
     let tangent2 = normalize(cross(entry_point, tangent1));
 
-    // Random offset for this ray within the beam spread
-    let rand1 = hash(vec2<f32>(f32(ray_idx), params.time));
-    let rand2 = hash(vec2<f32>(f32(ray_idx) + 100.0, params.time + 1.0));
-    let angle_offset = (rand1 - 0.5) * params.spread_angle;
-    let perp_offset = (rand2 - 0.5) * params.spread_angle * 0.5;
+    // COLLIMATED BEAM: All rays go in the SAME direction
+    // Only vary the STARTING POSITION (not direction)
+    // This is how real branched flow experiments work - laser beam, not point source
 
-    // Rotate beam direction by random angle
-    let cos_a = cos(angle_offset);
-    let sin_a = sin(angle_offset);
-    var ray_dir = beam_dir * cos_a + cross(entry_point, beam_dir) * sin_a;
-    ray_dir = normalize(ray_dir + tangent2 * perp_offset);
+    let rand1 = hash21(vec2<f32>(f32(ray_idx) * 0.1, 0.0));
+    let rand2 = hash21(vec2<f32>(f32(ray_idx) * 0.1 + 100.0, 1.0));
 
-    // Starting position and intensity
-    var pos = entry_point;
-    var dir = ray_dir;
+    // All rays have the same direction (collimated beam)
+    var vel_2d = vec2<f32>(
+        dot(beam_dir, tangent1),
+        dot(beam_dir, tangent2)
+    );
+    vel_2d = normalize(vel_2d);
+
+    // Vary starting POSITION perpendicular to beam direction
+    // This creates a "line" of rays that then branch as they propagate
+    let perp_dir = vec2<f32>(-vel_2d.y, vel_2d.x);  // Perpendicular to beam
+    let pos_offset = (rand1 - 0.5) * params.spread_angle;  // spread_angle now controls beam WIDTH
+    let along_offset = (rand2 - 0.5) * params.spread_angle * 0.1;  // Tiny variation along beam
+
+    // Starting position: spread perpendicular to beam direction
+    var pos_2d = perp_dir * pos_offset + vel_2d * along_offset;
+
     var intensity = 1.0;
+    let dt = params.step_size;
 
-    // March the ray through the film (along sphere surface)
-    for (var step = 0u; step < params.ray_steps; step++) {
-        // Deposit intensity at current position - light leaves a trail as it propagates
-        let uv = normal_to_uv(pos);
-        let tex_idx = uv_to_tex_idx(uv);
+    // ========================================================================
+    // Kick-Drift ray propagation for branched flow
+    //
+    // HYBRID MODEL combining two deflection mechanisms:
+    // 1. GRIN optics: Smooth bending toward thicker regions (like gradient-index lens)
+    // 2. Particle scattering: Discrete deflections from micelle clusters
+    //
+    // The particle scattering is KEY for tree-like branches (caustics).
+    // Pure GRIN creates parallel bands; particles cause rays to cross and diverge.
+    // ========================================================================
 
-        // Accumulate light intensity where ray passes through (atomic to avoid race conditions)
-        let deposit = intensity * 0.05;
-        let deposit_fixed = u32(deposit * 65536.0);
-        atomicAdd(&caustic_texture[tex_idx], deposit_fixed);
+    for (var step = 0u; step < params.ray_steps; step = step + 1u) {
+        // Current 3D position and UV
+        let pos_3d = normalize(entry_point + tangent1 * pos_2d.x + tangent2 * pos_2d.y);
+        let uv = normal_to_uv(pos_3d);
 
-        // Get thickness gradient at current position
-        let grad = thickness_gradient(pos);
-        let grad_mag = length(grad);
+        // === DEPOSIT: Continuous thin trail ===
+        // Use very small deposit per step - branches emerge from ray convergence
+        deposit_bilinear(uv, intensity * 0.15);
 
-        // Convert gradient to world space deflection
-        // Get tangent basis at current position
-        var local_up = vec3<f32>(0.0, 1.0, 0.0);
-        if (abs(dot(pos, local_up)) > 0.99) {
-            local_up = vec3<f32>(1.0, 0.0, 0.0);
-        }
-        let local_t1 = normalize(cross(pos, local_up));
-        let local_t2 = normalize(cross(pos, local_t1));
+        // === KICK: Hybrid deflection model ===
+        // 1. GRIN force: rays bend toward thicker regions (smooth, correlated)
+        let grin_force = thickness_gradient_uv(uv) * (1.0 - params.particle_weight);
 
-        // GRIN optics: rays bend TOWARD thicker regions (higher refractive index)
-        // gradient points toward increasing thickness, so rays follow the gradient
-        let deflection = (local_t1 * grad.x + local_t2 * grad.y) * params.bend_strength;
+        // 2. Particle force: discrete scatterers create local deflections (uncorrelated)
+        let particle_force = total_scatterer_force(uv) * params.particle_weight;
 
-        // Update direction with deflection
-        dir = normalize(dir + deflection * params.step_size);
+        // Combined force drives velocity change
+        let total_force = grin_force + particle_force;
+        vel_2d = vel_2d + total_force * params.bend_strength * dt;
 
-        // Project direction back to tangent plane (stay within film)
-        dir = normalize(dir - pos * dot(dir, pos));
-
-        // Move along the film (geodesic motion on sphere surface)
-        let new_pos_raw = pos + dir * params.step_size;
-        pos = normalize(new_pos_raw);  // Stay on sphere
-
-        // Keep direction tangent to sphere
-        dir = normalize(dir - pos * dot(dir, pos));
-
-        // Intensity falloff (absorption/scattering in the film)
-        intensity *= (1.0 - params.intensity_falloff);
-
-        // Rays may focus where thickness creates "lensing" - boost intensity there
-        // High gradient = strong bending = potential caustic
-        // Threshold is scale-aware: with thickness_scale=1e6, gradients are ~10+
-        if (grad_mag > 5.0) {
-            intensity *= 1.02;  // Slight boost in high-gradient regions
+        // Normalize velocity (constant speed, direction changes)
+        let vel_mag = length(vel_2d);
+        if (vel_mag > 0.001) {
+            vel_2d = vel_2d / vel_mag;
         }
 
-        // Stop if intensity too low
-        if (intensity < 0.005) {
+        // === DRIFT: Move forward ===
+        pos_2d = pos_2d + vel_2d * dt;
+
+        // Gradual intensity falloff
+        intensity = intensity * (1.0 - params.intensity_falloff);
+
+        // Stop conditions
+        let dist = length(pos_2d);
+        if (dist > 2.5 || intensity < 0.01) {
             break;
         }
     }
 }
 
-// Clear pass - run before ray tracing to fade texture
+// ============================================================================
+// Clear pass - fade existing values for smooth animation
+// ============================================================================
+
 @compute @workgroup_size(16, 16)
 fn clear(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (global_id.x >= params.tex_width || global_id.y >= params.tex_height) {
         return;
     }
     let idx = global_id.y * params.tex_width + global_id.x;
-    // Fade existing values instead of clearing completely (for smooth animation)
-    // Load current value, scale down, store back
+
+    // Fade existing values (creates motion blur / persistence)
     let current = atomicLoad(&caustic_texture[idx]);
-    let faded = u32(f32(current) * 0.95);
+    let faded = u32(f32(current) * 0.85);  // Faster fade for clearer branches
     atomicStore(&caustic_texture[idx], faded);
 }

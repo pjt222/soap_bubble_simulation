@@ -172,7 +172,7 @@ pub struct RenderPipeline {
     caustic_renderer: crate::render::caustics::CausticRenderer,
     // Ray-traced branched flow simulation
     branched_flow_simulator: BranchedFlowSimulator,
-    branched_flow_buffer: wgpu::Buffer,
+    _branched_flow_buffer: wgpu::Buffer,
 }
 
 impl RenderPipeline {
@@ -648,7 +648,7 @@ impl RenderPipeline {
             shared_wall_renderer,
             caustic_renderer,
             branched_flow_simulator,
-            branched_flow_buffer,
+            _branched_flow_buffer: branched_flow_buffer,
         }
     }
 
@@ -1060,15 +1060,16 @@ impl RenderPipeline {
             if dist_sq > max_distance * max_distance {
                 let dist = dist_sq.sqrt();
                 let return_strength = 0.5 * (dist - max_distance);
-                for i in 0..3 {
-                    self.bubble_velocity[i] -= return_strength * pos[i] / dist * dt;
+                for (velocity, &position) in self.bubble_velocity.iter_mut().zip(pos.iter()) {
+                    *velocity -= return_strength * position / dist * dt;
                 }
             }
         }
 
         // Physics-based drainage simulation
-        if self.physics_drainage_enabled {
-            if let Some(ref mut simulator) = self.drainage_simulator {
+        if self.physics_drainage_enabled
+            && let Some(ref mut simulator) = self.drainage_simulator
+        {
                 // Step the drainage simulation (with time scaling for visible effect)
                 let scaled_dt = (dt * self.drainage_time_scale) as f64;
                 simulator.step(scaled_dt);
@@ -1094,30 +1095,29 @@ impl RenderPipeline {
                 self.bubble_uniform.drainage_speed = (1.0 - drain_ratio).clamp(0.0, 2.0);
 
                 // Check for burst condition
-                if simulator.has_critical_region() {
-                    log::info!("Bubble reached critical thickness - would burst at t={:.2}s",
-                        simulator.current_time());
-                }
+            if simulator.has_critical_region() {
+                log::info!("Bubble reached critical thickness - would burst at t={:.2}s",
+                    simulator.current_time());
             }
         }
 
         // Multi-bubble foam simulation
-        if self.foam_enabled {
-            if let Some(ref mut sim) = self.foam_simulator {
-                // Only step physics when not paused
-                if !self.foam_paused {
-                    let scaled_dt = dt * self.foam_time_scale;
-                    sim.step(scaled_dt);
-                }
-
-                // Always update renderer to show current state
-                self.foam_renderer.update_from_cluster(&sim.cluster);
-                self.foam_renderer.upload(&self.queue);
-
-                // Generate and upload shared wall (Plateau border) instances
-                self.shared_wall_renderer.generate_walls(&sim.cluster);
-                self.shared_wall_renderer.upload(&self.queue);
+        if self.foam_enabled
+            && let Some(ref mut sim) = self.foam_simulator
+        {
+            // Only step physics when not paused
+            if !self.foam_paused {
+                let scaled_dt = dt * self.foam_time_scale;
+                sim.step(scaled_dt);
             }
+
+            // Always update renderer to show current state
+            self.foam_renderer.update_from_cluster(&sim.cluster);
+            self.foam_renderer.upload(&self.queue);
+
+            // Generate and upload shared wall (Plateau border) instances
+            self.shared_wall_renderer.generate_walls(&sim.cluster);
+            self.shared_wall_renderer.upload(&self.queue);
         }
 
         // Track FPS
@@ -1244,6 +1244,11 @@ impl RenderPipeline {
         let mut beam_spread = self.branched_flow_simulator.params.spread_angle.to_degrees();
         let mut bend_strength = self.branched_flow_simulator.params.bend_strength;
         let mut num_rays = self.branched_flow_simulator.params.num_rays;
+        // Particle scattering parameters
+        let mut num_scatterers = self.branched_flow_simulator.params.num_scatterers;
+        let mut scatterer_strength = self.branched_flow_simulator.params.scatterer_strength;
+        let mut scatterer_radius = self.branched_flow_simulator.params.scatterer_radius;
+        let mut particle_weight = self.branched_flow_simulator.params.particle_weight;
 
         // Foam system extraction
         let mut foam_enabled = self.foam_enabled;
@@ -1331,6 +1336,11 @@ impl RenderPipeline {
                 &mut beam_spread,
                 &mut bend_strength,
                 &mut num_rays,
+                // Particle scattering parameters
+                &mut num_scatterers,
+                &mut scatterer_strength,
+                &mut scatterer_radius,
+                &mut particle_weight,
                 // Foam parameters
                 &mut foam_enabled,
                 &mut foam_paused,
@@ -1477,6 +1487,11 @@ impl RenderPipeline {
         self.branched_flow_simulator.params.spread_angle = beam_spread.to_radians();
         self.branched_flow_simulator.params.bend_strength = bend_strength;
         self.branched_flow_simulator.params.num_rays = num_rays;
+        // Update particle scattering parameters
+        self.branched_flow_simulator.params.num_scatterers = num_scatterers;
+        self.branched_flow_simulator.params.scatterer_strength = scatterer_strength;
+        self.branched_flow_simulator.params.scatterer_radius = scatterer_radius;
+        self.branched_flow_simulator.params.particle_weight = particle_weight;
         // Sync film dynamics so branched flow rays bend through the same dynamic landscape
         self.branched_flow_simulator.params.base_thickness_nm = self.bubble_uniform.base_thickness_nm;
         self.branched_flow_simulator.params.swirl_intensity = self.bubble_uniform.swirl_intensity;
@@ -1537,6 +1552,8 @@ impl RenderPipeline {
 
         // Branched flow compute pass (ray tracing through film)
         if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
+            // Update scatterer positions (creates animated particle distribution)
+            self.branched_flow_simulator.update_scatterers(&self.queue, self.bubble_uniform.film_time);
             self.branched_flow_simulator.step(&mut encoder, self.bubble_uniform.film_time);
             self.branched_flow_simulator.update_params(&self.queue);
         }
@@ -1664,7 +1681,7 @@ impl RenderPipeline {
             let bytes_per_pixel = 4u32;
             let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-            let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+            let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
             let buffer_size = (padded_bytes_per_row * self.config.height) as u64;
 
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1839,6 +1856,11 @@ impl RenderPipeline {
         beam_spread: &mut f32,
         bend_strength: &mut f32,
         num_rays: &mut u32,
+        // Particle scattering parameters
+        num_scatterers: &mut u32,
+        scatterer_strength: &mut f32,
+        scatterer_radius: &mut f32,
+        particle_weight: &mut f32,
         // Foam parameters
         foam_enabled: &mut bool,
         foam_paused: &mut bool,
@@ -2148,9 +2170,29 @@ impl RenderPipeline {
                             .fixed_decimals(1));
 
                         ui.separator();
-                        ui.label("Light propagates within");
-                        ui.label("the film layer, bending");
-                        ui.label("toward thicker regions");
+                        ui.label("Particle Scattering");
+
+                        ui.add(egui::Slider::new(particle_weight, 0.0..=1.0)
+                            .text("Weight")
+                            .fixed_decimals(2));
+
+                        ui.add(egui::Slider::new(num_scatterers, 100..=2000)
+                            .text("Scatterers")
+                            .logarithmic(true));
+
+                        ui.add(egui::Slider::new(scatterer_strength, 0.1..=2.0)
+                            .text("Strength")
+                            .logarithmic(true)
+                            .fixed_decimals(2));
+
+                        ui.add(egui::Slider::new(scatterer_radius, 0.01..=0.1)
+                            .text("Radius")
+                            .fixed_decimals(3));
+
+                        ui.separator();
+                        ui.label("Hybrid model: GRIN + particles");
+                        ui.label("Weight 0 = smooth GRIN only");
+                        ui.label("Weight 1 = particle scatter only");
                     }
                 });
 
@@ -2432,7 +2474,7 @@ impl RenderPipeline {
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         // Create staging buffer

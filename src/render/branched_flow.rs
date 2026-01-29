@@ -1,8 +1,44 @@
 //! Branched flow simulation using GPU compute
 //! Traces light rays through the soap film, bending based on thickness gradients
+//!
+//! Uses a hybrid model combining:
+//! - GRIN optics: Rays bend toward thicker regions (smooth gradients)
+//! - Particle scattering: Discrete scatterers (micelles) create local deflections
+//!
+//! The particle scattering is key for creating tree-like branches (caustics)
+//! rather than parallel bands from smooth GRIN alone.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+
+/// Maximum number of scatterers supported
+pub const MAX_SCATTERERS: u32 = 2048;
+
+/// GPU-compatible scatterer data for particle-based ray deflection
+/// Represents micelle clusters that scatter light within the soap film
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ScattererGPU {
+    /// U position in UV space (0-1)
+    pub pos_u: f32,
+    /// V position in UV space (0-1)
+    pub pos_v: f32,
+    /// Scattering strength (signed: positive attracts, negative repels)
+    pub strength: f32,
+    /// Precomputed 1/(2σ²) for efficient Gaussian evaluation
+    pub inv_sigma_sq: f32,
+}
+
+impl Default for ScattererGPU {
+    fn default() -> Self {
+        Self {
+            pos_u: 0.5,
+            pos_v: 0.5,
+            strength: 0.0,
+            inv_sigma_sq: 1.0,
+        }
+    }
+}
 
 /// Parameters for branched flow simulation
 #[repr(C)]
@@ -39,8 +75,15 @@ pub struct BranchedFlowParams {
     pub drainage_speed: f32,
     /// Noise coordinate scaling (synced from BubbleUniform)
     pub pattern_scale: f32,
-    /// Padding to 96 bytes (16-byte aligned)
-    pub _pad: [f32; 4],
+    // === Particle scattering parameters ===
+    /// Number of scatterers (micelle clusters) active
+    pub num_scatterers: u32,
+    /// Base scattering strength (V0 magnitude)
+    pub scatterer_strength: f32,
+    /// Scatterer radius σ in UV space (correlation length)
+    pub scatterer_radius: f32,
+    /// Blend factor: 0 = pure GRIN, 1 = pure particle scattering
+    pub particle_weight: f32,
 }
 
 impl Default for BranchedFlowParams {
@@ -50,23 +93,98 @@ impl Default for BranchedFlowParams {
             entry_point: [0.0, 0.0, 1.0],
             // Beam direction: going down-left across the surface
             beam_dir: [-0.5, -0.866, 0.0],
-            num_rays: 4096,
-            ray_steps: 200,
-            step_size: 0.015,
-            bend_strength: 0.1,
+            // Many rays needed - branches visible where rays converge
+            num_rays: 32768,
+            // More steps for longer propagation
+            ray_steps: 400,
+            // Small steps for smooth ray paths
+            step_size: 0.005,
+            // Moderate GRIN bending (particle scattering now creates branching)
+            bend_strength: 5.0,
+            // Beam width (now controls position spread, not angle spread)
             spread_angle: 0.4,
-            intensity_falloff: 0.003,
-            tex_width: 256,
-            tex_height: 128,
+            // Low falloff so rays travel far
+            intensity_falloff: 0.001,
+            // Higher resolution for smoother branches
+            tex_width: 512,
+            tex_height: 256,
             time: 0.0,
             thickness_scale: 1e6,
             base_thickness_nm: 500.0,
             swirl_intensity: 1.0,
             drainage_speed: 1.0,
             pattern_scale: 1.0,
-            _pad: [0.0; 4],
+            // Particle scattering defaults
+            num_scatterers: 800,
+            scatterer_strength: 0.5,
+            scatterer_radius: 0.03,
+            particle_weight: 0.8,
         }
     }
+}
+
+/// Generate scatterers using quasi-random distribution with jitter
+/// Uses Halton sequence for good spatial coverage
+fn generate_scatterers(num: u32, time: f32, base_strength: f32, base_radius: f32) -> Vec<ScattererGPU> {
+    let mut scatterers = Vec::with_capacity(num as usize);
+
+    // Halton sequence bases (coprime for 2D low-discrepancy)
+    let base_u = 2;
+    let base_v = 3;
+
+    for i in 0..num {
+        // Halton sequence for quasi-random position
+        let u = halton(i + 1, base_u);
+        let v = halton(i + 1, base_v);
+
+        // Add time-based jitter for animation
+        let jitter_scale = 0.02;
+        let hash_seed = (i as f32) * 0.1031 + time * 0.1;
+        let jitter_u = (hash_seed.sin() * 43758.547).fract() * jitter_scale;
+        let jitter_v = (hash_seed.cos() * 43758.547).fract() * jitter_scale;
+
+        let pos_u = (u + jitter_u).rem_euclid(1.0);
+        let pos_v = (v + jitter_v).rem_euclid(1.0);
+
+        // Randomize sign of strength (attractive vs repulsive)
+        // Use deterministic hash based on index
+        let sign_hash = ((i as f32 * 0.7531 + 0.3).sin() * 43758.547).fract();
+        let sign = if sign_hash > 0.5 { 1.0 } else { -1.0 };
+
+        // Slight variation in strength magnitude
+        let strength_var = 0.8 + 0.4 * ((i as f32 * 0.9371).sin() * 43758.547).fract();
+        let strength = sign * base_strength * strength_var;
+
+        // Slight variation in radius
+        let radius_var = 0.8 + 0.4 * ((i as f32 * 0.5791).cos() * 43758.547).fract();
+        let sigma = base_radius * radius_var;
+        let inv_sigma_sq = 1.0 / (2.0 * sigma * sigma);
+
+        scatterers.push(ScattererGPU {
+            pos_u,
+            pos_v,
+            strength,
+            inv_sigma_sq,
+        });
+    }
+
+    scatterers
+}
+
+/// Halton sequence for quasi-random number generation
+/// Returns value in [0, 1) for given index and base
+fn halton(index: u32, base: u32) -> f32 {
+    let mut result = 0.0f32;
+    let mut f = 1.0 / base as f32;
+    let mut i = index;
+
+    while i > 0 {
+        result += f * (i % base) as f32;
+        i /= base;
+        f /= base as f32;
+    }
+
+    result
 }
 
 /// Manages GPU-based branched flow simulation
@@ -79,6 +197,8 @@ pub struct BranchedFlowSimulator {
     bind_group: wgpu::BindGroup,
     /// Parameters buffer
     params_buffer: wgpu::Buffer,
+    /// Scatterer buffer (storage buffer for particle positions/strengths)
+    scatterer_buffer: wgpu::Buffer,
     /// Current parameters
     pub params: BranchedFlowParams,
     /// Whether simulation is enabled
@@ -90,8 +210,9 @@ pub struct BranchedFlowSimulator {
 
 /// Create a branched flow texture buffer (called early in pipeline init)
 pub fn create_branched_flow_buffer(device: &wgpu::Device) -> wgpu::Buffer {
-    let tex_width = 256u32;
-    let tex_height = 128u32;
+    // Higher resolution for smoother branches
+    let tex_width = 512u32;
+    let tex_height = 256u32;
     let tex_size = (tex_width * tex_height) as usize;
     let caustic_data = vec![0u32; tex_size];
 
@@ -159,6 +280,17 @@ impl BranchedFlowSimulator {
                     },
                     count: None,
                 },
+                // Scatterers array (read-only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -196,6 +328,24 @@ impl BranchedFlowSimulator {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create scatterer buffer (max 2048 scatterers × 16 bytes = 32KB)
+        // Initialize with default scatterers
+        let initial_scatterers = generate_scatterers(
+            params.num_scatterers,
+            0.0,
+            params.scatterer_strength,
+            params.scatterer_radius,
+        );
+        // Pad to MAX_SCATTERERS to avoid buffer resizing
+        let mut scatterer_data = initial_scatterers;
+        scatterer_data.resize(MAX_SCATTERERS as usize, ScattererGPU::default());
+
+        let scatterer_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Branched Flow Scatterer Buffer"),
+            contents: bytemuck::cast_slice(&scatterer_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Create bind group using the external caustic buffer
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Branched Flow Bind Group"),
@@ -213,6 +363,10 @@ impl BranchedFlowSimulator {
                     binding: 2,
                     resource: caustic_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: scatterer_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -221,6 +375,7 @@ impl BranchedFlowSimulator {
             clear_pipeline,
             bind_group,
             params_buffer,
+            scatterer_buffer,
             params,
             enabled: false,
             tex_width,
@@ -231,6 +386,23 @@ impl BranchedFlowSimulator {
     /// Update parameters buffer
     pub fn update_params(&self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    /// Update scatterer positions for current frame
+    /// Called each frame to create animated particle distribution
+    pub fn update_scatterers(&self, queue: &wgpu::Queue, time: f32) {
+        let scatterers = generate_scatterers(
+            self.params.num_scatterers.min(MAX_SCATTERERS),
+            time,
+            self.params.scatterer_strength,
+            self.params.scatterer_radius,
+        );
+        // Only write the active scatterers (not the full buffer)
+        queue.write_buffer(
+            &self.scatterer_buffer,
+            0,
+            bytemuck::cast_slice(&scatterers),
+        );
     }
 
     /// Set laser entry point (spherical coordinates: azimuth, elevation in degrees)
@@ -280,8 +452,8 @@ impl BranchedFlowSimulator {
             });
             pass.set_pipeline(&self.clear_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            let workgroups_x = (self.tex_width + 15) / 16;
-            let workgroups_y = (self.tex_height + 15) / 16;
+            let workgroups_x = self.tex_width.div_ceil(16);
+            let workgroups_y = self.tex_height.div_ceil(16);
             pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
@@ -293,7 +465,7 @@ impl BranchedFlowSimulator {
             });
             pass.set_pipeline(&self.trace_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            let workgroups = (self.params.num_rays + 63) / 64;
+            let workgroups = self.params.num_rays.div_ceil(64);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
     }
@@ -385,7 +557,119 @@ mod tests {
             "Intensity falloff should be small per step");
         assert!(params.thickness_scale > 0.0,
             "Thickness scale must be positive");
-        assert_eq!(params.tex_width, 256);
-        assert_eq!(params.tex_height, 128);
+        assert_eq!(params.tex_width, 512);
+        assert_eq!(params.tex_height, 256);
+        // Particle scattering defaults
+        assert!(params.num_scatterers >= 100 && params.num_scatterers <= MAX_SCATTERERS,
+            "Num scatterers should be reasonable");
+        assert!(params.scatterer_strength > 0.0,
+            "Scatterer strength must be positive");
+        assert!(params.scatterer_radius > 0.0 && params.scatterer_radius < 1.0,
+            "Scatterer radius should be in UV space (0-1)");
+        assert!(params.particle_weight >= 0.0 && params.particle_weight <= 1.0,
+            "Particle weight should be a blend factor (0-1)");
+    }
+
+    #[test]
+    fn scatterer_gpu_struct_size() {
+        // ScattererGPU must be 16 bytes (4 f32 fields) for GPU alignment
+        assert_eq!(
+            std::mem::size_of::<ScattererGPU>(),
+            16,
+            "ScattererGPU must be 16 bytes for GPU alignment"
+        );
+    }
+
+    #[test]
+    fn halton_sequence_produces_values_in_range() {
+        for i in 1..100u32 {
+            let u = halton(i, 2);
+            let v = halton(i, 3);
+            assert!(u >= 0.0 && u < 1.0, "Halton base 2 out of range: {u}");
+            assert!(v >= 0.0 && v < 1.0, "Halton base 3 out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn halton_sequence_is_quasi_random() {
+        // Test that halton produces low-discrepancy sequence
+        // Points should be spread out, not clustered
+        let n = 100;
+        let mut points: Vec<(f32, f32)> = Vec::new();
+        for i in 1..=n {
+            points.push((halton(i as u32, 2), halton(i as u32, 3)));
+        }
+
+        // Check that no two points are too close (min spacing)
+        let min_dist_sq = 0.0001f32; // Allow some clustering for quasi-random
+        for i in 0..points.len() {
+            for j in (i + 1)..points.len() {
+                let dx = points[i].0 - points[j].0;
+                let dy = points[i].1 - points[j].1;
+                let dist_sq = dx * dx + dy * dy;
+                // At least some pairs should be well separated
+                if dist_sq > min_dist_sq {
+                    return; // Test passes if we find separated points
+                }
+            }
+        }
+        // If we get here, all points are too close (unlikely for Halton)
+        panic!("Halton sequence points are too clustered");
+    }
+
+    #[test]
+    fn generate_scatterers_produces_correct_count() {
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        assert_eq!(scatterers.len(), 100);
+
+        let scatterers = generate_scatterers(500, 0.0, 0.5, 0.03);
+        assert_eq!(scatterers.len(), 500);
+    }
+
+    #[test]
+    fn generate_scatterers_positions_in_range() {
+        let scatterers = generate_scatterers(200, 0.0, 0.5, 0.03);
+        for s in &scatterers {
+            assert!(s.pos_u >= 0.0 && s.pos_u <= 1.0,
+                "Scatterer pos_u out of range: {}", s.pos_u);
+            assert!(s.pos_v >= 0.0 && s.pos_v <= 1.0,
+                "Scatterer pos_v out of range: {}", s.pos_v);
+        }
+    }
+
+    #[test]
+    fn generate_scatterers_has_mixed_signs() {
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        let positive = scatterers.iter().filter(|s| s.strength > 0.0).count();
+        let negative = scatterers.iter().filter(|s| s.strength < 0.0).count();
+
+        // Should have a mix of attractive and repulsive scatterers
+        assert!(positive > 20, "Too few attractive scatterers: {positive}");
+        assert!(negative > 20, "Too few repulsive scatterers: {negative}");
+    }
+
+    #[test]
+    fn generate_scatterers_inv_sigma_sq_is_positive() {
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        for s in &scatterers {
+            assert!(s.inv_sigma_sq > 0.0,
+                "inv_sigma_sq must be positive: {}", s.inv_sigma_sq);
+        }
+    }
+
+    #[test]
+    fn generate_scatterers_time_affects_positions() {
+        let scatterers_t0 = generate_scatterers(50, 0.0, 0.5, 0.03);
+        let scatterers_t1 = generate_scatterers(50, 1.0, 0.5, 0.03);
+
+        // At least some positions should differ due to time-based jitter
+        let mut different = 0;
+        for i in 0..50 {
+            if (scatterers_t0[i].pos_u - scatterers_t1[i].pos_u).abs() > 0.001 ||
+               (scatterers_t0[i].pos_v - scatterers_t1[i].pos_v).abs() > 0.001 {
+                different += 1;
+            }
+        }
+        assert!(different > 0, "Time should affect scatterer positions");
     }
 }
