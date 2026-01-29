@@ -207,8 +207,9 @@ fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
 
     // Organic noise pattern using simplex FBM (4 octaves for fine drainage detail)
     // Slowly animate the noise field for flowing effect
-    // NOTE: Must stay in sync with branched_flow_compute.wgsl which uses 3 FBM octaves
-    // for gradient-based ray bending. Fragment uses 4 for authoritative visual quality.
+    // NOTE: The compute shader (branched_flow_compute.wgsl) samples the GPU drainage
+    // buffer for ray bending, not this procedural noise. This FBM adds visual richness
+    // to the iridescence while the drainage buffer provides the physical thickness.
     let noise_time = t * 0.08;
     let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
     let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
