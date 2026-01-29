@@ -320,6 +320,145 @@ impl LodMeshCache {
     }
 }
 
+/// Curved rectangular patch on a sphere surface for focused branched flow viewing
+///
+/// Generates a mesh covering only a portion of the sphere, defined by UV bounds.
+/// This reduces computation for effects like branched flow ray tracing while
+/// providing a focused view of the effect.
+pub struct SpherePatch {
+    /// UV center u-coordinate (0-1, corresponds to phi angle)
+    pub center_u: f32,
+    /// UV center v-coordinate (0-1, corresponds to theta angle)
+    pub center_v: f32,
+    /// Half-width in UV space (0.158 ≈ 10% of surface area when squared)
+    pub half_size: f32,
+    /// Grid subdivisions along each axis
+    pub subdivisions: u32,
+}
+
+impl Default for SpherePatch {
+    fn default() -> Self {
+        Self {
+            center_u: 0.5,
+            center_v: 0.5,
+            half_size: 0.158, // ~10% of sphere surface area
+            subdivisions: 32,
+        }
+    }
+}
+
+impl SpherePatch {
+    /// Create a new sphere patch with specified parameters
+    pub fn new(center_u: f32, center_v: f32, half_size: f32, subdivisions: u32) -> Self {
+        Self {
+            center_u: center_u.clamp(0.0, 1.0),
+            center_v: center_v.clamp(0.0, 1.0),
+            half_size: half_size.clamp(0.01, 0.5),
+            subdivisions: subdivisions.max(2),
+        }
+    }
+
+    /// Get UV bounds of the patch (min_u, max_u, min_v, max_v)
+    pub fn uv_bounds(&self) -> (f32, f32, f32, f32) {
+        let min_u = (self.center_u - self.half_size).max(0.0);
+        let max_u = (self.center_u + self.half_size).min(1.0);
+        let min_v = (self.center_v - self.half_size).max(0.0);
+        let max_v = (self.center_v + self.half_size).min(1.0);
+        (min_u, max_u, min_v, max_v)
+    }
+
+    /// Generate a curved rectangular mesh on the sphere surface
+    ///
+    /// # Arguments
+    /// * `radius` - Radius of the sphere
+    /// * `aspect_ratio` - Polar/equatorial ratio (1.0 = sphere, <1.0 = oblate)
+    ///
+    /// # Returns
+    /// Tuple of (vertices, indices) for the patch mesh
+    pub fn generate_mesh(&self, radius: f32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<Vertex>) {
+        let (vertices, _indices) = self.generate_mesh_indexed(radius, aspect_ratio);
+        // Return vertices twice to match expected signature (this is a workaround)
+        (vertices, Vec::new())
+    }
+
+    /// Generate indexed mesh for the patch
+    pub fn generate_mesh_indexed(&self, radius: f32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let (min_u, max_u, min_v, max_v) = self.uv_bounds();
+        let subs = self.subdivisions;
+
+        // Radii for ellipsoid support
+        let r_eq = radius;
+        let r_pol = radius * aspect_ratio;
+        let inv_a2 = 1.0 / (r_eq * r_eq);
+        let inv_b2 = 1.0 / (r_pol * r_pol);
+
+        // Generate vertices on a grid within the UV patch bounds
+        for j in 0..=subs {
+            let v = min_v + (max_v - min_v) * (j as f32 / subs as f32);
+            let theta = v * PI; // 0 to PI (top to bottom)
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
+
+            for i in 0..=subs {
+                let u = min_u + (max_u - min_u) * (i as f32 / subs as f32);
+                let phi = u * 2.0 * PI; // 0 to 2*PI
+                let sin_phi = phi.sin();
+                let cos_phi = phi.cos();
+
+                // Position on ellipsoid
+                let x = r_eq * sin_theta * cos_phi;
+                let y = r_pol * cos_theta;
+                let z = r_eq * sin_theta * sin_phi;
+                let position = Vec3::new(x, y, z);
+
+                // Normal for ellipsoid
+                let normal = Vec3::new(x * inv_a2, y * inv_b2, z * inv_a2).normalize();
+
+                // UV coordinates - use the actual u, v position
+                let uv = [u, v];
+
+                vertices.push(Vertex::new(position, normal, uv));
+            }
+        }
+
+        // Generate indices (two triangles per quad)
+        for j in 0..subs {
+            for i in 0..subs {
+                let row_width = subs + 1;
+                let current = j * row_width + i;
+                let next_row = current + row_width;
+
+                // First triangle
+                indices.push(current);
+                indices.push(next_row);
+                indices.push(current + 1);
+
+                // Second triangle
+                indices.push(current + 1);
+                indices.push(next_row);
+                indices.push(next_row + 1);
+            }
+        }
+
+        (vertices, indices)
+    }
+
+    /// Get the number of vertices in the generated mesh
+    pub fn vertex_count(&self) -> usize {
+        let subs = self.subdivisions as usize;
+        (subs + 1) * (subs + 1)
+    }
+
+    /// Get the number of triangles in the generated mesh
+    pub fn triangle_count(&self) -> usize {
+        let subs = self.subdivisions as usize;
+        subs * subs * 2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +548,93 @@ mod tests {
     fn test_vertex_size() {
         // Ensure vertex struct is properly packed for GPU
         assert_eq!(std::mem::size_of::<Vertex>(), 32); // 3*4 + 3*4 + 2*4 = 32 bytes
+    }
+
+    // SpherePatch tests
+    #[test]
+    fn test_sphere_patch_default() {
+        let patch = SpherePatch::default();
+        assert_eq!(patch.center_u, 0.5);
+        assert_eq!(patch.center_v, 0.5);
+        assert!((patch.half_size - 0.158).abs() < 0.001);
+        assert_eq!(patch.subdivisions, 32);
+    }
+
+    #[test]
+    fn test_sphere_patch_uv_bounds() {
+        let patch = SpherePatch::new(0.5, 0.5, 0.2, 16);
+        let (min_u, max_u, min_v, max_v) = patch.uv_bounds();
+        assert!((min_u - 0.3).abs() < 1e-6);
+        assert!((max_u - 0.7).abs() < 1e-6);
+        assert!((min_v - 0.3).abs() < 1e-6);
+        assert!((max_v - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sphere_patch_uv_bounds_clamped() {
+        // Patch near edge should clamp to valid range
+        let patch = SpherePatch::new(0.1, 0.9, 0.2, 16);
+        let (min_u, max_u, min_v, max_v) = patch.uv_bounds();
+        assert!(min_u >= 0.0);
+        assert!(max_u <= 1.0);
+        assert!(min_v >= 0.0);
+        assert!(max_v <= 1.0);
+    }
+
+    #[test]
+    fn test_sphere_patch_mesh_generation() {
+        let patch = SpherePatch::new(0.5, 0.5, 0.2, 8);
+        let (vertices, indices) = patch.generate_mesh_indexed(1.0, 1.0);
+
+        // Should have (subdivisions+1)^2 vertices
+        assert_eq!(vertices.len(), 9 * 9); // 81 vertices
+        // Should have subdivisions^2 * 2 * 3 indices (2 triangles per quad, 3 indices per triangle)
+        assert_eq!(indices.len(), 8 * 8 * 2 * 3); // 384 indices
+    }
+
+    #[test]
+    fn test_sphere_patch_vertices_on_sphere() {
+        let radius = 1.5;
+        let patch = SpherePatch::new(0.5, 0.5, 0.2, 16);
+        let (vertices, _) = patch.generate_mesh_indexed(radius, 1.0);
+
+        for vertex in &vertices {
+            let pos = Vec3::from_array(vertex.position);
+            let distance = pos.length();
+            assert!(
+                (distance - radius).abs() < 1e-5,
+                "Patch vertex not on sphere: distance = {}, expected = {}",
+                distance,
+                radius
+            );
+        }
+    }
+
+    #[test]
+    fn test_sphere_patch_uv_in_bounds() {
+        let patch = SpherePatch::new(0.3, 0.7, 0.15, 8);
+        let (min_u, max_u, min_v, max_v) = patch.uv_bounds();
+        let (vertices, _) = patch.generate_mesh_indexed(1.0, 1.0);
+
+        for vertex in &vertices {
+            let [u, v] = vertex.uv;
+            assert!(
+                u >= min_u - 1e-6 && u <= max_u + 1e-6,
+                "U coordinate {} outside patch bounds [{}, {}]",
+                u, min_u, max_u
+            );
+            assert!(
+                v >= min_v - 1e-6 && v <= max_v + 1e-6,
+                "V coordinate {} outside patch bounds [{}, {}]",
+                v, min_v, max_v
+            );
+        }
+    }
+
+    #[test]
+    fn test_sphere_patch_count_methods() {
+        let patch = SpherePatch::new(0.5, 0.5, 0.2, 10);
+        assert_eq!(patch.vertex_count(), 11 * 11); // 121
+        assert_eq!(patch.triangle_count(), 10 * 10 * 2); // 200
     }
 }

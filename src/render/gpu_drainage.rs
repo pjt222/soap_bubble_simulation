@@ -158,9 +158,11 @@ impl GPUDrainageSimulator {
         ];
 
         // Initialize parameters
-        let mut params = DrainageParams::default();
-        params.grid_width = grid_width;
-        params.grid_height = grid_height;
+        let params = DrainageParams {
+            grid_width,
+            grid_height,
+            ..DrainageParams::default()
+        };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Drainage Params Buffer"),
@@ -344,8 +346,8 @@ impl GPUDrainageSimulator {
         let step_dt = scaled_dt / self.steps_per_frame as f32;
 
         // Calculate workgroup dispatch sizes
-        let workgroups_x = (self.params.grid_width + 15) / 16;
-        let workgroups_y = (self.params.grid_height + 15) / 16;
+        let workgroups_x = self.params.grid_width.div_ceil(16);
+        let workgroups_y = self.params.grid_height.div_ceil(16);
 
         // Run multiple steps per frame for stability and speed
         for _ in 0..self.steps_per_frame {

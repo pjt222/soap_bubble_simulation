@@ -41,6 +41,11 @@ struct BranchedFlowParams {
     scatterer_strength: f32,  // Base scattering strength
     scatterer_radius: f32,    // σ in UV space (correlation length)
     particle_weight: f32,     // Blend: 0=pure GRIN, 1=pure particle
+    // Patch view mode parameters
+    patch_enabled: u32,       // 0 = full sphere, 1 = patch only
+    patch_center_u: f32,      // Center U coordinate (0-1)
+    patch_center_v: f32,      // Center V coordinate (0-1)
+    patch_half_size: f32,     // Half-width in UV space
 };
 
 // Scatterer data - represents micelle clusters that deflect light
@@ -73,6 +78,46 @@ fn normal_to_uv(n: vec3<f32>) -> vec2<f32> {
     let u = (phi + PI) / (2.0 * PI);  // 0 to 1
     let v = theta / PI;  // 0 to 1
     return vec2<f32>(u, v);
+}
+
+// ============================================================================
+// Patch Mode Utilities
+// When patch mode is enabled, rays are confined to a rectangular UV region
+// ============================================================================
+
+// Check if UV position is within patch bounds
+fn is_in_patch(uv: vec2<f32>) -> bool {
+    if (params.patch_enabled == 0u) {
+        return true; // Full sphere mode - always in bounds
+    }
+    let du = abs(uv.x - params.patch_center_u);
+    let dv = abs(uv.y - params.patch_center_v);
+    return du <= params.patch_half_size && dv <= params.patch_half_size;
+}
+
+// Get patch UV bounds (min_u, max_u, min_v, max_v)
+fn get_patch_bounds() -> vec4<f32> {
+    let min_u = max(params.patch_center_u - params.patch_half_size, 0.0);
+    let max_u = min(params.patch_center_u + params.patch_half_size, 1.0);
+    let min_v = max(params.patch_center_v - params.patch_half_size, 0.0);
+    let max_v = min(params.patch_center_v + params.patch_half_size, 1.0);
+    return vec4<f32>(min_u, max_u, min_v, max_v);
+}
+
+// Map a 0-1 coordinate to within patch bounds
+fn map_to_patch(t_u: f32, t_v: f32) -> vec2<f32> {
+    let bounds = get_patch_bounds();
+    let u = bounds.x + t_u * (bounds.y - bounds.x);
+    let v = bounds.z + t_v * (bounds.w - bounds.z);
+    return vec2<f32>(u, v);
+}
+
+// Map world UV to patch-local UV (0-1 within patch)
+fn uv_to_patch_local(uv: vec2<f32>) -> vec2<f32> {
+    let bounds = get_patch_bounds();
+    let local_u = (uv.x - bounds.x) / max(bounds.y - bounds.x, 0.001);
+    let local_v = (uv.y - bounds.z) / max(bounds.w - bounds.z, 0.001);
+    return vec2<f32>(clamp(local_u, 0.0, 1.0), clamp(local_v, 0.0, 1.0));
 }
 
 // ============================================================================
@@ -301,7 +346,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // === DEPOSIT: Continuous thin trail ===
         // Use very small deposit per step - branches emerge from ray convergence
-        deposit_bilinear(uv, intensity * 0.15);
+        // In patch mode, only deposit if within patch bounds
+        if (params.patch_enabled != 0u) {
+            if (is_in_patch(uv)) {
+                let local_uv = uv_to_patch_local(uv);
+                deposit_bilinear(local_uv, intensity * 0.15);
+            }
+            // Continue tracing even if outside patch (ray might re-enter)
+        } else {
+            deposit_bilinear(uv, intensity * 0.15);
+        }
 
         // === KICK: Hybrid deflection model ===
         // 1. GRIN force: rays bend toward thicker regions (smooth, correlated)

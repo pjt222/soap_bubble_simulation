@@ -108,7 +108,7 @@ pub struct CausticRenderer {
     /// Caustic parameters buffer
     params_buffer: wgpu::Buffer,
     /// Caustic map storage buffer
-    caustic_buffer: wgpu::Buffer,
+    _caustic_buffer: wgpu::Buffer,
     /// Compute bind group
     compute_bind_group: wgpu::BindGroup,
     /// Render bind group
@@ -376,7 +376,7 @@ impl CausticRenderer {
             compute_pipeline,
             render_pipeline,
             params_buffer,
-            caustic_buffer,
+            _caustic_buffer: caustic_buffer,
             compute_bind_group,
             render_bind_group,
             ground_vertices,
@@ -450,8 +450,8 @@ impl CausticRenderer {
         compute_pass.set_pipeline(&self.compute_pipeline);
         compute_pass.set_bind_group(0, &self.compute_bind_group, &[]);
 
-        let workgroups_x = (self.params.grid_width + 15) / 16;
-        let workgroups_y = (self.params.grid_height + 15) / 16;
+        let workgroups_x = self.params.grid_width.div_ceil(16);
+        let workgroups_y = self.params.grid_height.div_ceil(16);
         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 

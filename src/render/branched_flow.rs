@@ -84,6 +84,15 @@ pub struct BranchedFlowParams {
     pub scatterer_radius: f32,
     /// Blend factor: 0 = pure GRIN, 1 = pure particle scattering
     pub particle_weight: f32,
+    // === Patch view mode parameters ===
+    /// Whether patch view mode is enabled (0 = full sphere, 1 = patch only)
+    pub patch_enabled: u32,
+    /// Patch center U coordinate (0-1)
+    pub patch_center_u: f32,
+    /// Patch center V coordinate (0-1)
+    pub patch_center_v: f32,
+    /// Patch half-size in UV space (same for both axes)
+    pub patch_half_size: f32,
 }
 
 impl Default for BranchedFlowParams {
@@ -118,14 +127,47 @@ impl Default for BranchedFlowParams {
             num_scatterers: 800,
             scatterer_strength: 0.5,
             scatterer_radius: 0.03,
-            particle_weight: 0.8,
+            particle_weight: 0.1,
+            // Patch view mode defaults (disabled, centered at 0.5, ~10% of surface)
+            patch_enabled: 0,
+            patch_center_u: 0.5,
+            patch_center_v: 0.5,
+            patch_half_size: 0.158,
         }
+    }
+}
+
+/// Optional patch bounds for confining scatterers
+#[derive(Debug, Clone, Copy)]
+pub struct PatchBounds {
+    pub center_u: f32,
+    pub center_v: f32,
+    pub half_size: f32,
+}
+
+impl PatchBounds {
+    /// Map a 0-1 coordinate to within the patch bounds
+    fn map_to_patch(&self, u: f32, v: f32) -> (f32, f32) {
+        let min_u = (self.center_u - self.half_size).max(0.0);
+        let min_v = (self.center_v - self.half_size).max(0.0);
+        let max_u = (self.center_u + self.half_size).min(1.0);
+        let max_v = (self.center_v + self.half_size).min(1.0);
+        let mapped_u = min_u + u * (max_u - min_u);
+        let mapped_v = min_v + v * (max_v - min_v);
+        (mapped_u, mapped_v)
     }
 }
 
 /// Generate scatterers using quasi-random distribution with jitter
 /// Uses Halton sequence for good spatial coverage
-fn generate_scatterers(num: u32, time: f32, base_strength: f32, base_radius: f32) -> Vec<ScattererGPU> {
+/// If patch_bounds is provided, scatterers are confined within the patch
+fn generate_scatterers(
+    num: u32,
+    time: f32,
+    base_strength: f32,
+    base_radius: f32,
+    patch_bounds: Option<PatchBounds>,
+) -> Vec<ScattererGPU> {
     let mut scatterers = Vec::with_capacity(num as usize);
 
     // Halton sequence bases (coprime for 2D low-discrepancy)
@@ -143,8 +185,20 @@ fn generate_scatterers(num: u32, time: f32, base_strength: f32, base_radius: f32
         let jitter_u = (hash_seed.sin() * 43758.547).fract() * jitter_scale;
         let jitter_v = (hash_seed.cos() * 43758.547).fract() * jitter_scale;
 
-        let pos_u = (u + jitter_u).rem_euclid(1.0);
-        let pos_v = (v + jitter_v).rem_euclid(1.0);
+        let (pos_u, pos_v) = if let Some(bounds) = patch_bounds {
+            // Map to patch bounds, then apply jitter within patch
+            let (mapped_u, mapped_v) = bounds.map_to_patch(u, v);
+            (
+                (mapped_u + jitter_u * bounds.half_size * 2.0).clamp(0.0, 1.0),
+                (mapped_v + jitter_v * bounds.half_size * 2.0).clamp(0.0, 1.0),
+            )
+        } else {
+            // Full sphere - use modular wrapping
+            (
+                (u + jitter_u).rem_euclid(1.0),
+                (v + jitter_v).rem_euclid(1.0),
+            )
+        };
 
         // Randomize sign of strength (attractive vs repulsive)
         // Use deterministic hash based on index
@@ -335,6 +389,7 @@ impl BranchedFlowSimulator {
             0.0,
             params.scatterer_strength,
             params.scatterer_radius,
+            None, // No patch bounds on initial creation
         );
         // Pad to MAX_SCATTERERS to avoid buffer resizing
         let mut scatterer_data = initial_scatterers;
@@ -391,11 +446,23 @@ impl BranchedFlowSimulator {
     /// Update scatterer positions for current frame
     /// Called each frame to create animated particle distribution
     pub fn update_scatterers(&self, queue: &wgpu::Queue, time: f32) {
+        // If patch mode is enabled, confine scatterers within the patch
+        let patch_bounds = if self.params.patch_enabled != 0 {
+            Some(PatchBounds {
+                center_u: self.params.patch_center_u,
+                center_v: self.params.patch_center_v,
+                half_size: self.params.patch_half_size,
+            })
+        } else {
+            None
+        };
+
         let scatterers = generate_scatterers(
             self.params.num_scatterers.min(MAX_SCATTERERS),
             time,
             self.params.scatterer_strength,
             self.params.scatterer_radius,
+            patch_bounds,
         );
         // Only write the active scatterers (not the full buffer)
         queue.write_buffer(
@@ -482,12 +549,12 @@ mod tests {
 
     #[test]
     fn params_struct_size_matches_wgsl_layout() {
-        // BranchedFlowParams must be 96 bytes (24 f32/u32 fields)
+        // BranchedFlowParams must be 112 bytes (28 f32/u32 fields)
         // to match the WGSL uniform struct layout
         assert_eq!(
             std::mem::size_of::<BranchedFlowParams>(),
-            24 * 4, // 24 fields * 4 bytes each
-            "BranchedFlowParams size must match WGSL uniform layout (96 bytes)"
+            28 * 4, // 28 fields * 4 bytes each
+            "BranchedFlowParams size must match WGSL uniform layout (112 bytes)"
         );
     }
 
@@ -619,16 +686,16 @@ mod tests {
 
     #[test]
     fn generate_scatterers_produces_correct_count() {
-        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
         assert_eq!(scatterers.len(), 100);
 
-        let scatterers = generate_scatterers(500, 0.0, 0.5, 0.03);
+        let scatterers = generate_scatterers(500, 0.0, 0.5, 0.03, None);
         assert_eq!(scatterers.len(), 500);
     }
 
     #[test]
     fn generate_scatterers_positions_in_range() {
-        let scatterers = generate_scatterers(200, 0.0, 0.5, 0.03);
+        let scatterers = generate_scatterers(200, 0.0, 0.5, 0.03, None);
         for s in &scatterers {
             assert!(s.pos_u >= 0.0 && s.pos_u <= 1.0,
                 "Scatterer pos_u out of range: {}", s.pos_u);
@@ -639,7 +706,7 @@ mod tests {
 
     #[test]
     fn generate_scatterers_has_mixed_signs() {
-        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
         let positive = scatterers.iter().filter(|s| s.strength > 0.0).count();
         let negative = scatterers.iter().filter(|s| s.strength < 0.0).count();
 
@@ -650,7 +717,7 @@ mod tests {
 
     #[test]
     fn generate_scatterers_inv_sigma_sq_is_positive() {
-        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03);
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
         for s in &scatterers {
             assert!(s.inv_sigma_sq > 0.0,
                 "inv_sigma_sq must be positive: {}", s.inv_sigma_sq);
@@ -659,8 +726,8 @@ mod tests {
 
     #[test]
     fn generate_scatterers_time_affects_positions() {
-        let scatterers_t0 = generate_scatterers(50, 0.0, 0.5, 0.03);
-        let scatterers_t1 = generate_scatterers(50, 1.0, 0.5, 0.03);
+        let scatterers_t0 = generate_scatterers(50, 0.0, 0.5, 0.03, None);
+        let scatterers_t1 = generate_scatterers(50, 1.0, 0.5, 0.03, None);
 
         // At least some positions should differ due to time-based jitter
         let mut different = 0;
@@ -671,5 +738,50 @@ mod tests {
             }
         }
         assert!(different > 0, "Time should affect scatterer positions");
+    }
+
+    #[test]
+    fn generate_scatterers_with_patch_bounds() {
+        let bounds = PatchBounds {
+            center_u: 0.5,
+            center_v: 0.5,
+            half_size: 0.2,
+        };
+        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, Some(bounds));
+
+        // All scatterers should be within patch bounds (with small margin for jitter)
+        let min_u = 0.3 - 0.1; // Allow some margin for jitter
+        let max_u = 0.7 + 0.1;
+        let min_v = 0.3 - 0.1;
+        let max_v = 0.7 + 0.1;
+
+        for s in &scatterers {
+            assert!(s.pos_u >= min_u && s.pos_u <= max_u,
+                "Scatterer pos_u {} outside patch bounds [{}, {}]", s.pos_u, min_u, max_u);
+            assert!(s.pos_v >= min_v && s.pos_v <= max_v,
+                "Scatterer pos_v {} outside patch bounds [{}, {}]", s.pos_v, min_v, max_v);
+        }
+    }
+
+    #[test]
+    fn patch_bounds_mapping() {
+        let bounds = PatchBounds {
+            center_u: 0.5,
+            center_v: 0.5,
+            half_size: 0.25,
+        };
+
+        // Test corner mappings
+        let (u, v) = bounds.map_to_patch(0.0, 0.0);
+        assert!((u - 0.25).abs() < 1e-6);
+        assert!((v - 0.25).abs() < 1e-6);
+
+        let (u, v) = bounds.map_to_patch(1.0, 1.0);
+        assert!((u - 0.75).abs() < 1e-6);
+        assert!((v - 0.75).abs() < 1e-6);
+
+        let (u, v) = bounds.map_to_patch(0.5, 0.5);
+        assert!((u - 0.5).abs() < 1e-6);
+        assert!((v - 0.5).abs() < 1e-6);
     }
 }

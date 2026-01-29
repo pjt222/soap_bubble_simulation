@@ -116,13 +116,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } if !egui_consumed => {
-                if self.mouse_pressed {
-                    if let Some((last_x, last_y)) = self.last_mouse_pos {
-                        let delta_x = position.x - last_x;
-                        let delta_y = position.y - last_y;
-                        if let Some(ref mut pipeline) = self.pipeline {
-                            pipeline.camera.orbit(delta_x as f32, delta_y as f32);
-                        }
+                if self.mouse_pressed
+                    && let Some((last_x, last_y)) = self.last_mouse_pos
+                {
+                    let delta_x = position.x - last_x;
+                    let delta_y = position.y - last_y;
+                    if let Some(ref mut pipeline) = self.pipeline {
+                        pipeline.camera.orbit(delta_x as f32, delta_y as f32);
                     }
                 }
                 self.last_mouse_pos = Some((position.x, position.y));

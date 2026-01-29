@@ -86,9 +86,32 @@ sufficient for gradient-based ray bending where fine detail averages out.
 `thickness_scale` (1e6) to micrometers. Noise modulations are fractional multipliers
 on the buffer value, so units cancel naturally.
 
-**Struct alignment:** `BranchedFlowParams` is 96 bytes (24 × f32), padded for
-16-byte GPU alignment. The Rust struct and WGSL struct must match exactly — verified
-by `params_struct_size_matches_wgsl_layout` test.
+**Struct alignment:** `BranchedFlowParams` is 112 bytes (28 × f32), `BubbleUniform`
+is 128 bytes (32 × f32), both padded for 16-byte GPU alignment. The Rust structs
+and WGSL structs must match exactly — verified by size alignment tests.
+
+## Patch View Mode
+
+The patch view mode renders a small curved rectangular patch (~10% of sphere surface)
+instead of the full bubble. This provides a focused view of branched flow effects.
+
+**Key insight — rays must intersect the patch region:**
+- The `SpherePatch` struct generates a curved mesh from UV bounds on the sphere
+- Rays trace from the laser entry point (Azimuth/Elevation UI controls)
+- In patch mode, deposits only occur when ray UV position is within patch bounds
+- The fragment shader remaps patch-local UVs when sampling the branched flow texture
+
+**Attempted optimizations that caused GPU freezes:**
+- Moving ray entry point to patch center caused synchronization issues
+- Scaling beam spread to patch size created invalid ray distributions
+- Breaking ray loops early when outside patch caused incomplete traces
+
+**Working approach:** Keep original ray tracing, filter deposits by patch bounds.
+To see branched flow in patch mode, position the laser to aim through the patch region.
+
+**Performance note:** Patch mode doesn't reduce ray computation (all rays still trace).
+The benefit is focused visualization, not GPU savings. For true performance gains,
+reduce `num_rays` parameter when in patch mode.
 
 ## Configuration
 

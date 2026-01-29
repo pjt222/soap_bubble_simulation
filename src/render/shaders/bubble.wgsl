@@ -42,8 +42,16 @@ struct BubbleUniform {
     light_dir_x: f32,
     light_dir_y: f32,
     light_dir_z: f32,
-    // Padding for 16-byte alignment
+    // Patch view mode parameters
+    patch_enabled: u32,
+    patch_center_u: f32,
+    patch_center_v: f32,
+    patch_half_size: f32,
+    // Padding for 16-byte alignment (128 bytes total)
     _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
+    _padding4: u32,
 };
 
 // Branched flow texture dimensions
@@ -261,6 +269,28 @@ fn sample_branched_flow_texture(uv: vec2<f32>) -> f32 {
     return mix(c0, c1, ty);
 }
 
+// Check if UV position is within patch bounds
+fn is_in_patch(uv: vec2<f32>) -> bool {
+    if (bubble.patch_enabled == 0u) {
+        return true; // Full sphere mode - always in bounds
+    }
+    let du = abs(uv.x - bubble.patch_center_u);
+    let dv = abs(uv.y - bubble.patch_center_v);
+    return du <= bubble.patch_half_size && dv <= bubble.patch_half_size;
+}
+
+// Map world UV to patch-local UV (0-1 within patch) for texture sampling
+fn uv_to_patch_local(uv: vec2<f32>) -> vec2<f32> {
+    let min_u = max(bubble.patch_center_u - bubble.patch_half_size, 0.0);
+    let max_u = min(bubble.patch_center_u + bubble.patch_half_size, 1.0);
+    let min_v = max(bubble.patch_center_v - bubble.patch_half_size, 0.0);
+    let max_v = min(bubble.patch_center_v + bubble.patch_half_size, 1.0);
+
+    let local_u = (uv.x - min_u) / max(max_u - min_u, 0.001);
+    let local_v = (uv.y - min_v) / max(max_v - min_v, 0.001);
+    return vec2<f32>(clamp(local_u, 0.0, 1.0), clamp(local_v, 0.0, 1.0));
+}
+
 // Get branched flow intensity from ray-traced texture
 // The compute shader traces rays from a laser entry point through the film,
 // bending based on thickness gradients, and accumulates intensity in a texture
@@ -269,9 +299,21 @@ fn compute_branched_flow(normal: vec3<f32>, time: f32) -> f32 {
         return 0.0;
     }
 
-    // Sample the pre-computed branched flow texture
-    let uv = normal_to_branched_uv(normal);
-    var intensity = sample_branched_flow_texture(uv);
+    // Get world UV from normal
+    let world_uv = normal_to_branched_uv(normal);
+
+    // In patch mode, remap UV to patch-local coordinates
+    var sample_uv = world_uv;
+    if (bubble.patch_enabled != 0u) {
+        // Check if this fragment is within the patch
+        if (!is_in_patch(world_uv)) {
+            return 0.0; // Outside patch, no branched flow effect
+        }
+        // Remap to patch-local coordinates for texture sampling
+        sample_uv = uv_to_patch_local(world_uv);
+    }
+
+    var intensity = sample_branched_flow_texture(sample_uv);
 
     // Apply intensity scaling
     intensity *= bubble.branched_flow_intensity;

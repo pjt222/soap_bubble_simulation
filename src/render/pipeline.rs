@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config::SimulationConfig;
 use crate::physics::drainage::DrainageSimulator;
-use crate::physics::geometry::{LodMeshCache, Vertex};
+use crate::physics::geometry::{LodMeshCache, SpherePatch, Vertex};
 use crate::physics::foam_dynamics::FoamSimulator;
 use crate::render::camera::Camera;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
@@ -51,8 +51,16 @@ pub struct BubbleUniform {
     pub light_dir_x: f32,
     pub light_dir_y: f32,
     pub light_dir_z: f32,
-    // Padding for 16-byte alignment
+    // Patch view mode parameters
+    pub patch_enabled: u32,
+    pub patch_center_u: f32,
+    pub patch_center_v: f32,
+    pub patch_half_size: f32,
+    // Padding for 16-byte alignment (28 actual fields + 4 padding = 32 fields = 128 bytes)
     pub _padding1: u32,
+    pub _padding2: u32,
+    pub _padding3: u32,
+    pub _padding4: u32,
 }
 
 impl Default for BubbleUniform {
@@ -87,7 +95,15 @@ impl Default for BubbleUniform {
             light_dir_x: 0.577,  // 1/sqrt(3)
             light_dir_y: 0.577,
             light_dir_z: 0.577,
+            // Patch view mode (disabled by default)
+            patch_enabled: 0,
+            patch_center_u: 0.5,
+            patch_center_v: 0.5,
+            patch_half_size: 0.158,
             _padding1: 0,
+            _padding2: 0,
+            _padding3: 0,
+            _padding4: 0,
         }
     }
 }
@@ -173,6 +189,15 @@ pub struct RenderPipeline {
     // Ray-traced branched flow simulation
     branched_flow_simulator: BranchedFlowSimulator,
     _branched_flow_buffer: wgpu::Buffer,
+    // Patch view mode for focused branched flow viewing
+    patch_view_enabled: bool,
+    patch_center_u: f32,
+    patch_center_v: f32,
+    patch_half_size: f32,
+    // Patch mesh buffers (separate from full sphere mesh)
+    patch_vertex_buffer: wgpu::Buffer,
+    patch_index_buffer: wgpu::Buffer,
+    patch_num_indices: u32,
 }
 
 impl RenderPipeline {
@@ -578,6 +603,27 @@ impl RenderPipeline {
             &branched_flow_buffer,
         );
 
+        // Create patch mesh for focused branched flow viewing
+        let patch_center_u = 0.5;
+        let patch_center_v = 0.5;
+        let patch_half_size = 0.158; // ~10% of sphere surface
+        let patch = SpherePatch::new(patch_center_u, patch_center_v, patch_half_size, 32);
+        let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(radius, 1.0);
+
+        let patch_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Patch Vertex Buffer"),
+            contents: bytemuck::cast_slice(&patch_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let patch_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Patch Index Buffer"),
+            contents: bytemuck::cast_slice(&patch_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let patch_num_indices = patch_indices.len() as u32;
+
         Self {
             surface,
             device,
@@ -649,6 +695,14 @@ impl RenderPipeline {
             caustic_renderer,
             branched_flow_simulator,
             _branched_flow_buffer: branched_flow_buffer,
+            // Patch view mode (disabled by default)
+            patch_view_enabled: false,
+            patch_center_u,
+            patch_center_v,
+            patch_half_size,
+            patch_vertex_buffer,
+            patch_index_buffer,
+            patch_num_indices,
         }
     }
 
@@ -790,6 +844,39 @@ impl RenderPipeline {
         });
 
         self.num_indices = mesh.indices.len() as u32;
+    }
+
+    /// Regenerate patch mesh when patch parameters change
+    fn regenerate_patch_mesh(&mut self) {
+        let patch = SpherePatch::new(
+            self.patch_center_u,
+            self.patch_center_v,
+            self.patch_half_size,
+            32,
+        );
+        let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(self.radius, self.aspect_ratio);
+
+        self.patch_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Patch Vertex Buffer"),
+            contents: bytemuck::cast_slice(&patch_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        self.patch_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Patch Index Buffer"),
+            contents: bytemuck::cast_slice(&patch_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        self.patch_num_indices = patch_indices.len() as u32;
+
+        log::debug!(
+            "Regenerated patch mesh: center=({:.2}, {:.2}), size={:.3}, {} triangles",
+            self.patch_center_u,
+            self.patch_center_v,
+            self.patch_half_size,
+            self.patch_num_indices / 3
+        );
     }
 
     /// Select appropriate LOD level based on camera distance
@@ -1249,6 +1336,11 @@ impl RenderPipeline {
         let mut scatterer_strength = self.branched_flow_simulator.params.scatterer_strength;
         let mut scatterer_radius = self.branched_flow_simulator.params.scatterer_radius;
         let mut particle_weight = self.branched_flow_simulator.params.particle_weight;
+        // Patch view mode parameters
+        let mut patch_view_enabled = self.patch_view_enabled;
+        let mut patch_center_u = self.patch_center_u;
+        let mut patch_center_v = self.patch_center_v;
+        let mut patch_half_size = self.patch_half_size;
 
         // Foam system extraction
         let mut foam_enabled = self.foam_enabled;
@@ -1341,6 +1433,11 @@ impl RenderPipeline {
                 &mut scatterer_strength,
                 &mut scatterer_radius,
                 &mut particle_weight,
+                // Patch view mode parameters
+                &mut patch_view_enabled,
+                &mut patch_center_u,
+                &mut patch_center_v,
+                &mut patch_half_size,
                 // Foam parameters
                 &mut foam_enabled,
                 &mut foam_paused,
@@ -1498,6 +1595,30 @@ impl RenderPipeline {
         self.branched_flow_simulator.params.drainage_speed = self.bubble_uniform.drainage_speed;
         self.branched_flow_simulator.params.pattern_scale = self.bubble_uniform.pattern_scale;
 
+        // Handle patch view mode changes
+        self.patch_view_enabled = patch_view_enabled;
+        self.branched_flow_simulator.params.patch_enabled = if patch_view_enabled { 1 } else { 0 };
+        // Check if patch parameters changed (regenerate mesh if so)
+        let patch_params_changed =
+            (patch_center_u - self.patch_center_u).abs() > 0.001
+            || (patch_center_v - self.patch_center_v).abs() > 0.001
+            || (patch_half_size - self.patch_half_size).abs() > 0.001;
+        if patch_params_changed {
+            self.patch_center_u = patch_center_u;
+            self.patch_center_v = patch_center_v;
+            self.patch_half_size = patch_half_size;
+            self.regenerate_patch_mesh();
+        }
+        // Sync patch bounds to branched flow simulator
+        self.branched_flow_simulator.params.patch_center_u = self.patch_center_u;
+        self.branched_flow_simulator.params.patch_center_v = self.patch_center_v;
+        self.branched_flow_simulator.params.patch_half_size = self.patch_half_size;
+        // Sync patch bounds to bubble uniform (for fragment shader)
+        self.bubble_uniform.patch_enabled = if patch_view_enabled { 1 } else { 0 };
+        self.bubble_uniform.patch_center_u = self.patch_center_u;
+        self.bubble_uniform.patch_center_v = self.patch_center_v;
+        self.bubble_uniform.patch_half_size = self.patch_half_size;
+
         // Apply foam parameter changes
         if foam_enabled != self.foam_enabled {
             self.set_foam_enabled(foam_enabled);
@@ -1628,7 +1749,15 @@ impl RenderPipeline {
                         0..self.shared_wall_renderer.instance_count()
                     );
                 }
+            } else if self.patch_view_enabled && self.branched_flow_simulator.enabled {
+                // Patch view mode: render only the focused patch mesh
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.patch_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.patch_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..self.patch_num_indices, 0, 0..1);
             } else {
+                // Full sphere view
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -1861,6 +1990,11 @@ impl RenderPipeline {
         scatterer_strength: &mut f32,
         scatterer_radius: &mut f32,
         particle_weight: &mut f32,
+        // Patch view mode parameters
+        patch_view_enabled: &mut bool,
+        patch_center_u: &mut f32,
+        patch_center_v: &mut f32,
+        patch_half_size: &mut f32,
         // Foam parameters
         foam_enabled: &mut bool,
         foam_paused: &mut bool,
@@ -2193,6 +2327,27 @@ impl RenderPipeline {
                         ui.label("Hybrid model: GRIN + particles");
                         ui.label("Weight 0 = smooth GRIN only");
                         ui.label("Weight 1 = particle scatter only");
+
+                        ui.separator();
+                        ui.label("Patch View Mode");
+                        ui.checkbox(patch_view_enabled, "Focus on patch");
+
+                        if *patch_view_enabled {
+                            ui.add(egui::Slider::new(patch_center_u, 0.1..=0.9)
+                                .text("Center U")
+                                .fixed_decimals(2));
+
+                            ui.add(egui::Slider::new(patch_center_v, 0.1..=0.9)
+                                .text("Center V")
+                                .fixed_decimals(2));
+
+                            ui.add(egui::Slider::new(patch_half_size, 0.05..=0.3)
+                                .text("Patch size")
+                                .fixed_decimals(3));
+
+                            let area_percent = (*patch_half_size * 2.0).powi(2) * 100.0;
+                            ui.label(format!("~{:.1}% of sphere", area_percent));
+                        }
                     }
                 });
 
@@ -2624,11 +2779,11 @@ mod tests {
     fn test_bubble_uniform_size_alignment() {
         // Verify struct is properly aligned for GPU
         // Total size: 9 visual + 4 film + 3 position + 1 edge_mode + 1 bf_enabled
-        //   + 3 bf_params + 3 light_dir + 1 padding = 25 values * 4 bytes = 100 bytes
+        //   + 3 bf_params + 3 light_dir + 4 patch_params + 3 padding = 32 values * 4 bytes = 128 bytes
         assert_eq!(
             std::mem::size_of::<BubbleUniform>(),
-            100,
-            "BubbleUniform should be 100 bytes for GPU alignment"
+            128,
+            "BubbleUniform should be 128 bytes for GPU 16-byte alignment"
         );
     }
 
