@@ -260,6 +260,17 @@ pub struct BranchedFlowSimulator {
     /// Texture dimensions
     tex_width: u32,
     tex_height: u32,
+    /// Dirty flag: whether scatterers need regeneration
+    /// Set when parameters change, cleared after upload
+    scatterers_dirty: bool,
+    /// Cached scatterer parameters for dirty check
+    last_num_scatterers: u32,
+    last_scatterer_strength: f32,
+    last_scatterer_radius: f32,
+    last_patch_enabled: u32,
+    last_patch_center_u: f32,
+    last_patch_center_v: f32,
+    last_patch_half_size: f32,
 }
 
 /// Create a branched flow texture buffer (called early in pipeline init)
@@ -431,10 +442,19 @@ impl BranchedFlowSimulator {
             bind_group,
             params_buffer,
             scatterer_buffer,
-            params,
+            params: params.clone(),
             enabled: false,
             tex_width,
             tex_height,
+            // Initialize dirty flag to true so first frame uploads scatterers
+            scatterers_dirty: true,
+            last_num_scatterers: params.num_scatterers,
+            last_scatterer_strength: params.scatterer_strength,
+            last_scatterer_radius: params.scatterer_radius,
+            last_patch_enabled: params.patch_enabled,
+            last_patch_center_u: params.patch_center_u,
+            last_patch_center_v: params.patch_center_v,
+            last_patch_half_size: params.patch_half_size,
         }
     }
 
@@ -443,9 +463,39 @@ impl BranchedFlowSimulator {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
     }
 
-    /// Update scatterer positions for current frame
-    /// Called each frame to create animated particle distribution
-    pub fn update_scatterers(&self, queue: &wgpu::Queue, time: f32) {
+    /// Check if scatterer parameters have changed and mark dirty if so
+    pub fn check_scatterer_params_changed(&mut self) {
+        let changed = self.params.num_scatterers != self.last_num_scatterers
+            || (self.params.scatterer_strength - self.last_scatterer_strength).abs() > 1e-6
+            || (self.params.scatterer_radius - self.last_scatterer_radius).abs() > 1e-6
+            || self.params.patch_enabled != self.last_patch_enabled
+            || (self.params.patch_center_u - self.last_patch_center_u).abs() > 1e-6
+            || (self.params.patch_center_v - self.last_patch_center_v).abs() > 1e-6
+            || (self.params.patch_half_size - self.last_patch_half_size).abs() > 1e-6;
+
+        if changed {
+            self.scatterers_dirty = true;
+            self.last_num_scatterers = self.params.num_scatterers;
+            self.last_scatterer_strength = self.params.scatterer_strength;
+            self.last_scatterer_radius = self.params.scatterer_radius;
+            self.last_patch_enabled = self.params.patch_enabled;
+            self.last_patch_center_u = self.params.patch_center_u;
+            self.last_patch_center_v = self.params.patch_center_v;
+            self.last_patch_half_size = self.params.patch_half_size;
+        }
+    }
+
+    /// Update scatterer positions only if parameters have changed (dirty flag optimization)
+    /// Called each frame but only regenerates when necessary
+    pub fn update_scatterers(&mut self, queue: &wgpu::Queue, time: f32) {
+        // Check if parameters changed since last upload
+        self.check_scatterer_params_changed();
+
+        // Skip regeneration if scatterers are not dirty
+        if !self.scatterers_dirty {
+            return;
+        }
+
         // If patch mode is enabled, confine scatterers within the patch
         let patch_bounds = if self.params.patch_enabled != 0 {
             Some(PatchBounds {
@@ -470,6 +520,14 @@ impl BranchedFlowSimulator {
             0,
             bytemuck::cast_slice(&scatterers),
         );
+
+        // Clear dirty flag after upload
+        self.scatterers_dirty = false;
+    }
+
+    /// Force scatterer regeneration on next update (e.g., for animation)
+    pub fn mark_scatterers_dirty(&mut self) {
+        self.scatterers_dirty = true;
     }
 
     /// Set laser entry point (spherical coordinates: azimuth, elevation in degrees)

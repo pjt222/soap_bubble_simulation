@@ -28,11 +28,14 @@ pub struct FoamSimulator {
     pub coalescence_enabled: bool,
     /// Relative velocity threshold for coalescence
     pub coalescence_threshold: f32,
+    /// Reusable force buffer to avoid allocation each frame
+    force_buffer: Vec<Vec3>,
 }
 
 impl FoamSimulator {
     /// Create a new foam simulator with default physics parameters.
     pub fn new(cluster: BubbleCluster) -> Self {
+        let bubble_count = cluster.len();
         Self {
             cluster,
             surface_tension: 0.025,
@@ -44,6 +47,7 @@ impl FoamSimulator {
             damping: 0.8, // Increased damping for stability
             coalescence_enabled: false,
             coalescence_threshold: 0.5,
+            force_buffer: vec![Vec3::ZERO; bubble_count],
         }
     }
 
@@ -53,27 +57,39 @@ impl FoamSimulator {
         Self::new(cluster)
     }
 
-    /// Compute all forces on bubbles.
-    pub fn compute_forces(&self) -> Vec<Vec3> {
+    /// Compute all forces on bubbles (reuses internal force buffer).
+    pub fn compute_forces(&mut self) -> &[Vec3] {
         let bubbles = self.cluster.bubbles();
-        let mut forces = vec![Vec3::ZERO; bubbles.len()];
+        let bubble_count = bubbles.len();
+
+        // Resize buffer if needed (avoid reallocation when count unchanged)
+        if self.force_buffer.len() != bubble_count {
+            self.force_buffer.resize(bubble_count, Vec3::ZERO);
+        }
+
+        // Clear forces
+        for f in self.force_buffer.iter_mut() {
+            *f = Vec3::ZERO;
+        }
 
         for (i, bubble) in bubbles.iter().enumerate() {
             // Buoyancy force (reduced gravity for air-filled bubbles)
-            forces[i] += self.compute_buoyancy(bubble);
+            let buoyancy = self.compute_buoyancy(bubble);
+            self.force_buffer[i] += buoyancy;
 
             // Inter-bubble forces
             for (j, other) in bubbles.iter().enumerate().skip(i + 1) {
                 let (force_ij, force_ji) = self.compute_interaction_force(bubble, other);
-                forces[i] += force_ij;
-                forces[j] += force_ji;
+                self.force_buffer[i] += force_ij;
+                self.force_buffer[j] += force_ji;
             }
 
             // Drag force (proportional to velocity)
-            forces[i] += self.compute_drag(bubble);
+            let drag = self.compute_drag(bubble);
+            self.force_buffer[i] += drag;
         }
 
-        forces
+        &self.force_buffer
     }
 
     /// Compute buoyancy-adjusted gravity force.
@@ -153,7 +169,11 @@ impl FoamSimulator {
     ///
     /// Updates bubble positions and velocities using semi-implicit Euler integration.
     pub fn step(&mut self, dt: f32) {
-        let forces = self.compute_forces();
+        // Compute forces (returns borrowed slice from reused buffer)
+        self.compute_forces();
+
+        // Copy forces to local vec since we need to borrow cluster mutably
+        let forces: Vec<Vec3> = self.force_buffer.clone();
         let bubbles = self.cluster.bubbles_mut();
 
         // Semi-implicit Euler integration
@@ -288,9 +308,12 @@ mod tests {
 
     #[test]
     fn test_force_computation() {
-        let sim = FoamSimulator::with_default_cluster();
-        let forces = sim.compute_forces();
-        assert_eq!(forces.len(), sim.bubble_count());
+        let mut sim = FoamSimulator::with_default_cluster();
+        let force_count = {
+            let forces = sim.compute_forces();
+            forces.len()
+        };
+        assert_eq!(force_count, sim.bubble_count());
     }
 
     #[test]

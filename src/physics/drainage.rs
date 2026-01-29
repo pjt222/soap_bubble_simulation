@@ -50,11 +50,13 @@ impl TfeFront {
 
     /// Check if a point (theta, phi) is behind this TFE front.
     /// Returns true if the point should have reduced thickness.
+    /// Optimized: cheap extent check first before expensive phi wrapping
+    #[inline]
     pub fn contains(&self, theta: f64, phi: f64) -> bool {
-        // Distance from equator (theta = PI/2)
+        // Distance from equator (theta = PI/2) - cheap check first
         let dist_from_equator = (theta - std::f64::consts::FRAC_PI_2).abs();
 
-        // Check if within the front's extent
+        // Early exit: most points are outside the front's extent
         if dist_from_equator > self.extent {
             return false;
         }
@@ -66,6 +68,22 @@ impl TfeFront {
         }
 
         phi_diff < self.width / 2.0
+    }
+
+    /// Get the theta range this front affects (min_theta, max_theta)
+    /// Used for spatial culling - only iterate cells in this range
+    #[inline]
+    pub fn theta_range(&self) -> (f64, f64) {
+        let equator = std::f64::consts::FRAC_PI_2;
+        (equator - self.extent, equator + self.extent)
+    }
+
+    /// Get the phi range this front affects (min_phi, max_phi)
+    /// Note: may wrap around 2π boundary
+    #[inline]
+    pub fn phi_range(&self) -> (f64, f64) {
+        let half_width = self.width / 2.0;
+        (self.phi_center - half_width, self.phi_center + half_width)
     }
 }
 
@@ -391,13 +409,34 @@ impl DrainageSimulator {
         // Remove fronts that have reached the poles
         self.tfe_fronts.retain(|f| f.extent < std::f64::consts::FRAC_PI_2 * 0.95);
 
-        // Apply TFE thickness reduction
+        // Apply TFE thickness reduction with spatial culling
+        // Only iterate cells that could possibly be affected by fronts
+        if self.tfe_fronts.is_empty() {
+            return;
+        }
+
         let num_theta = self.thickness.num_theta();
         let num_phi = self.thickness.num_phi();
         let delta_theta = self.thickness.delta_theta();
         let delta_phi = self.thickness.delta_phi();
 
-        for theta_index in 0..num_theta {
+        // Compute bounding theta range for all fronts
+        let mut min_theta_idx = num_theta;
+        let mut max_theta_idx = 0usize;
+
+        for front in &self.tfe_fronts {
+            let (min_theta, max_theta) = front.theta_range();
+            let min_idx = (min_theta / delta_theta).floor() as usize;
+            let max_idx = ((max_theta / delta_theta).ceil() as usize).min(num_theta - 1);
+            min_theta_idx = min_theta_idx.min(min_idx);
+            max_theta_idx = max_theta_idx.max(max_idx);
+        }
+
+        // Clamp to valid range
+        min_theta_idx = min_theta_idx.min(num_theta - 1);
+
+        // Only iterate cells in the theta range affected by fronts
+        for theta_index in min_theta_idx..=max_theta_idx {
             let theta = theta_index as f64 * delta_theta;
 
             for phi_index in 0..num_phi {

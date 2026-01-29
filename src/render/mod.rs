@@ -9,6 +9,7 @@
 //! - Caustics: Branched flow / caustic pattern rendering
 //! - Branched Flow: Ray-traced light propagation through film
 //! - Headless: Headless rendering for automated testing
+//! - Interference LUT: Pre-computed interference color lookup table
 
 pub mod pipeline;
 pub mod camera;
@@ -17,6 +18,7 @@ pub mod foam_renderer;
 pub mod caustics;
 pub mod branched_flow;
 pub mod headless;
+pub mod interference_lut;
 
 pub use pipeline::RenderPipeline;
 pub use camera::Camera;

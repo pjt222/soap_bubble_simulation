@@ -9,6 +9,9 @@ use crate::physics::geometry::{SphereMesh, Vertex};
 use crate::render::camera::Camera;
 use crate::render::pipeline::BubbleUniform;
 use crate::render::branched_flow::create_branched_flow_buffer;
+use crate::render::interference_lut::{
+    generate_interference_lut, LUT_THICKNESS_SAMPLES, LUT_ANGLE_SAMPLES,
+};
 
 /// Headless render pipeline for testing without a window
 ///
@@ -135,6 +138,56 @@ impl HeadlessRenderPipeline {
         // Create branched flow buffer (needed for shader binding 2)
         let branched_flow_buffer = create_branched_flow_buffer(&device);
 
+        // Create interference LUT texture (pre-computed thin-film colors)
+        let interference_lut_data = generate_interference_lut(
+            bubble_uniform.refractive_index,
+            1.0,
+        );
+        let interference_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Interference LUT Texture"),
+            size: wgpu::Extent3d {
+                width: LUT_THICKNESS_SAMPLES,
+                height: LUT_ANGLE_SAMPLES,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &interference_lut_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &interference_lut_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(LUT_THICKNESS_SAMPLES * 4),
+                rows_per_image: Some(LUT_ANGLE_SAMPLES),
+            },
+            wgpu::Extent3d {
+                width: LUT_THICKNESS_SAMPLES,
+                height: LUT_ANGLE_SAMPLES,
+                depth_or_array_layers: 1,
+            },
+        );
+        let interference_lut_view = interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let interference_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Headless Interference LUT Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -168,6 +221,24 @@ impl HeadlessRenderPipeline {
                     },
                     count: None,
                 },
+                // Interference LUT texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Interference LUT sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
             label: Some("headless_bind_group_layout"),
         });
@@ -187,6 +258,14 @@ impl HeadlessRenderPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: branched_flow_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&interference_lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&interference_lut_sampler),
                 },
             ],
             label: Some("headless_bind_group"),

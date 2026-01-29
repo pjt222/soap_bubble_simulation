@@ -58,9 +58,14 @@ struct BubbleUniform {
 const BRANCHED_TEX_WIDTH: u32 = 256u;
 const BRANCHED_TEX_HEIGHT: u32 = 128u;
 
+// Interference LUT dimensions (must match interference_lut.rs constants)
+const LUT_MAX_THICKNESS_NM: f32 = 2000.0;
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(0) @binding(1) var<uniform> bubble: BubbleUniform;
 @group(0) @binding(2) var<storage, read> branched_flow_texture: array<u32>;
+@group(0) @binding(3) var interference_lut: texture_2d<f32>;
+@group(0) @binding(4) var interference_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -200,8 +205,10 @@ fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
     let drain_progress = min(t * bubble.drainage_speed * 0.1, 1.0);
     let drainage = 0.4 * (1.0 - normal.y) * 0.5 * (1.0 + drain_progress);
 
-    // Organic noise pattern using simplex FBM
+    // Organic noise pattern using simplex FBM (4 octaves for fine drainage detail)
     // Slowly animate the noise field for flowing effect
+    // NOTE: Must stay in sync with branched_flow_compute.wgsl which uses 3 FBM octaves
+    // for gradient-based ray bending. Fragment uses 4 for authoritative visual quality.
     let noise_time = t * 0.08;
     let noise_coord = normal * scale * 3.0 + vec3<f32>(noise_time, noise_time * 0.7, noise_time * 0.5);
     let organic_noise = fbm_noise(noise_coord, 4) * swirl * 0.12;
@@ -410,8 +417,26 @@ fn xyz_to_rgb(xyz: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-// Calculate thin-film interference color using spectral sampling
+// Calculate thin-film interference color using LUT texture lookup
+// This replaces the expensive 7-wavelength spectral sampling with a single texture fetch
 fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec3<f32> {
+    // Map thickness and angle to UV coordinates
+    // LUT X axis: thickness (0 to LUT_MAX_THICKNESS_NM nm)
+    // LUT Y axis: cos_theta (0 to 1)
+    let u = clamp(thickness_nm / LUT_MAX_THICKNESS_NM, 0.0, 1.0);
+    let v = clamp(cos_theta, 0.0, 1.0);
+
+    // Sample the pre-computed interference LUT
+    let lut_color = textureSample(interference_lut, interference_sampler, vec2<f32>(u, v));
+
+    // The LUT was generated with intensity=1.0, so apply the current intensity scaling
+    var rgb = lut_color.rgb * bubble.interference_intensity;
+
+    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Legacy spectral sampling (kept for reference/fallback, not called in normal path)
+fn thin_film_interference_spectral(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec3<f32> {
     // 7-point spectral sampling across visible range (380-700nm)
     let wavelengths = array<f32, 7>(400.0, 450.0, 500.0, 550.0, 600.0, 650.0, 700.0);
 

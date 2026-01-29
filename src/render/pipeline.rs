@@ -12,6 +12,9 @@ use crate::render::camera::Camera;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
 use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
 use crate::render::branched_flow::{BranchedFlowSimulator, create_branched_flow_buffer};
+use crate::render::interference_lut::{
+    generate_interference_lut, LUT_THICKNESS_SAMPLES, LUT_ANGLE_SAMPLES,
+};
 use crate::export::image_export;
 
 /// Bubble-specific uniform data
@@ -138,8 +141,10 @@ pub struct RenderPipeline {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
-    // FPS tracking
-    frame_times: Vec<f32>,
+    // FPS tracking (circular buffer for O(1) operations)
+    frame_times: [f32; 60],
+    frame_times_head: usize,
+    frame_times_count: usize,
     fps: f32,
     // Animation state
     rotation_playing: bool,
@@ -189,6 +194,11 @@ pub struct RenderPipeline {
     // Ray-traced branched flow simulation
     branched_flow_simulator: BranchedFlowSimulator,
     _branched_flow_buffer: wgpu::Buffer,
+    // Interference color lookup table texture (pre-computed thin-film colors)
+    interference_lut_texture: wgpu::Texture,
+    interference_lut_sampler: wgpu::Sampler,
+    // Track refractive index for LUT regeneration when it changes
+    last_refractive_index: f32,
     // Patch view mode for focused branched flow viewing
     patch_view_enabled: bool,
     patch_center_u: f32,
@@ -292,6 +302,56 @@ impl RenderPipeline {
         // Create branched flow texture buffer (needed early for bind group)
         let branched_flow_buffer = create_branched_flow_buffer(&device);
 
+        // Create interference LUT texture (pre-computed thin-film colors)
+        let interference_lut_data = generate_interference_lut(
+            bubble_uniform.refractive_index,
+            1.0, // Intensity applied at runtime
+        );
+        let interference_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Interference LUT Texture"),
+            size: wgpu::Extent3d {
+                width: LUT_THICKNESS_SAMPLES,
+                height: LUT_ANGLE_SAMPLES,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &interference_lut_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &interference_lut_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(LUT_THICKNESS_SAMPLES * 4),
+                rows_per_image: Some(LUT_ANGLE_SAMPLES),
+            },
+            wgpu::Extent3d {
+                width: LUT_THICKNESS_SAMPLES,
+                height: LUT_ANGLE_SAMPLES,
+                depth_or_array_layers: 1,
+            },
+        );
+        let interference_lut_view = interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let interference_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Interference LUT Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -326,6 +386,24 @@ impl RenderPipeline {
                     },
                     count: None,
                 },
+                // Interference LUT texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Interference LUT sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
             label: Some("bind_group_layout"),
         });
@@ -345,6 +423,14 @@ impl RenderPipeline {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: branched_flow_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&interference_lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&interference_lut_sampler),
                 },
             ],
             label: Some("bind_group"),
@@ -650,7 +736,9 @@ impl RenderPipeline {
             egui_ctx,
             egui_state,
             egui_renderer,
-            frame_times: Vec::with_capacity(60),
+            frame_times: [0.0; 60],
+            frame_times_head: 0,
+            frame_times_count: 0,
             fps: 0.0,
             // Animation state
             rotation_playing: false,
@@ -695,6 +783,9 @@ impl RenderPipeline {
             caustic_renderer,
             branched_flow_simulator,
             _branched_flow_buffer: branched_flow_buffer,
+            interference_lut_texture,
+            interference_lut_sampler,
+            last_refractive_index: bubble_uniform.refractive_index,
             // Patch view mode (disabled by default)
             patch_view_enabled: false,
             patch_center_u,
@@ -723,6 +814,42 @@ impl RenderPipeline {
     /// Get current drainage simulation time (if running).
     pub fn drainage_time(&self) -> Option<f64> {
         self.drainage_simulator.as_ref().map(|s| s.current_time())
+    }
+
+    /// Regenerate the interference LUT texture when refractive index changes.
+    /// This ensures the pre-computed thin-film colors match the current physics.
+    fn regenerate_interference_lut_if_needed(&mut self) {
+        let current_n = self.bubble_uniform.refractive_index;
+        if (current_n - self.last_refractive_index).abs() < 1e-6 {
+            return; // No significant change
+        }
+
+        // Regenerate LUT data with new refractive index
+        let lut_data = generate_interference_lut(current_n, 1.0);
+
+        // Upload new data to existing texture
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.interference_lut_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(LUT_THICKNESS_SAMPLES * 4),
+                rows_per_image: Some(LUT_ANGLE_SAMPLES),
+            },
+            wgpu::Extent3d {
+                width: LUT_THICKNESS_SAMPLES,
+                height: LUT_ANGLE_SAMPLES,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.last_refractive_index = current_n;
+        log::debug!("Regenerated interference LUT for n={:.3}", current_n);
     }
 
     /// Regenerate mesh with new subdivision level
@@ -1004,11 +1131,11 @@ impl RenderPipeline {
         }
     }
 
-    /// Set MSAA sample count (1 or 4)
+    /// Set MSAA sample count (1, 2, or 4)
     /// Recreates render pipeline and textures as needed
     pub fn set_msaa_samples(&mut self, samples: u32) {
         let samples = match samples {
-            1 | 4 => samples,
+            1 | 2 | 4 => samples,
             _ => 4, // Default to 4 for invalid values
         };
 
@@ -1207,13 +1334,15 @@ impl RenderPipeline {
             self.shared_wall_renderer.upload(&self.queue);
         }
 
-        // Track FPS
-        self.frame_times.push(dt);
-        if self.frame_times.len() > 60 {
-            self.frame_times.remove(0);
+        // Track FPS using circular buffer (O(1) operations)
+        self.frame_times[self.frame_times_head] = dt;
+        self.frame_times_head = (self.frame_times_head + 1) % 60;
+        if self.frame_times_count < 60 {
+            self.frame_times_count += 1;
         }
-        if !self.frame_times.is_empty() {
-            let avg_dt: f32 = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
+        if self.frame_times_count > 0 {
+            let sum: f32 = self.frame_times[..self.frame_times_count].iter().sum();
+            let avg_dt = sum / self.frame_times_count as f32;
             self.fps = 1.0 / avg_dt;
         }
 
@@ -1463,6 +1592,9 @@ impl RenderPipeline {
         if subdivision != self.subdivision_level {
             self.set_subdivision_level(subdivision);
         }
+
+        // Regenerate interference LUT if refractive index changed
+        self.regenerate_interference_lut_if_needed();
 
         // Write back animation state
         self.rotation_playing = rotation_playing;
@@ -2076,10 +2208,12 @@ impl RenderPipeline {
                     egui::ComboBox::from_id_salt("msaa")
                         .selected_text(match *msaa_samples {
                             1 => "Off",
+                            2 => "2x MSAA",
                             _ => "4x MSAA",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(msaa_samples, 1, "Off");
+                            ui.selectable_value(msaa_samples, 2, "2x MSAA");
                             ui.selectable_value(msaa_samples, 4, "4x MSAA");
                         });
                 });
