@@ -156,7 +156,7 @@ fn gaussian(x: f32, mean: f32, sigma: f32) -> f32 {
 /// Convert XYZ to linear sRGB
 fn xyz_to_rgb(xyz: [f32; 3]) -> [f32; 3] {
     let r = 3.2404542 * xyz[0] - 1.5371385 * xyz[1] - 0.4985314 * xyz[2];
-    let g = -0.9692660 * xyz[0] + 1.8760108 * xyz[1] + 0.0415560 * xyz[2];
+    let g = -0.969_266 * xyz[0] + 1.8760108 * xyz[1] + 0.0415560 * xyz[2];
     let b = 0.0556434 * xyz[0] - 0.2040259 * xyz[1] + 1.0572252 * xyz[2];
     [r, g, b]
 }

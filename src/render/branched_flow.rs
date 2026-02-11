@@ -442,7 +442,7 @@ impl BranchedFlowSimulator {
             bind_group,
             params_buffer,
             scatterer_buffer,
-            params: params.clone(),
+            params,
             enabled: false,
             tex_width,
             tex_height,

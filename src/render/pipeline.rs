@@ -196,7 +196,7 @@ pub struct RenderPipeline {
     _branched_flow_buffer: wgpu::Buffer,
     // Interference color lookup table texture (pre-computed thin-film colors)
     interference_lut_texture: wgpu::Texture,
-    interference_lut_sampler: wgpu::Sampler,
+    _interference_lut_sampler: wgpu::Sampler,
     // Track refractive index for LUT regeneration when it changes
     last_refractive_index: f32,
     // Patch view mode for focused branched flow viewing
@@ -789,7 +789,7 @@ impl RenderPipeline {
             branched_flow_simulator,
             _branched_flow_buffer: branched_flow_buffer,
             interference_lut_texture,
-            interference_lut_sampler,
+            _interference_lut_sampler: interference_lut_sampler,
             last_refractive_index: bubble_uniform.refractive_index,
             // Patch view mode (enabled by default for focused visualization)
             patch_view_enabled: true,
