@@ -98,8 +98,8 @@ impl Default for BubbleUniform {
             light_dir_x: 0.577,  // 1/sqrt(3)
             light_dir_y: 0.577,
             light_dir_z: 0.577,
-            // Patch view mode (disabled by default)
-            patch_enabled: 0,
+            // Patch view mode (enabled by default for focused visualization)
+            patch_enabled: 1,
             patch_center_u: 0.5,
             patch_center_v: 0.5,
             patch_half_size: 0.158,
@@ -791,8 +791,8 @@ impl RenderPipeline {
             interference_lut_texture,
             interference_lut_sampler,
             last_refractive_index: bubble_uniform.refractive_index,
-            // Patch view mode (disabled by default)
-            patch_view_enabled: false,
+            // Patch view mode (enabled by default for focused visualization)
+            patch_view_enabled: true,
             patch_center_u,
             patch_center_v,
             patch_half_size,
