@@ -2422,12 +2422,12 @@ impl RenderPipeline {
                             .suffix("°")
                             .fixed_decimals(0));
 
-                        ui.add(egui::Slider::new(bend_strength, 0.01..=1.0)
+                        ui.add(egui::Slider::new(bend_strength, 0.01..=50.0)
                             .text("GRIN bending")
                             .logarithmic(true)
                             .fixed_decimals(3));
 
-                        ui.add(egui::Slider::new(num_rays, 256..=8192)
+                        ui.add(egui::Slider::new(num_rays, 256..=65536)
                             .text("Ray count")
                             .logarithmic(true));
 

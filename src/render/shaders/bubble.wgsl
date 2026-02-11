@@ -55,8 +55,8 @@ struct BubbleUniform {
 };
 
 // Branched flow texture dimensions
-const BRANCHED_TEX_WIDTH: u32 = 256u;
-const BRANCHED_TEX_HEIGHT: u32 = 128u;
+const BRANCHED_TEX_WIDTH: u32 = 512u;
+const BRANCHED_TEX_HEIGHT: u32 = 256u;
 
 // Interference LUT dimensions (must match interference_lut.rs constants)
 const LUT_MAX_THICKNESS_NM: f32 = 2000.0;
@@ -266,11 +266,11 @@ fn sample_branched_flow_texture(uv: vec2<f32>) -> f32 {
     let idx01 = u32(sy1 * width + sx0);
     let idx11 = u32(sy1 * width + sx1);
 
-    // Decode from fixed-point u32 (encoded as value * 65536.0)
-    let c00 = f32(branched_flow_texture[idx00]) / 65536.0;
-    let c10 = f32(branched_flow_texture[idx10]) / 65536.0;
-    let c01 = f32(branched_flow_texture[idx01]) / 65536.0;
-    let c11 = f32(branched_flow_texture[idx11]) / 65536.0;
+    // Decode from fixed-point u32 (encoded as value * 256.0 in compute shader)
+    let c00 = f32(branched_flow_texture[idx00]) / 256.0;
+    let c10 = f32(branched_flow_texture[idx10]) / 256.0;
+    let c01 = f32(branched_flow_texture[idx01]) / 256.0;
+    let c11 = f32(branched_flow_texture[idx11]) / 256.0;
 
     let c0 = mix(c00, c10, tx);
     let c1 = mix(c01, c11, tx);
