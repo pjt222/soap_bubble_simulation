@@ -1,5 +1,6 @@
 // Caustic Render Shader
 // Renders caustic patterns on ground plane
+// put id:'gpu_render_caustics', label:'Caustic render shader', input:'compute_results_gpu.internal', output:'framebuffer_gpu.internal'
 
 struct CausticParams {
     grid_width: u32,

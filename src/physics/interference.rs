@@ -122,6 +122,7 @@ pub struct FresnelCoefficients {
 /// let color = calculator.calculate_interference_color(400.0, 1.0);
 /// println!("RGB: ({}, {}, {})", color.red, color.green, color.blue);
 /// ```
+// put id:'cpu_interference_ref', label:'CPU interference reference', input:'final_config.internal', output:'interference_color.internal'
 #[derive(Debug, Clone)]
 pub struct InterferenceCalculator {
     /// Refractive index of the soap film

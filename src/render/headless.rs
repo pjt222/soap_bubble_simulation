@@ -17,6 +17,7 @@ use crate::render::interference_lut::{
 ///
 /// This pipeline renders to an offscreen texture and can extract
 /// pixel data for verification or comparison.
+// put id:'gpu_render_headless', label:'Headless test renderer', input:'final_config.internal', output:'framebuffer_gpu.internal'
 pub struct HeadlessRenderPipeline {
     device: wgpu::Device,
     queue: wgpu::Queue,

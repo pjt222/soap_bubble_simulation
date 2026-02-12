@@ -291,6 +291,7 @@ pub fn create_branched_flow_buffer(device: &wgpu::Device) -> wgpu::Buffer {
 impl BranchedFlowSimulator {
     /// Create a new branched flow simulator
     /// Takes external buffers: thickness_buffer from GPU drainage, caustic_buffer from early init
+    // put id:'gpu_compute_branched_init', label:'Init branched flow', input:'gpu_device.internal', output:'branched_flow_texture_gpu.internal'
     pub fn new(
         device: &wgpu::Device,
         thickness_buffer: &wgpu::Buffer,
@@ -562,6 +563,7 @@ impl BranchedFlowSimulator {
     }
 
     /// Run simulation step
+    // put id:'gpu_compute_branched_step', label:'Dispatch branched flow rays', input:'uniform_buffers_gpu.internal', output:'branched_flow_texture_gpu.internal'
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, time: f32) {
         if !self.enabled {
             return;

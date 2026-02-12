@@ -77,6 +77,7 @@ impl Default for DrainageParams {
 /// - Surfactant: DΓ/Dt = D_s∇²Γ + advection
 /// - Surface tension: γ(Γ) = γ_air - γ_r × Γ
 /// - Marangoni stress: τ = -γ_r × ∇Γ
+// put id:'gpu_compute_drainage', label:'GPU drainage compute', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
 pub struct GPUDrainageSimulator {
     /// Double-buffered storage for thickness field
     thickness_buffers: [wgpu::Buffer; 2],

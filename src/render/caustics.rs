@@ -100,6 +100,7 @@ impl GroundVertex {
 }
 
 /// Caustic renderer that computes and displays caustic patterns
+// put id:'gpu_compute_caustics', label:'Caustic compute + render', input:'compute_results_gpu.internal', output:'framebuffer_gpu.internal'
 pub struct CausticRenderer {
     /// Compute pipeline for caustic calculation
     compute_pipeline: wgpu::ComputePipeline,

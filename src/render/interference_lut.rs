@@ -14,6 +14,7 @@ pub const LUT_MAX_THICKNESS_NM: f32 = 2000.0;
 
 /// Generate the interference color lookup table
 /// Returns RGBA8 data as Vec<u8> for texture upload
+// put id:'cpu_lut_gen', label:'Generate interference LUT', input:'final_config.internal', output:'lut_texture_gpu.internal'
 pub fn generate_interference_lut(refractive_index: f32, intensity: f32) -> Vec<u8> {
     let size = (LUT_THICKNESS_SAMPLES * LUT_ANGLE_SAMPLES) as usize;
     let mut data = Vec::with_capacity(size * 4);

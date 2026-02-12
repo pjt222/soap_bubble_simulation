@@ -119,6 +119,7 @@ impl BubbleInstance {
 }
 
 /// Renderer for multi-bubble foam using GPU instancing.
+// put id:'gpu_render_foam', label:'Foam instanced renderer', input:'foam_state.internal', output:'framebuffer_gpu.internal'
 pub struct FoamRenderer {
     /// Instance data buffer
     instance_buffer: wgpu::Buffer,

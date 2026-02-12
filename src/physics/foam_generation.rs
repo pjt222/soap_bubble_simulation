@@ -120,6 +120,7 @@ impl SizeDistribution {
 }
 
 /// Parameters for foam generation.
+// put id:'cpu_foam_gen', label:'Generate foam cluster', input:'final_config.internal', output:'foam_state.internal'
 #[derive(Debug, Clone)]
 pub struct GenerationParams {
     // Positioning parameters

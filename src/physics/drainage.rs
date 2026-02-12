@@ -294,6 +294,7 @@ impl DrainageSimulator {
     ///
     /// # Arguments
     /// * `dt` - Time step in seconds
+    // put id:'cpu_drainage_step', label:'CPU drainage step', input:'final_config.internal', output:'thickness_field.internal'
     pub fn step(&mut self, dt: f64) {
         let num_theta = self.thickness.num_theta();
         let num_phi = self.thickness.num_phi();
@@ -511,6 +512,7 @@ impl DrainageSimulator {
     ///
     /// # Returns
     /// Film thickness in meters
+    // put id:'cpu_thickness_query', label:'Query thickness field', input:'thickness_field.internal', output:'thickness_field.internal'
     pub fn get_thickness(&self, theta: f64, phi: f64) -> f64 {
         let num_theta = self.thickness.num_theta();
         let num_phi = self.thickness.num_phi();

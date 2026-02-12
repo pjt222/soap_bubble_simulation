@@ -24,6 +24,7 @@ impl Default for CameraUniform {
 }
 
 /// Orbit camera that rotates around a target point
+// put id:'cpu_camera_state', label:'Camera view-projection', input:'loop_iteration.internal', output:'uniform_buffers_gpu.internal'
 pub struct Camera {
     /// Target point to look at
     pub target: Vec3,

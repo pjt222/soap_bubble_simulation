@@ -1,5 +1,6 @@
 // Instanced Soap Bubble Shader for Multi-Bubble Foam Rendering
 // Supports rendering multiple bubbles with a single draw call using hardware instancing
+// put id:'gpu_render_instanced', label:'Instanced foam shader', input:'vertex_buffer_gpu.internal', output:'framebuffer_gpu.internal'
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,

@@ -212,6 +212,7 @@ pub struct RenderPipeline {
 
 impl RenderPipeline {
     /// Create a new render pipeline
+    // put id:'gpu_init_device', label:'Initialize GPU device', input:'final_config.internal', output:'gpu_device.internal'
     pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
         let size = window.inner_size();
 
@@ -291,7 +292,7 @@ impl RenderPipeline {
         // Create bubble uniform
         let bubble_uniform = BubbleUniform::default();
 
-        // Create uniform buffers
+        // put id:'gpu_init_uniforms', label:'Upload uniforms to GPU', input:'gpu_device.internal', output:'uniform_buffers_gpu.internal'
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
             contents: bytemuck::cast_slice(&[camera_uniform]),
@@ -307,7 +308,7 @@ impl RenderPipeline {
         // Create branched flow texture buffer (needed early for bind group)
         let branched_flow_buffer = create_branched_flow_buffer(&device);
 
-        // Create interference LUT texture (pre-computed thin-film colors)
+        // put id:'gpu_init_lut_upload', label:'Upload interference LUT', input:'gpu_device.internal', output:'lut_texture_gpu.internal'
         let interference_lut_data = generate_interference_lut(
             bubble_uniform.refractive_index,
             1.0, // Intensity applied at runtime
@@ -618,7 +619,7 @@ impl RenderPipeline {
         // Get initial mesh from LOD cache
         let mesh = lod_cache.get_mesh(subdivision_level);
 
-        // Create vertex buffer
+        // put id:'gpu_init_mesh_upload', label:'Upload mesh to GPU', input:'gpu_device.internal', output:'vertex_buffer_gpu.internal'
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: mesh.vertex_bytes(),
@@ -1796,7 +1797,7 @@ impl RenderPipeline {
                 label: Some("Render Encoder"),
             });
 
-        // GPU drainage simulation compute pass (before render pass)
+        // put id:'gpu_compute_dispatch', label:'Dispatch compute shaders', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
         if self.gpu_drainage_enabled {
             // Get frame dt from fps tracking
             let dt = if self.fps > 0.0 { 1.0 / self.fps } else { 1.0 / 60.0 };
@@ -1825,7 +1826,7 @@ impl RenderPipeline {
             &screen_descriptor,
         );
 
-        // Render bubble (with MSAA if enabled)
+        // put id:'gpu_render_pass', label:'Render bubble pass', input:'compute_results_gpu.internal', output:'framebuffer_gpu.internal'
         {
             // When MSAA is enabled (samples > 1), render to msaa_texture and resolve to swap chain
             // When MSAA is disabled (samples = 1), render directly to swap chain
@@ -1908,7 +1909,7 @@ impl RenderPipeline {
             }
         }
 
-        // Render egui (2D overlay - no depth testing needed, renders to resolved swap chain)
+        // put id:'gpu_render_egui', label:'Render egui overlay', input:'framebuffer_gpu.internal', output:'final_frame_gpu.internal'
         // Safety: The render pass is used immediately and dropped before encoder.finish()
         // The 'static lifetime is a limitation of the egui-wgpu API
         {
@@ -2027,7 +2028,7 @@ impl RenderPipeline {
                     format!("screenshots/frame_{:04}.png", self.frame_counter)
                 };
 
-                // Export
+                // put id:'io_export_frame', label:'Export frame to PNG', input:'final_frame_gpu.internal', output:'screenshots/*.png'
                 if let Err(e) = image_export::export_frame(&path, width, height, &pixels) {
                     log::error!("Failed to export frame: {}", e);
                 } else {

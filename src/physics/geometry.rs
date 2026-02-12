@@ -13,6 +13,7 @@ use std::f32::consts::PI;
 /// Contains position, normal, and UV coordinates for thin-film interference mapping.
 /// UV.x maps to theta (0 to 1 for 0 to 2*PI around the sphere)
 /// UV.y maps to phi (0 to 1 for 0 to PI from top to bottom)
+// put id:'cpu_icosphere_gen', label:'Generate icosphere mesh', input:'final_config.internal', output:'vertex_buffer_gpu.internal'
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex {
@@ -245,6 +246,7 @@ impl SphereMesh {
 ///
 /// Generates meshes lazily on first access and caches them for reuse.
 /// Cache is invalidated when aspect_ratio or radius changes.
+// put id:'cpu_lod_cache', label:'LOD mesh cache', input:'final_config.internal', output:'vertex_buffer_gpu.internal'
 pub struct LodMeshCache {
     /// Cached meshes for levels 1-5 (index 0 = level 1, index 4 = level 5)
     meshes: [Option<SphereMesh>; 5],
@@ -325,6 +327,7 @@ impl LodMeshCache {
 /// Generates a mesh covering only a portion of the sphere, defined by UV bounds.
 /// This reduces computation for effects like branched flow ray tracing while
 /// providing a focused view of the effect.
+// put id:'cpu_patch_gen', label:'Generate sphere patch', input:'final_config.internal', output:'vertex_buffer_gpu.internal'
 pub struct SpherePatch {
     /// UV center u-coordinate (0-1, corresponds to phi angle)
     pub center_u: f32,

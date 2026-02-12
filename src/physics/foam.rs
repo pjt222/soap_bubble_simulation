@@ -27,6 +27,7 @@ use std::collections::HashMap;
 pub type BubbleId = u32;
 
 /// Individual bubble in the foam system.
+// put id:'cpu_foam_system', label:'Foam bubble system', input:'final_config.internal', output:'foam_state.internal'
 #[derive(Debug, Clone)]
 pub struct Bubble {
     /// Unique identifier

@@ -1,3 +1,4 @@
+// put id:'gpu_compute_drainage_shader', label:'Drainage PDE solver', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
 // GPU Compute Shader for Soap Bubble Drainage with Marangoni Effect
 //
 // Implements coupled PDEs for thin-film drainage and surfactant transport:

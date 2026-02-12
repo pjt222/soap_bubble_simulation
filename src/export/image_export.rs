@@ -38,6 +38,7 @@ impl std::error::Error for ExportError {}
 /// # Returns
 /// * `Ok(())` on success
 /// * `Err(ExportError)` on failure
+// put id:'io_png_export', label:'Write PNG file', input:'final_frame_gpu.internal', output:'screenshots/*.png'
 pub fn export_frame<P: AsRef<Path>>(
     path: P,
     width: u32,

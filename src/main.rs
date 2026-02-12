@@ -203,10 +203,10 @@ fn main() {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // Parse command line arguments
+    // put id:'cli_parse_args', label:'Parse CLI arguments', output:'cli_args.internal'
     let args = Args::parse();
 
-    // Load configuration
+    // put id:'cfg_load', label:'Load config JSON', input:'cli_args.internal', output:'config.json'
     let mut config = if let Some(ref path) = args.config {
         match SimulationConfig::from_file(path) {
             Ok(cfg) => {
@@ -222,7 +222,7 @@ fn main() {
         SimulationConfig::default()
     };
 
-    // Apply command-line overrides
+    // put id:'cfg_merge_cli', label:'Merge CLI overrides', input:'config.json', output:'final_config.internal'
     if let Some(diameter) = args.diameter {
         config.bubble.diameter = diameter;
     }
@@ -236,7 +236,7 @@ fn main() {
         config.bubble.film_thickness_nm
     );
 
-    // Create event loop and run
+    // put id:'cli_event_loop', label:'Run event loop', input:'final_config.internal', output:'loop_iteration.internal'
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 

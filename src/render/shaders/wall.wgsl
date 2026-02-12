@@ -1,5 +1,6 @@
 // Shared Wall (Plateau Border) Shader for Foam Rendering
 // Renders curved disk geometry (spherical caps) at contact points between touching bubbles
+// put id:'gpu_render_wall', label:'Plateau border shader', input:'vertex_buffer_gpu.internal', output:'framebuffer_gpu.internal'
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,

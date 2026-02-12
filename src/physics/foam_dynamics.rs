@@ -7,6 +7,7 @@ use super::foam::{Bubble, BubbleCluster, BubbleId};
 use glam::Vec3;
 
 /// Physics simulator for foam bubble dynamics.
+// put id:'cpu_foam_dynamics', label:'Foam physics step', input:'foam_state.internal', output:'foam_state.internal'
 pub struct FoamSimulator {
     /// The bubble cluster being simulated
     pub cluster: BubbleCluster,

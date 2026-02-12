@@ -301,6 +301,7 @@ pub struct SimulationConfig {
     pub resolution: u32,
 }
 
+// put id:'cfg_default', label:'Default config', output:'final_config.internal'
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
@@ -323,6 +324,7 @@ impl SimulationConfig {
     /// # Returns
     /// * `Ok(SimulationConfig)` - Parsed configuration
     /// * `Err` - If file cannot be read or parsed
+    // put id:'cfg_from_file', label:'Parse JSON config', input:'config.json', output:'final_config.internal'
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let contents = fs::read_to_string(path.as_ref()).map_err(|error| ConfigError::Io {
             path: path.as_ref().to_path_buf(),

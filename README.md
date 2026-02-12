@@ -145,6 +145,161 @@ Parameters can be set via JSON configuration file:
 }
 ```
 
+## Architecture
+
+<!-- PUTIOR-WORKFLOW-START -->
+```mermaid
+---
+title: Soap Bubble Simulation Data Flow
+---
+flowchart TD
+    cfg_default["Default config"]
+    cfg_from_file["Parse JSON config"]
+    io_png_export["Write PNG file"]
+    cli_parse_args["Parse CLI arguments"]
+    cfg_load["Load config JSON"]
+    cfg_merge_cli["Merge CLI overrides"]
+    cli_event_loop["Run event loop"]
+    cpu_drainage_step["CPU drainage step"]
+    cpu_thickness_query["Query thickness field"]
+    cpu_foam_system["Foam bubble system"]
+    cpu_foam_dynamics["Foam physics step"]
+    cpu_foam_gen["Generate foam cluster"]
+    cpu_icosphere_gen["Generate icosphere mesh"]
+    cpu_lod_cache["LOD mesh cache"]
+    cpu_patch_gen["Generate sphere patch"]
+    cpu_interference_ref["CPU interference reference"]
+    gpu_compute_branched_init["Init branched flow"]
+    gpu_compute_branched_step["Dispatch branched flow rays"]
+    cpu_camera_state["Camera view-projection"]
+    gpu_compute_caustics["Caustic compute + render"]
+    gpu_render_foam["Foam instanced renderer"]
+    gpu_compute_drainage["GPU drainage compute"]
+    gpu_render_headless["Headless test renderer"]
+    cpu_lut_gen["Generate interference LUT"]
+    gpu_init_device["Initialize GPU device"]
+    gpu_init_uniforms["Upload uniforms to GPU"]
+    gpu_init_lut_upload["Upload interference LUT"]
+    gpu_init_mesh_upload["Upload mesh to GPU"]
+    gpu_compute_dispatch["Dispatch compute shaders"]
+    gpu_render_pass["Render bubble pass"]
+    gpu_render_egui["Render egui overlay"]
+    io_export_frame["Export frame to PNG"]
+    gpu_render_bubble_vs["Bubble vertex shader"]
+    gpu_render_bubble_fs["Bubble fragment shader"]
+    gpu_compute_branched_shader["Branched flow ray trace"]
+    gpu_compute_drainage_shader["Drainage PDE solver"]
+    gpu_render_instanced["Instanced foam shader"]
+    gpu_render_caustics["Caustic render shader"]
+    gpu_compute_caustics_shader["Caustic intensity compute"]
+    gpu_render_wall["Plateau border shader"]
+
+    %% Connections
+    cfg_load --> cfg_from_file
+    gpu_render_egui --> io_png_export
+    cli_parse_args --> cfg_load
+    cfg_load --> cfg_merge_cli
+    cfg_default --> cli_event_loop
+    cfg_from_file --> cli_event_loop
+    cfg_merge_cli --> cli_event_loop
+    cfg_default --> cpu_drainage_step
+    cfg_from_file --> cpu_drainage_step
+    cfg_merge_cli --> cpu_drainage_step
+    cpu_drainage_step --> cpu_thickness_query
+    cpu_thickness_query --> cpu_thickness_query
+    cfg_default --> cpu_foam_system
+    cfg_from_file --> cpu_foam_system
+    cfg_merge_cli --> cpu_foam_system
+    cpu_foam_system --> cpu_foam_dynamics
+    cpu_foam_dynamics --> cpu_foam_dynamics
+    cpu_foam_gen --> cpu_foam_dynamics
+    cfg_default --> cpu_foam_gen
+    cfg_from_file --> cpu_foam_gen
+    cfg_merge_cli --> cpu_foam_gen
+    cfg_default --> cpu_icosphere_gen
+    cfg_from_file --> cpu_icosphere_gen
+    cfg_merge_cli --> cpu_icosphere_gen
+    cfg_default --> cpu_lod_cache
+    cfg_from_file --> cpu_lod_cache
+    cfg_merge_cli --> cpu_lod_cache
+    cfg_default --> cpu_patch_gen
+    cfg_from_file --> cpu_patch_gen
+    cfg_merge_cli --> cpu_patch_gen
+    cfg_default --> cpu_interference_ref
+    cfg_from_file --> cpu_interference_ref
+    cfg_merge_cli --> cpu_interference_ref
+    gpu_init_device --> gpu_compute_branched_init
+    cpu_camera_state --> gpu_compute_branched_step
+    gpu_init_uniforms --> gpu_compute_branched_step
+    cli_event_loop --> cpu_camera_state
+    gpu_compute_drainage --> gpu_compute_caustics
+    gpu_compute_dispatch --> gpu_compute_caustics
+    gpu_compute_drainage_shader --> gpu_compute_caustics
+    gpu_compute_caustics_shader --> gpu_compute_caustics
+    cpu_foam_system --> gpu_render_foam
+    cpu_foam_dynamics --> gpu_render_foam
+    cpu_foam_gen --> gpu_render_foam
+    cpu_camera_state --> gpu_compute_drainage
+    gpu_init_uniforms --> gpu_compute_drainage
+    cfg_default --> gpu_render_headless
+    cfg_from_file --> gpu_render_headless
+    cfg_merge_cli --> gpu_render_headless
+    cfg_default --> cpu_lut_gen
+    cfg_from_file --> cpu_lut_gen
+    cfg_merge_cli --> cpu_lut_gen
+    cfg_default --> gpu_init_device
+    cfg_from_file --> gpu_init_device
+    cfg_merge_cli --> gpu_init_device
+    gpu_init_device --> gpu_init_uniforms
+    gpu_init_device --> gpu_init_lut_upload
+    gpu_init_device --> gpu_init_mesh_upload
+    cpu_camera_state --> gpu_compute_dispatch
+    gpu_init_uniforms --> gpu_compute_dispatch
+    gpu_compute_drainage --> gpu_render_pass
+    gpu_compute_dispatch --> gpu_render_pass
+    gpu_compute_drainage_shader --> gpu_render_pass
+    gpu_compute_caustics_shader --> gpu_render_pass
+    gpu_compute_caustics --> gpu_render_egui
+    gpu_render_foam --> gpu_render_egui
+    gpu_render_headless --> gpu_render_egui
+    gpu_render_pass --> gpu_render_egui
+    gpu_render_bubble_vs --> gpu_render_egui
+    gpu_render_bubble_fs --> gpu_render_egui
+    gpu_render_instanced --> gpu_render_egui
+    gpu_render_caustics --> gpu_render_egui
+    gpu_render_wall --> gpu_render_egui
+    gpu_render_egui --> io_export_frame
+    cpu_icosphere_gen --> gpu_render_bubble_vs
+    cpu_lod_cache --> gpu_render_bubble_vs
+    cpu_patch_gen --> gpu_render_bubble_vs
+    gpu_init_mesh_upload --> gpu_render_bubble_vs
+    cpu_lut_gen --> gpu_render_bubble_fs
+    gpu_init_lut_upload --> gpu_render_bubble_fs
+    cpu_camera_state --> gpu_compute_branched_shader
+    gpu_init_uniforms --> gpu_compute_branched_shader
+    cpu_camera_state --> gpu_compute_drainage_shader
+    gpu_init_uniforms --> gpu_compute_drainage_shader
+    cpu_icosphere_gen --> gpu_render_instanced
+    cpu_lod_cache --> gpu_render_instanced
+    cpu_patch_gen --> gpu_render_instanced
+    gpu_init_mesh_upload --> gpu_render_instanced
+    gpu_compute_drainage --> gpu_render_caustics
+    gpu_compute_dispatch --> gpu_render_caustics
+    gpu_compute_drainage_shader --> gpu_render_caustics
+    gpu_compute_caustics_shader --> gpu_render_caustics
+    gpu_compute_drainage --> gpu_compute_caustics_shader
+    gpu_compute_dispatch --> gpu_compute_caustics_shader
+    gpu_compute_drainage_shader --> gpu_compute_caustics_shader
+    gpu_compute_caustics_shader --> gpu_compute_caustics_shader
+    cpu_icosphere_gen --> gpu_render_wall
+    cpu_lod_cache --> gpu_render_wall
+    cpu_patch_gen --> gpu_render_wall
+    gpu_init_mesh_upload --> gpu_render_wall
+```
+<!-- PUTIOR-WORKFLOW-END -->
+
+*Generated with [putior](https://github.com/pjt222/putior) — regenerate with `Rscript scripts/generate_workflow.R`*
+
 ## Project Structure
 
 ```

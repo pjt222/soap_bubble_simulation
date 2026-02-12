@@ -1,5 +1,6 @@
 // Caustic Compute Shader
 // Computes caustic intensity from thickness field variations
+// put id:'gpu_compute_caustics_shader', label:'Caustic intensity compute', input:'compute_results_gpu.internal', output:'compute_results_gpu.internal'
 
 struct CausticParams {
     grid_width: u32,

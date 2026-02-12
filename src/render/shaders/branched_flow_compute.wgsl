@@ -1,6 +1,7 @@
 // Branched Flow Compute Shader
 // Simulates branched flow of light through correlated random potential
 // Based on Patsyk et al. 2020 "Observation of branched flow of light"
+// put id:'gpu_compute_branched_shader', label:'Branched flow ray trace', input:'uniform_buffers_gpu.internal', output:'branched_flow_texture_gpu.internal'
 //
 // Key physics:
 // - Light propagates through medium with smooth random refractive index variations

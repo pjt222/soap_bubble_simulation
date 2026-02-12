@@ -1,5 +1,7 @@
 // Soap Bubble Thin-Film Interference Shader
 // Renders iridescent colors based on film thickness and viewing angle
+// put id:'gpu_render_bubble_vs', label:'Bubble vertex shader', input:'vertex_buffer_gpu.internal', output:'framebuffer_gpu.internal'
+// put id:'gpu_render_bubble_fs', label:'Bubble fragment shader', input:'lut_texture_gpu.internal', output:'framebuffer_gpu.internal'
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,

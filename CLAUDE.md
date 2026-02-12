@@ -113,6 +113,23 @@ To see branched flow in patch mode, position the laser to aim through the patch 
 The benefit is focused visualization, not GPU savings. For true performance gains,
 reduce `num_rays` parameter when in patch mode.
 
+## Workflow Diagram (putior)
+
+The project uses [putior](https://github.com/pjt222/putior) annotations (`// put id:...`)
+in source files to generate a Mermaid data-flow diagram. 40 annotations across 24 files
+(Rust + WGSL) describe the config→CPU→GPU→render→export pipeline.
+
+**Regenerate after changing annotations:**
+```bash
+Rscript scripts/generate_workflow.R
+```
+
+Then copy the updated Mermaid block from `workflow_diagram.md` into `README.md`
+between the `<!-- PUTIOR-WORKFLOW-START -->` / `<!-- PUTIOR-WORKFLOW-END -->` sentinels.
+
+**Note:** putior does not yet support `.wgsl` files natively. WGSL shader annotations
+are included via a manual data frame in `scripts/generate_workflow.R`.
+
 ## Configuration
 
 Parameters in `config/default.json`:
