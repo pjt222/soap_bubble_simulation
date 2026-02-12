@@ -127,8 +127,7 @@ Rscript scripts/generate_workflow.R
 Then copy the updated Mermaid block from `workflow_diagram.md` into `README.md`
 between the `<!-- PUTIOR-WORKFLOW-START -->` / `<!-- PUTIOR-WORKFLOW-END -->` sentinels.
 
-**Note:** putior does not yet support `.wgsl` files natively. WGSL shader annotations
-are included via a manual data frame in `scripts/generate_workflow.R`.
+**Note:** Requires putior >= 0.2.0.9000 for native `.wgsl` file support.
 
 ## Configuration
 
