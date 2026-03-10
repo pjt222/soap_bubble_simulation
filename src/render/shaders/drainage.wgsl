@@ -165,8 +165,12 @@ fn drainage_step(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let grad_c_mag = sqrt(grad_c_theta * grad_c_theta + grad_c_phi * grad_c_phi);
         let marangoni_stress = params.gamma_reduction * grad_c_mag;
 
-        // Coupling: Marangoni stress affects thickness evolution
-        // Higher stress in thin regions helps counter drainage (self-healing)
+        // Coupling: Marangoni stress affects thickness evolution.
+        // Higher stress in thin regions helps counter drainage (self-healing).
+        // NOTE: This uses |grad(Gamma)| (scalar magnitude) rather than the full
+        // directional divergence div(h^2 grad(gamma)). The simplified form always
+        // thickens, losing directional information, but captures the self-healing
+        // qualitative behavior correctly for visualization purposes.
         marangoni_term = params.marangoni_coeff * marangoni_stress * h * h;
     }
 

@@ -38,6 +38,16 @@ pub mod constants {
     pub const REFRACTIVE_INDEX_SOAP_FILM: f64 = 1.33;
 }
 
+/// Convert a linear RGB channel value to sRGB using the piecewise transfer function
+/// defined in IEC 61966-2-1. More accurate than simplified pow(1/2.2) in dark tones.
+fn linear_to_srgb(linear: f64) -> f64 {
+    if linear <= 0.0031308 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// RGB color representation with values in range [0.0, 1.0].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RgbColor {
@@ -401,12 +411,11 @@ impl InterferenceCalculator {
             self.wavelengths_nm[2],
         );
 
-        // Apply gamma correction for perceptually uniform display
-        // Using sRGB gamma of approximately 2.2
-        let gamma = 2.2_f64;
-        let red_corrected = red_intensity.powf(1.0 / gamma);
-        let green_corrected = green_intensity.powf(1.0 / gamma);
-        let blue_corrected = blue_intensity.powf(1.0 / gamma);
+        // Apply proper piecewise sRGB transfer function (IEC 61966-2-1)
+        // instead of simplified pow(1/2.2) which has up to ~5% error in dark tones
+        let red_corrected = linear_to_srgb(red_intensity);
+        let green_corrected = linear_to_srgb(green_intensity);
+        let blue_corrected = linear_to_srgb(blue_intensity);
 
         RgbColor::new(red_corrected, green_corrected, blue_corrected)
     }

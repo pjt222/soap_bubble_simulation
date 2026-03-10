@@ -191,8 +191,11 @@ fn sample_thickness_at_uv(uv: vec2<f32>) -> f32 {
     return thickness_field[idx];
 }
 
-// Compute thickness gradient at UV position
-// This drives ray bending - rays curve toward thicker regions
+// Compute thickness gradient at UV position with spherical metric correction.
+// UV maps to (phi, theta) on the sphere. The physical gradient on a sphere requires
+// a 1/sin(theta) factor for the phi component to account for the metric:
+//   grad(h) = (1/R) * (dh/dtheta, (1/sin(theta)) * dh/dphi)
+// Without this correction, ray bending is artificially exaggerated near the poles.
 fn thickness_gradient_uv(uv: vec2<f32>) -> vec2<f32> {
     let eps = 0.01;  // Sampling distance in UV space
 
@@ -201,9 +204,13 @@ fn thickness_gradient_uv(uv: vec2<f32>) -> vec2<f32> {
     let h_up = sample_thickness_at_uv(uv + vec2<f32>(0.0, eps));
     let h_down = sample_thickness_at_uv(uv - vec2<f32>(0.0, eps));
 
-    // Gradient points toward increasing thickness
-    // Scale to make gradient more significant for ray bending
-    let grad_x = (h_right - h_left) / (2.0 * eps);
+    // UV.y maps to theta: theta = UV.y * PI (0 at north pole, PI at south pole)
+    let theta = uv.y * 3.14159265;
+    let sin_theta = max(sin(theta), 0.01); // Clamp to avoid division by zero at poles
+
+    // phi gradient (UV.x direction) needs 1/sin(theta) spherical metric correction
+    let grad_x = (h_right - h_left) / (2.0 * eps * sin_theta);
+    // theta gradient (UV.y direction) — no correction needed
     let grad_y = (h_up - h_down) / (2.0 * eps);
 
     return vec2<f32>(grad_x, grad_y);
@@ -430,7 +437,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let total_force = grin_force + particle_force;
         vel_2d = vel_2d + total_force * params.bend_strength * dt;
 
-        // Normalize velocity (constant speed, direction changes)
+        // Normalize velocity (constant speed, direction changes).
+        // NOTE: This renormalization breaks the symplectic property of the kick-drift
+        // integrator, but is physically correct for ray optics where speed is constant
+        // and only direction changes (GRIN waveguide model, Patsyk et al. 2020).
         let vel_mag = length(vel_2d);
         if (vel_mag > 0.001) {
             vel_2d = vel_2d / vel_mag;

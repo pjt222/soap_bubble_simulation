@@ -105,17 +105,23 @@ pub struct SphereMesh {
     pub aspect_ratio: f32,
 }
 
-/// Calculate Bond number for bubble deformation
-/// Bo = ρgL² / γ where L is characteristic length (diameter)
+/// Calculate Bond number for bubble deformation.
+/// Uses radius-based definition: Bo = ρ g R² / γ  (Mysels & Shinoda convention)
+/// where R is the equatorial radius, giving more physically meaningful values
+/// for typical soap bubbles in the 1-10cm diameter range.
 pub fn bond_number(density: f32, gravity: f32, diameter: f32, surface_tension: f32) -> f32 {
-    density * gravity * diameter * diameter / surface_tension
+    let radius = diameter * 0.5;
+    density * gravity * radius * radius / surface_tension
 }
 
-/// Calculate aspect ratio from Bond number
-/// For small Bo: aspect_ratio ≈ 1 - 0.1 * Bo
-/// Clamped to reasonable range [0.7, 1.0]
+/// Calculate aspect ratio from Bond number.
+/// For small Bo: aspect_ratio ≈ 1 - C * Bo  where C ≈ 0.4 (Lhuissier & Villermaux 2012).
+/// This gives meaningful variation across 1-10cm bubbles:
+///   1cm → Bo≈0.06, aspect≈0.98 (nearly spherical)
+///   5cm → Bo≈1.5,  aspect≈0.70 (noticeably oblate)
+///  10cm → Bo≈6.1,  aspect≈0.70 (clamped, highly deformed)
 pub fn aspect_ratio_from_bond(bond: f32) -> f32 {
-    (1.0 - 0.1 * bond).clamp(0.7, 1.0)
+    (1.0 - 0.4 * bond).clamp(0.7, 1.0)
 }
 
 impl SphereMesh {

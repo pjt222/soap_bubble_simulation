@@ -337,8 +337,11 @@ impl DrainageSimulator {
                 let thickness_phi_minus = self.scratch.get(theta_index, phi_minus);
                 let thickness_phi_plus = self.scratch.get(theta_index, phi_plus);
 
-                // Compute gravitational drainage term: -rho*g*h^3/(3*eta) * sin(theta)
-                // The sin(theta) factor accounts for the vertical component of drainage
+                // Gravitational drainage: -rho*g*h^3/(3*eta) * sin(theta)
+                // NOTE: This uses the local thinning rate rather than the flux divergence
+                // form div(h^3 sin(theta)). The simplified form gives correct qualitative
+                // behavior (top thins, bottom thickens) but produces a less accurate
+                // thickness profile compared to the full Mysels equation.
                 let thickness_cubed = thickness_current * thickness_current * thickness_current;
                 let drainage_term = -drainage_coefficient * thickness_cubed * sin_theta;
 
