@@ -1997,7 +1997,7 @@ impl RenderPipeline {
         // Safety: The render pass is used immediately and dropped before encoder.finish()
         // The 'static lifetime is a limitation of the egui-wgpu API
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Egui Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -2012,17 +2012,15 @@ impl RenderPipeline {
                 timestamp_writes: None,
             });
 
-            // SAFETY: egui-wgpu 0.31 requires `&mut RenderPass<'static>` but the real
-            // lifetime is tied to `encoder`. This transmute is sound because:
-            // 1. `render_pass` is used only within this block and dropped before `encoder.finish()`
-            // 2. The reference does not escape this scope (egui renders synchronously)
-            // 3. No other references to the encoder exist while render_pass is alive
-            // TODO: Remove when upgrading to egui-wgpu >= 0.32 (accepts non-static lifetime)
-            let render_pass: &mut wgpu::RenderPass<'static> =
-                unsafe { std::mem::transmute(&mut render_pass) };
+            // egui-wgpu 0.31 requires `&mut RenderPass<'static>`. Use wgpu's official
+            // `forget_lifetime()` to erase the borrow-checker's encoder lifetime tracking.
+            // This is safe: the render pass is used only in this block and dropped before
+            // encoder.finish(). Operations on the parent encoder will error at runtime
+            // instead of compile-time, but we don't touch it while the pass is alive.
+            let mut render_pass = render_pass.forget_lifetime();
 
             self.egui_renderer
-                .render(render_pass, &clipped_primitives, &screen_descriptor);
+                .render(&mut render_pass, &clipped_primitives, &screen_descriptor);
         }
 
         // Free egui textures
