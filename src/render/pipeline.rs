@@ -214,6 +214,10 @@ pub struct RenderPipeline {
     patch_vertex_buffer: wgpu::Buffer,
     patch_index_buffer: wgpu::Buffer,
     patch_num_indices: u32,
+    // Pre-allocated staging buffer for screenshot/recording capture (avoids per-frame allocation)
+    staging_buffer: Option<(wgpu::Buffer, u32)>, // (buffer, padded_bytes_per_row)
+    // Background PNG encoding thread handle (waited on before next capture)
+    png_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RenderPipeline {
@@ -628,23 +632,31 @@ impl RenderPipeline {
         let subdivision_level = 3_u32;
         let mut lod_cache = LodMeshCache::new(radius, 1.0);
 
-        // Get initial mesh from LOD cache
-        let mesh = lod_cache.get_mesh(subdivision_level);
+        // Pre-allocate GPU buffers for the maximum LOD level to avoid allocation churn
+        // when switching LOD levels at runtime. Use COPY_DST so we can update via write_buffer.
+        let max_mesh = lod_cache.get_mesh(5); // Level 5 = highest detail, largest buffers
+        let max_vertex_bytes = max_mesh.vertex_bytes().len();
+        let max_index_bytes = max_mesh.index_bytes().len();
 
         // put id:'gpu_init_mesh_upload', label:'Upload mesh to GPU', input:'gpu_device.internal', output:'vertex_buffer_gpu.internal'
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
-            contents: mesh.vertex_bytes(),
-            usage: wgpu::BufferUsages::VERTEX,
+            size: max_vertex_bytes as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
-        // Create index buffer
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Index Buffer"),
-            contents: mesh.index_bytes(),
-            usage: wgpu::BufferUsages::INDEX,
+            size: max_index_bytes as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
+        // Write initial mesh data (current LOD level)
+        let mesh = lod_cache.get_mesh(subdivision_level);
+        queue.write_buffer(&vertex_buffer, 0, mesh.vertex_bytes());
+        queue.write_buffer(&index_buffer, 0, mesh.index_bytes());
         let num_indices = mesh.indices.len() as u32;
 
         // Create unit sphere mesh for foam instanced rendering
@@ -713,18 +725,26 @@ impl RenderPipeline {
         let patch = SpherePatch::new(patch_center_u, patch_center_v, patch_half_size, 32);
         let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(radius, 1.0);
 
-        let patch_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // Pre-allocate patch buffers with COPY_DST to avoid allocation churn on slider changes
+        let patch_vertex_bytes = bytemuck::cast_slice::<Vertex, u8>(&patch_vertices);
+        let patch_index_bytes = bytemuck::cast_slice::<u32, u8>(&patch_indices);
+
+        let patch_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Patch Vertex Buffer"),
-            contents: bytemuck::cast_slice(&patch_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            size: patch_vertex_bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
-        let patch_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let patch_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Patch Index Buffer"),
-            contents: bytemuck::cast_slice(&patch_indices),
-            usage: wgpu::BufferUsages::INDEX,
+            size: patch_index_bytes.len() as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
+        queue.write_buffer(&patch_vertex_buffer, 0, patch_vertex_bytes);
+        queue.write_buffer(&patch_index_buffer, 0, patch_index_bytes);
         let patch_num_indices = patch_indices.len() as u32;
 
         Ok(Self {
@@ -812,6 +832,8 @@ impl RenderPipeline {
             patch_vertex_buffer,
             patch_index_buffer,
             patch_num_indices,
+            staging_buffer: None,
+            png_thread: None,
         })
     }
 
@@ -979,31 +1001,19 @@ impl RenderPipeline {
         }
     }
 
-    /// Regenerate mesh with current parameters (subdivision level, aspect ratio)
+    /// Regenerate mesh with current parameters (subdivision level, aspect ratio).
+    /// Updates the pre-allocated GPU buffers via write_buffer (no allocation).
     fn regenerate_mesh(&mut self) {
-        // Use LOD cache for mesh generation
         let mesh = self.lod_cache.get_mesh(self.subdivision_level);
-
-        self.vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: mesh.vertex_bytes(),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        self.index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: mesh.index_bytes(),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
+        self.queue
+            .write_buffer(&self.vertex_buffer, 0, mesh.vertex_bytes());
+        self.queue
+            .write_buffer(&self.index_buffer, 0, mesh.index_bytes());
         self.num_indices = mesh.indices.len() as u32;
     }
 
-    /// Regenerate patch mesh when patch parameters change
+    /// Regenerate patch mesh when patch parameters change.
+    /// Updates the pre-allocated GPU buffers via write_buffer (no allocation).
     fn regenerate_patch_mesh(&mut self) {
         let patch = SpherePatch::new(
             self.patch_center_u,
@@ -1014,22 +1024,16 @@ impl RenderPipeline {
         let (patch_vertices, patch_indices) =
             patch.generate_mesh_indexed(self.radius, self.aspect_ratio);
 
-        self.patch_vertex_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Patch Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&patch_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-        self.patch_index_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Patch Index Buffer"),
-                    contents: bytemuck::cast_slice(&patch_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
+        self.queue.write_buffer(
+            &self.patch_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&patch_vertices),
+        );
+        self.queue.write_buffer(
+            &self.patch_index_buffer,
+            0,
+            bytemuck::cast_slice(&patch_indices),
+        );
         self.patch_num_indices = patch_indices.len() as u32;
 
         log::debug!(
@@ -1042,29 +1046,41 @@ impl RenderPipeline {
     }
 
     /// Select appropriate LOD level based on camera distance
-    fn select_lod_level(&self) -> u32 {
-        let distance = self.camera.distance;
-
-        if distance < self.lod_thresholds[0] {
+    fn select_lod_level(distance: f32, thresholds: &[f32; 4]) -> u32 {
+        if distance < thresholds[0] {
             5 // Closest: highest detail
-        } else if distance < self.lod_thresholds[1] {
+        } else if distance < thresholds[1] {
             4
-        } else if distance < self.lod_thresholds[2] {
+        } else if distance < thresholds[2] {
             3
-        } else if distance < self.lod_thresholds[3] {
+        } else if distance < thresholds[3] {
             2
         } else {
             1 // Farthest: lowest detail
         }
     }
 
-    /// Update LOD based on current camera distance (call each frame when LOD enabled)
+    /// Update LOD based on current camera distance (call each frame when LOD enabled).
+    /// Applies 10% hysteresis to prevent oscillation near thresholds:
+    /// switching to higher detail (closer) uses exact thresholds,
+    /// switching to lower detail (farther) requires 10% more distance.
     fn update_lod(&mut self) {
         if !self.lod_enabled {
             return;
         }
 
-        let new_level = self.select_lod_level();
+        let distance = self.camera.distance;
+        let candidate = Self::select_lod_level(distance, &self.lod_thresholds);
+
+        // Hysteresis: resist switching to lower detail (higher distance)
+        let new_level = if candidate < self.current_lod_level {
+            // Switching to lower detail — require 10% beyond threshold
+            let expanded: [f32; 4] = std::array::from_fn(|i| self.lod_thresholds[i] * 1.1);
+            Self::select_lod_level(distance, &expanded)
+        } else {
+            candidate
+        };
+
         if new_level != self.current_lod_level {
             self.switch_lod(new_level);
         }
@@ -1080,25 +1096,12 @@ impl RenderPipeline {
         self.current_lod_level = level;
         self.subdivision_level = level;
 
-        // Get mesh from cache and create new GPU buffers
+        // Update pre-allocated GPU buffers (no allocation, just data upload)
         let mesh = self.lod_cache.get_mesh(level);
-
-        self.vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: mesh.vertex_bytes(),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        self.index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: mesh.index_bytes(),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
+        self.queue
+            .write_buffer(&self.vertex_buffer, 0, mesh.vertex_bytes());
+        self.queue
+            .write_buffer(&self.index_buffer, 0, mesh.index_bytes());
         self.num_indices = mesh.indices.len() as u32;
 
         log::debug!(
@@ -1172,6 +1175,8 @@ impl RenderPipeline {
                 Self::create_msaa_texture(&self.device, &self.config, self.msaa_samples);
             self.camera
                 .set_aspect(new_size.width as f32 / new_size.height as f32);
+            // Invalidate staging buffer — will be re-allocated at new size on next capture
+            self.staging_buffer = None;
         }
     }
 
@@ -2027,22 +2032,34 @@ impl RenderPipeline {
 
         // Check if we need to capture a frame
         let should_capture = self.screenshot_requested || self.recording;
-        let staging_buffer = if should_capture {
-            // Calculate buffer size with proper alignment
+        if should_capture {
+            // Ensure pre-allocated staging buffer exists and is the right size
             let bytes_per_pixel = 4u32;
             let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
             let buffer_size = padded_bytes_per_row as u64 * self.config.height as u64;
 
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Screenshot Staging Buffer"),
-                size: buffer_size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+            // Re-use existing staging buffer if size matches
+            if self
+                .staging_buffer
+                .as_ref()
+                .is_none_or(|(buf, _)| buf.size() != buffer_size)
+            {
+                self.staging_buffer = Some((
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Screenshot Staging Buffer"),
+                        size: buffer_size,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    }),
+                    padded_bytes_per_row,
+                ));
+            }
 
-            // Copy texture to buffer
+            let (staging, _) = self.staging_buffer.as_ref().unwrap();
+
+            // Copy texture to pre-allocated staging buffer
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
                     texture: &output.texture,
@@ -2051,7 +2068,7 @@ impl RenderPipeline {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
+                    buffer: staging,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_bytes_per_row),
@@ -2064,17 +2081,19 @@ impl RenderPipeline {
                     depth_or_array_layers: 1,
                 },
             );
-
-            Some((buffer, padded_bytes_per_row))
-        } else {
-            None
-        };
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Process screenshot if requested
-        if let Some((staging_buffer, padded_bytes_per_row)) = staging_buffer {
-            let buffer_slice = staging_buffer.slice(..);
+        if should_capture {
+            // Wait for any previous PNG encoding thread to finish before reading the buffer
+            if let Some(handle) = self.png_thread.take() {
+                let _ = handle.join();
+            }
+
+            let (ref staging, padded_bytes_per_row) = *self.staging_buffer.as_ref().unwrap();
+            let buffer_slice = staging.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
@@ -2088,7 +2107,7 @@ impl RenderPipeline {
                 let height = self.config.height;
                 let bytes_per_pixel = 4u32;
 
-                // Remove row padding
+                // Remove row padding and convert BGRA to RGBA
                 let mut pixels = Vec::with_capacity((width * height * 4) as usize);
                 for row in 0..height {
                     let start = (row * padded_bytes_per_row) as usize;
@@ -2097,31 +2116,34 @@ impl RenderPipeline {
                 }
 
                 drop(data);
-                staging_buffer.unmap();
+                staging.unmap();
 
-                // Convert BGRA to RGBA
                 for chunk in pixels.chunks_exact_mut(4) {
                     chunk.swap(0, 2);
                 }
 
                 // Determine filename
-                if let Err(e) = std::fs::create_dir_all("screenshots") {
-                    log::error!("Cannot create screenshots directory: {}", e);
-                }
                 let path = if self.screenshot_requested && !self.recording {
                     format!("screenshots/screenshot_{:04}.png", self.frame_counter)
                 } else {
                     format!("screenshots/frame_{:04}.png", self.frame_counter)
                 };
 
-                // put id:'io_export_frame', label:'Export frame to PNG', input:'final_frame_gpu.internal', output:'screenshots/*.png'
-                if let Err(e) = image_export::export_frame(&path, width, height, &pixels) {
-                    log::error!("Failed to export frame: {}", e);
-                } else {
-                    log::info!("Saved: {}", path);
-                }
-
                 self.frame_counter = self.frame_counter.saturating_add(1);
+
+                // put id:'io_export_frame', label:'Export frame to PNG', input:'final_frame_gpu.internal', output:'screenshots/*.png'
+                // Offload PNG encoding to a background thread to avoid blocking the render loop
+                self.png_thread = Some(std::thread::spawn(move || {
+                    if let Err(e) = std::fs::create_dir_all("screenshots") {
+                        log::error!("Cannot create screenshots directory: {}", e);
+                        return;
+                    }
+                    if let Err(e) = image_export::export_frame(&path, width, height, &pixels) {
+                        log::error!("Failed to export frame: {}", e);
+                    } else {
+                        log::info!("Saved: {}", path);
+                    }
+                }));
             }
 
             self.screenshot_requested = false;

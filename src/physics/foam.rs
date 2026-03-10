@@ -327,9 +327,6 @@ impl BubbleCluster {
             bubble.neighbors.clear();
         }
 
-        // Rebuild spatial hash
-        self.rebuild_spatial_hash();
-
         // Find all overlapping pairs using brute force O(n²) for now
         // The spatial hash was causing issues - simplify for correctness first
         let n = self.bubbles.len();
