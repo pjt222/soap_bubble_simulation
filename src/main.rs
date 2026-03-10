@@ -79,7 +79,14 @@ impl ApplicationHandler for App {
         self.window = Some(window.clone());
 
         // Create render pipeline
-        let pipeline = pollster::block_on(RenderPipeline::new(window));
+        let pipeline = match pollster::block_on(RenderPipeline::new(window)) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("GPU initialization failed: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
         self.pipeline = Some(pipeline);
         self.last_frame = Instant::now();
 

@@ -111,7 +111,11 @@ impl Default for BubbleUniform {
     }
 }
 
-/// Main render pipeline for the soap bubble
+/// Main render pipeline for the soap bubble simulation.
+///
+/// Owns all wgpu state (device, queue, surface), GPU buffers, compute pipelines
+/// (drainage, branched flow, caustics), the egui integration layer, and animation/export state.
+/// Created via [`RenderPipeline::new()`] which initializes the GPU and all sub-systems.
 pub struct RenderPipeline {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -146,6 +150,8 @@ pub struct RenderPipeline {
     frame_times_head: usize,
     frame_times_count: usize,
     fps: f32,
+    /// Actual frame delta time from the last update() call (seconds)
+    last_dt: f32,
     // Animation state
     rotation_playing: bool,
     rotation_speed: f32,  // radians per second for camera yaw
@@ -211,9 +217,12 @@ pub struct RenderPipeline {
 }
 
 impl RenderPipeline {
-    /// Create a new render pipeline
+    /// Create a new render pipeline.
+    ///
+    /// Returns an error if GPU initialization fails (no compatible adapter,
+    /// surface creation error, or device request denied).
     // put id:'gpu_init_device', label:'Initialize GPU device', input:'final_config.internal', output:'gpu_device.internal'
-    pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
+    pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Result<Self, String> {
         let size = window.inner_size();
 
         // Create wgpu instance
@@ -223,7 +232,9 @@ impl RenderPipeline {
         });
 
         // Create surface
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| format!("Failed to create GPU surface: {e}"))?;
 
         // Request adapter
         let adapter = instance
@@ -233,7 +244,7 @@ impl RenderPipeline {
                 force_fallback_adapter: false,
             })
             .await
-            .unwrap();
+            .ok_or_else(|| "No compatible GPU adapter found. Ensure your GPU drivers are up to date.".to_string())?;
 
         // Request device and queue
         let (device, queue) = adapter
@@ -247,7 +258,7 @@ impl RenderPipeline {
                 None,
             )
             .await
-            .unwrap();
+            .map_err(|e| format!("Failed to initialize GPU device: {e}"))?;
 
         // Configure surface
         let surface_caps = surface.get_capabilities(&adapter);
@@ -716,7 +727,7 @@ impl RenderPipeline {
 
         let patch_num_indices = patch_indices.len() as u32;
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
@@ -746,6 +757,7 @@ impl RenderPipeline {
             frame_times_head: 0,
             frame_times_count: 0,
             fps: 0.0,
+            last_dt: 1.0 / 60.0,
             // Animation state
             rotation_playing: false,
             rotation_speed: 0.5,  // radians per second
@@ -800,7 +812,7 @@ impl RenderPipeline {
             patch_vertex_buffer,
             patch_index_buffer,
             patch_num_indices,
-        }
+        })
     }
 
     /// Initialize the drainage simulator with the given configuration.
@@ -1222,6 +1234,7 @@ impl RenderPipeline {
 
     /// Update time for animation
     pub fn update(&mut self, dt: f32) {
+        self.last_dt = dt;
         self.bubble_uniform.time += dt;
 
         // LOD update based on camera distance
@@ -1801,9 +1814,7 @@ impl RenderPipeline {
 
         // put id:'gpu_compute_dispatch', label:'Dispatch compute shaders', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
         if self.gpu_drainage_enabled {
-            // Get frame dt from fps tracking
-            let dt = if self.fps > 0.0 { 1.0 / self.fps } else { 1.0 / 60.0 };
-            self.gpu_drainage.step(&mut encoder, dt);
+            self.gpu_drainage.step(&mut encoder, self.last_dt);
         }
 
         // Caustic compute pass (after drainage, before render)
@@ -1930,7 +1941,12 @@ impl RenderPipeline {
                 timestamp_writes: None,
             });
 
-            // Transmute lifetime - safe because render_pass is dropped before encoder.finish()
+            // SAFETY: egui-wgpu 0.31 requires `&mut RenderPass<'static>` but the real
+            // lifetime is tied to `encoder`. This transmute is sound because:
+            // 1. `render_pass` is used only within this block and dropped before `encoder.finish()`
+            // 2. The reference does not escape this scope (egui renders synchronously)
+            // 3. No other references to the encoder exist while render_pass is alive
+            // TODO: Remove when upgrading to egui-wgpu >= 0.32 (accepts non-static lifetime)
             let render_pass: &mut wgpu::RenderPass<'static> = unsafe {
                 std::mem::transmute(&mut render_pass)
             };
