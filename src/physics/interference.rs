@@ -516,96 +516,6 @@ impl Default for InterferenceCalculator {
     }
 }
 
-/// GLSL shader code generation for GPU-accelerated interference calculation.
-///
-/// This module provides GLSL code snippets that implement the same physics
-/// as the CPU `InterferenceCalculator`, allowing for real-time GPU rendering.
-pub mod shader_code {
-    /// GLSL function for calculating transmission angle using Snell's law.
-    pub const SNELLS_LAW_GLSL: &str = r#"
-// Calculate transmission angle cosine using Snell's law
-float calculateTransmissionAngleCos(float cosIncident, float nMedium, float nFilm) {
-    float sinIncident = sqrt(1.0 - cosIncident * cosIncident);
-    float sinTransmitted = (nMedium / nFilm) * sinIncident;
-    if (abs(sinTransmitted) > 1.0) return 0.0;
-    return sqrt(1.0 - sinTransmitted * sinTransmitted);
-}
-"#;
-
-    /// GLSL function for calculating Fresnel reflectance.
-    pub const FRESNEL_GLSL: &str = r#"
-// Calculate average Fresnel reflectance for unpolarized light
-float calculateFresnelReflectance(float cosIncident, float nMedium, float nFilm) {
-    float cosTransmitted = calculateTransmissionAngleCos(cosIncident, nMedium, nFilm);
-
-    float n1CosI = nMedium * cosIncident;
-    float n2CosT = nFilm * cosTransmitted;
-    float n2CosI = nFilm * cosIncident;
-    float n1CosT = nMedium * cosTransmitted;
-
-    float rs = (n1CosI - n2CosT) / (n1CosI + n2CosT);
-    float rp = (n2CosI - n1CosT) / (n2CosI + n1CosT);
-
-    return (rs * rs + rp * rp) * 0.5;
-}
-"#;
-
-    /// GLSL function for calculating thin-film interference intensity.
-    pub const INTERFERENCE_INTENSITY_GLSL: &str = r#"
-// Calculate reflected intensity for thin-film interference
-float calculateInterferenceIntensity(float thickness, float cosIncident, float wavelength, float nMedium, float nFilm) {
-    if (thickness <= 0.0) return 0.0;
-
-    float cosTransmitted = calculateTransmissionAngleCos(cosIncident, nMedium, nFilm);
-
-    // Optical path difference with lambda/2 phase shift
-    float opticalPath = 2.0 * nFilm * thickness * cosTransmitted + wavelength * 0.5;
-    float phaseDiff = 2.0 * 3.14159265 * opticalPath / wavelength;
-
-    float R = calculateFresnelReflectance(cosIncident, nMedium, nFilm);
-    float cosPhi = cos(phaseDiff);
-
-    float numerator = 2.0 * R * (1.0 - cosPhi);
-    float denominator = 1.0 + R * R - 2.0 * R * cosPhi;
-
-    return clamp(numerator / max(denominator, 0.0001), 0.0, 1.0);
-}
-"#;
-
-    /// GLSL function for calculating interference RGB color.
-    pub const INTERFERENCE_COLOR_GLSL: &str = r#"
-// Calculate interference color (linear RGB)
-vec3 calculateInterferenceColor(float thickness, float cosIncident, float nFilm) {
-    const float N_AIR = 1.0;
-    const float RED_WL = 650.0;
-    const float GREEN_WL = 532.0;
-    const float BLUE_WL = 450.0;
-
-    float r = calculateInterferenceIntensity(thickness, cosIncident, RED_WL, N_AIR, nFilm);
-    float g = calculateInterferenceIntensity(thickness, cosIncident, GREEN_WL, N_AIR, nFilm);
-    float b = calculateInterferenceIntensity(thickness, cosIncident, BLUE_WL, N_AIR, nFilm);
-
-    return vec3(r, g, b);
-}
-
-// With gamma correction for display
-vec3 calculateInterferenceColorGamma(float thickness, float cosIncident, float nFilm) {
-    vec3 linear = calculateInterferenceColor(thickness, cosIncident, nFilm);
-    return pow(linear, vec3(1.0 / 2.2));
-}
-"#;
-
-    /// Complete GLSL shader code for interference calculation.
-    pub fn complete_shader_code() -> String {
-        format!(
-            "{}\n{}\n{}\n{}",
-            SNELLS_LAW_GLSL,
-            FRESNEL_GLSL,
-            INTERFERENCE_INTENSITY_GLSL,
-            INTERFERENCE_COLOR_GLSL
-        )
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -777,14 +687,4 @@ mod tests {
         assert!(color.blue >= 0.0 && color.blue <= 1.0);
     }
 
-    #[test]
-    fn test_shader_code_generation() {
-        let shader_code = shader_code::complete_shader_code();
-
-        // Verify key functions are present
-        assert!(shader_code.contains("calculateTransmissionAngleCos"));
-        assert!(shader_code.contains("calculateFresnelReflectance"));
-        assert!(shader_code.contains("calculateInterferenceIntensity"));
-        assert!(shader_code.contains("calculateInterferenceColor"));
-    }
 }

@@ -370,20 +370,6 @@ impl SpherePatch {
         (min_u, max_u, min_v, max_v)
     }
 
-    /// Generate a curved rectangular mesh on the sphere surface
-    ///
-    /// # Arguments
-    /// * `radius` - Radius of the sphere
-    /// * `aspect_ratio` - Polar/equatorial ratio (1.0 = sphere, <1.0 = oblate)
-    ///
-    /// # Returns
-    /// Tuple of (vertices, indices) for the patch mesh
-    pub fn generate_mesh(&self, radius: f32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<Vertex>) {
-        let (vertices, _indices) = self.generate_mesh_indexed(radius, aspect_ratio);
-        // Return vertices twice to match expected signature (this is a workaround)
-        (vertices, Vec::new())
-    }
-
     /// Generate indexed mesh for the patch
     pub fn generate_mesh_indexed(&self, radius: f32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();

@@ -139,7 +139,7 @@ pub struct RenderPipeline {
     pub camera: Camera,
     pub bubble_uniform: BubbleUniform,
     // Mesh settings
-    pub subdivision_level: u32,
+    subdivision_level: u32,
     radius: f32,
     // egui integration
     egui_ctx: egui::Context,
@@ -158,22 +158,22 @@ pub struct RenderPipeline {
     film_playing: bool,
     film_speed: f32,
     // Export state
-    pub recording: bool,
-    pub frame_counter: u32,
+    recording: bool,
+    frame_counter: u32,
     pub screenshot_requested: bool,
     // External forces
-    pub bubble_velocity: [f32; 3],
-    pub wind_strength: f32,
-    pub wind_direction: [f32; 3],  // Normalized direction
-    pub buoyancy_strength: f32,
-    pub forces_enabled: bool,
+    bubble_velocity: [f32; 3],
+    wind_strength: f32,
+    wind_direction: [f32; 3],  // Normalized direction
+    buoyancy_strength: f32,
+    forces_enabled: bool,
     // Drainage simulation
     drainage_simulator: Option<DrainageSimulator>,
-    pub physics_drainage_enabled: bool,
+    physics_drainage_enabled: bool,
     drainage_time_scale: f32,
     // Gravity deformation
-    pub deformation_enabled: bool,
-    pub aspect_ratio: f32,  // 1.0 = sphere, <1.0 = oblate (flattened)
+    deformation_enabled: bool,
+    aspect_ratio: f32,  // 1.0 = sphere, <1.0 = oblate (flattened)
     // LOD system
     lod_cache: LodMeshCache,
     current_lod_level: u32,
@@ -181,12 +181,12 @@ pub struct RenderPipeline {
     lod_thresholds: [f32; 4],  // Distance thresholds for LOD transitions [5→4, 4→3, 3→2, 2→1]
     // GPU drainage simulation
     gpu_drainage: GPUDrainageSimulator,
-    pub gpu_drainage_enabled: bool,
+    gpu_drainage_enabled: bool,
     // Multi-bubble foam system
     foam_simulator: Option<FoamSimulator>,
     foam_renderer: FoamRenderer,
-    pub foam_enabled: bool,
-    pub foam_paused: bool,
+    foam_enabled: bool,
+    foam_paused: bool,
     foam_time_scale: f32,
     // Foam generation parameters
     foam_generation_params: crate::physics::foam_generation::GenerationParams,
