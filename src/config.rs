@@ -368,6 +368,81 @@ impl SimulationConfig {
     pub fn film_thickness_meters(&self) -> f64 {
         self.bubble.film_thickness_nm * 1e-9
     }
+
+    /// Validate that all configuration values are within physically meaningful bounds.
+    ///
+    /// This prevents NaN/Infinity from propagating into GPU uniform buffers,
+    /// which can cause device loss on some drivers.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Helper to check that a value is finite and within a range
+        fn check_range(name: &str, value: f64, min: f64, max: f64) -> Result<(), ConfigError> {
+            if !value.is_finite() {
+                return Err(ConfigError::Validation(format!(
+                    "{name} must be finite, got {value}"
+                )));
+            }
+            if value < min || value > max {
+                return Err(ConfigError::Validation(format!(
+                    "{name} must be in [{min}, {max}], got {value}"
+                )));
+            }
+            Ok(())
+        }
+
+        fn check_positive_finite(name: &str, value: f64) -> Result<(), ConfigError> {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(ConfigError::Validation(format!(
+                    "{name} must be positive and finite, got {value}"
+                )));
+            }
+            Ok(())
+        }
+
+        // Bubble parameters
+        check_range("bubble.diameter", self.bubble.diameter, 0.001, 10.0)?;
+        check_range(
+            "bubble.film_thickness_nm",
+            self.bubble.film_thickness_nm,
+            1.0,
+            100_000.0,
+        )?;
+        check_positive_finite(
+            "bubble.critical_thickness_nm",
+            self.bubble.critical_thickness_nm,
+        )?;
+        check_range(
+            "bubble.refractive_index",
+            self.bubble.refractive_index,
+            1.0,
+            3.0,
+        )?;
+
+        // Fluid parameters
+        check_positive_finite("fluid.viscosity", self.fluid.viscosity)?;
+        check_positive_finite("fluid.surface_tension", self.fluid.surface_tension)?;
+        check_positive_finite("fluid.density", self.fluid.density)?;
+
+        // Foam parameters
+        if self.foam.max_bubbles > 256 {
+            return Err(ConfigError::Validation(format!(
+                "foam.max_bubbles must be <= 256, got {}",
+                self.foam.max_bubbles
+            )));
+        }
+
+        // Resolution
+        if self.resolution == 0 || self.resolution > 2048 {
+            return Err(ConfigError::Validation(format!(
+                "resolution must be in [1, 2048], got {}",
+                self.resolution
+            )));
+        }
+
+        // Time step
+        check_positive_finite("dt", self.dt)?;
+
+        Ok(())
+    }
 }
 
 /// Error types for configuration operations.
@@ -385,6 +460,8 @@ pub enum ConfigError {
     },
     /// JSON serialization error
     Serialize { error: serde_json::Error },
+    /// Validation error for out-of-range or invalid parameter values
+    Validation(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -409,6 +486,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Serialize { error } => {
                 write!(formatter, "Failed to serialize config: {}", error)
             }
+            ConfigError::Validation(message) => {
+                write!(formatter, "Invalid config: {}", message)
+            }
         }
     }
 }
@@ -419,6 +499,7 @@ impl std::error::Error for ConfigError {
             ConfigError::Io { error, .. } => Some(error),
             ConfigError::Parse { error, .. } => Some(error),
             ConfigError::Serialize { error } => Some(error),
+            ConfigError::Validation(_) => None,
         }
     }
 }
@@ -461,5 +542,67 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SimulationConfig = serde_json::from_str(&json).unwrap();
         assert!((config.bubble.diameter - deserialized.bubble.diameter).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_default_config_validates() {
+        let config = SimulationConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_zero_diameter_rejected() {
+        let mut config = SimulationConfig::default();
+        config.bubble.diameter = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_negative_diameter_rejected() {
+        let mut config = SimulationConfig::default();
+        config.bubble.diameter = -1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_nan_diameter_rejected() {
+        let mut config = SimulationConfig::default();
+        config.bubble.diameter = f64::NAN;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_infinite_thickness_rejected() {
+        let mut config = SimulationConfig::default();
+        config.bubble.film_thickness_nm = f64::INFINITY;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_refractive_index_below_one_rejected() {
+        let mut config = SimulationConfig::default();
+        config.bubble.refractive_index = 0.5;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_resolution_rejected() {
+        let mut config = SimulationConfig::default();
+        config.resolution = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_excessive_max_bubbles_rejected() {
+        let mut config = SimulationConfig::default();
+        config.foam.max_bubbles = 1000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_surface_tension_rejected() {
+        let mut config = SimulationConfig::default();
+        config.fluid.surface_tension = 0.0;
+        assert!(config.validate().is_err());
     }
 }

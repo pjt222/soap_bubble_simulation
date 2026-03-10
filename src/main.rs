@@ -230,6 +230,12 @@ fn main() {
         config.bubble.film_thickness_nm = thickness;
     }
 
+    // Validate configuration after all overrides are applied
+    if let Err(e) = config.validate() {
+        log::error!("{}", e);
+        std::process::exit(1);
+    }
+
     log::info!(
         "Starting simulation: {}cm bubble, {}nm film",
         config.bubble.diameter * 100.0,

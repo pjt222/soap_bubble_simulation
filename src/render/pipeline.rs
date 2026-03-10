@@ -1617,7 +1617,9 @@ impl RenderPipeline {
         if recording != self.recording {
             if recording {
                 self.frame_counter = 0;
-                let _ = std::fs::create_dir_all("screenshots");
+                if let Err(e) = std::fs::create_dir_all("screenshots") {
+                    log::error!("Cannot create screenshots directory: {}", e);
+                }
                 log::info!("Recording started");
             } else {
                 log::info!("Recording stopped after {} frames", self.frame_counter);
@@ -1949,7 +1951,7 @@ impl RenderPipeline {
             let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-            let buffer_size = (padded_bytes_per_row * self.config.height) as u64;
+            let buffer_size = padded_bytes_per_row as u64 * self.config.height as u64;
 
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Screenshot Staging Buffer"),
@@ -2021,7 +2023,9 @@ impl RenderPipeline {
                 }
 
                 // Determine filename
-                let _ = std::fs::create_dir_all("screenshots");
+                if let Err(e) = std::fs::create_dir_all("screenshots") {
+                    log::error!("Cannot create screenshots directory: {}", e);
+                }
                 let path = if self.screenshot_requested && !self.recording {
                     format!("screenshots/screenshot_{:04}.png", self.frame_counter)
                 } else {
@@ -2035,7 +2039,7 @@ impl RenderPipeline {
                     log::info!("Saved: {}", path);
                 }
 
-                self.frame_counter += 1;
+                self.frame_counter = self.frame_counter.saturating_add(1);
             }
 
             self.screenshot_requested = false;
@@ -2770,7 +2774,7 @@ impl RenderPipeline {
         let unpadded_bytes_per_row = width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * height) as u64;
+        let buffer_size = padded_bytes_per_row as u64 * height as u64;
 
         // Create staging buffer
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2818,11 +2822,13 @@ impl RenderPipeline {
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
+            let _ = tx.send(result);
         });
 
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().map_err(|e| format!("Failed to map buffer: {:?}", e))?;
+        rx.recv()
+            .map_err(|e| format!("Channel disconnected: {e}"))?
+            .map_err(|e| format!("Failed to map buffer: {:?}", e))?;
 
         // Read data and remove padding
         let data = buffer_slice.get_mapped_range();
@@ -2863,7 +2869,9 @@ impl RenderPipeline {
         if self.recording {
             self.frame_counter = 0;
             // Create screenshots directory
-            let _ = std::fs::create_dir_all("screenshots");
+            if let Err(e) = std::fs::create_dir_all("screenshots") {
+                log::error!("Cannot create screenshots directory: {}", e);
+            }
             log::info!("Recording started");
         } else {
             log::info!("Recording stopped after {} frames", self.frame_counter);

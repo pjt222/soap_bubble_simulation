@@ -442,7 +442,7 @@ impl HeadlessRenderPipeline {
         let unpadded_bytes_per_row = self.width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * self.height) as u64;
+        let buffer_size = padded_bytes_per_row as u64 * self.height as u64;
 
         // Create staging buffer
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

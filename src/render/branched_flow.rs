@@ -211,7 +211,7 @@ fn generate_scatterers(
 
         // Slight variation in radius
         let radius_var = 0.8 + 0.4 * ((i as f32 * 0.5791).cos() * 43758.547).fract();
-        let sigma = base_radius * radius_var;
+        let sigma = (base_radius * radius_var).max(1e-6);
         let inv_sigma_sq = 1.0 / (2.0 * sigma * sigma);
 
         scatterers.push(ScattererGPU {
