@@ -92,8 +92,8 @@ impl ApplicationHandler for App {
 
         // Apply config to pipeline
         if let Some(ref mut pipeline) = self.pipeline {
-            pipeline.bubble_uniform.base_thickness_nm = self.config.bubble.film_thickness_nm as f32;
-            pipeline.bubble_uniform.refractive_index = self.config.bubble.refractive_index as f32;
+            pipeline.set_thickness_nm(self.config.bubble.film_thickness_nm as f32);
+            pipeline.set_refractive_index(self.config.bubble.refractive_index as f32);
         }
 
         log::info!("Window created, rendering started");
@@ -131,7 +131,7 @@ impl ApplicationHandler for App {
                     let delta_x = position.x - last_x;
                     let delta_y = position.y - last_y;
                     if let Some(ref mut pipeline) = self.pipeline {
-                        pipeline.camera.orbit(delta_x as f32, delta_y as f32);
+                        pipeline.camera_mut().orbit(delta_x as f32, delta_y as f32);
                     }
                 }
                 self.last_mouse_pos = Some((position.x, position.y));
@@ -146,7 +146,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
                 };
                 if let Some(ref mut pipeline) = self.pipeline {
-                    pipeline.camera.zoom(scroll);
+                    pipeline.camera_mut().zoom(scroll);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -159,7 +159,7 @@ impl ApplicationHandler for App {
                         Key::Named(NamedKey::F12) => {
                             // Take screenshot
                             if let Some(ref mut pipeline) = self.pipeline {
-                                pipeline.screenshot_requested = true;
+                                pipeline.request_screenshot();
                             }
                         }
                         Key::Named(NamedKey::F11) => {
