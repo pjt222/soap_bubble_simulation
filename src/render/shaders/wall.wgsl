@@ -34,9 +34,11 @@ struct BubbleUniform {
 
     // Edge smoothing mode
     edge_smoothing_mode: u32,
-    _padding1: u32,
-    _padding2: u32,
-    _padding3: u32,
+    // Reserved: these overlap branched_flow fields in the full BubbleUniform (128 bytes).
+    // This shader only reads the first 80 bytes. Do not reorder fields in the Rust struct.
+    _branched_flow_reserved1: u32,
+    _branched_flow_reserved2: u32,
+    _branched_flow_reserved3: u32,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;

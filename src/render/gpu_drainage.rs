@@ -489,3 +489,39 @@ impl GPUDrainageSimulator {
         &self.params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drainage_params_size_matches_wgsl_layout() {
+        // DrainageParams must be 64 bytes (16 fields × 4 bytes)
+        // to match the WGSL DrainageParams struct in drainage.wgsl
+        assert_eq!(
+            std::mem::size_of::<DrainageParams>(),
+            16 * 4, // 14 data fields + 2 padding = 16 × 4 = 64 bytes
+            "DrainageParams size must match WGSL uniform layout (64 bytes)"
+        );
+        // Must be 16-byte aligned for GPU uniform buffers
+        assert_eq!(
+            std::mem::size_of::<DrainageParams>() % 16,
+            0,
+            "DrainageParams must be 16-byte aligned"
+        );
+    }
+
+    #[test]
+    fn drainage_params_field_offsets() {
+        use std::mem::offset_of;
+
+        assert_eq!(offset_of!(DrainageParams, dt), 0);
+        assert_eq!(offset_of!(DrainageParams, gravity), 4);
+        assert_eq!(offset_of!(DrainageParams, viscosity), 8);
+        assert_eq!(offset_of!(DrainageParams, density), 12);
+        assert_eq!(offset_of!(DrainageParams, grid_width), 28);
+        assert_eq!(offset_of!(DrainageParams, grid_height), 32);
+        assert_eq!(offset_of!(DrainageParams, marangoni_enabled), 36);
+        assert_eq!(offset_of!(DrainageParams, marangoni_coeff), 52);
+    }
+}

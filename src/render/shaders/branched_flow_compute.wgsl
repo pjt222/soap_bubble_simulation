@@ -236,7 +236,8 @@ fn scatterer_force(ray_uv: vec2<f32>, s: Scatterer) -> vec2<f32> {
     // For positive strength (attractive): force points toward scatterer (negative delta)
     // For negative strength (repulsive): force points away from scatterer (positive delta)
     // The formula gives: F = strength * delta * inv_sigma_sq * 2 * exp_term
-    // which for positive strength creates attraction (ray bends toward scatterer)
+    // delta points FROM scatterer TO ray, so for positive strength the force
+    // pushes rays AWAY from the scatterer (repulsive). Negative strength attracts.
     return delta * s.strength * s.inv_sigma_sq * 2.0 * exp_term;
 }
 
@@ -285,18 +286,6 @@ fn total_scatterer_force(ray_uv: vec2<f32>) -> vec2<f32> {
     }
 
     return force;
-}
-
-// ============================================================================
-// Thickness-based potential (alternative mode using actual film thickness)
-// ============================================================================
-
-fn sample_thickness(normal: vec3<f32>) -> f32 {
-    let uv = normal_to_uv(normal);
-    let x = u32(uv.x * f32(THICKNESS_WIDTH - 1u));
-    let y = u32(uv.y * f32(THICKNESS_HEIGHT - 1u));
-    let idx = y * THICKNESS_WIDTH + x;
-    return thickness_field[idx] * params.thickness_scale;
 }
 
 // Convert UV to output texture index

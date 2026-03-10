@@ -2937,21 +2937,38 @@ mod tests {
 
     #[test]
     fn test_bubble_uniform_field_offsets() {
-        // Verify critical fields are at expected offsets for shader compatibility
+        // Verify ALL fields in the shared region (bytes 0-80) that wall.wgsl and
+        // bubble_instanced.wgsl depend on. Any reorder here silently breaks those shaders.
         use std::mem::offset_of;
 
-        // Visual properties (first 9 floats = 36 bytes)
+        // Visual properties (9 floats, bytes 0-35)
         assert_eq!(offset_of!(BubbleUniform, refractive_index), 0);
         assert_eq!(offset_of!(BubbleUniform, base_thickness_nm), 4);
         assert_eq!(offset_of!(BubbleUniform, time), 8);
         assert_eq!(offset_of!(BubbleUniform, interference_intensity), 12);
         assert_eq!(offset_of!(BubbleUniform, base_alpha), 16);
         assert_eq!(offset_of!(BubbleUniform, edge_alpha), 20);
+        assert_eq!(offset_of!(BubbleUniform, background_r), 24);
+        assert_eq!(offset_of!(BubbleUniform, background_g), 28);
+        assert_eq!(offset_of!(BubbleUniform, background_b), 32);
 
-        // Film dynamics (floats 10-13, bytes 36-52)
+        // Film dynamics (4 floats, bytes 36-51)
         assert_eq!(offset_of!(BubbleUniform, film_time), 36);
         assert_eq!(offset_of!(BubbleUniform, swirl_intensity), 40);
         assert_eq!(offset_of!(BubbleUniform, drainage_speed), 44);
         assert_eq!(offset_of!(BubbleUniform, pattern_scale), 48);
+
+        // Position (3 floats, bytes 52-63)
+        assert_eq!(offset_of!(BubbleUniform, position_x), 52);
+        assert_eq!(offset_of!(BubbleUniform, position_y), 56);
+        assert_eq!(offset_of!(BubbleUniform, position_z), 60);
+
+        // Edge smoothing (u32 at byte 64) — end of the shared 80-byte region
+        assert_eq!(offset_of!(BubbleUniform, edge_smoothing_mode), 64);
+
+        // Branched flow fields (bytes 68-79 overlap wall/instanced _reserved fields)
+        assert_eq!(offset_of!(BubbleUniform, branched_flow_enabled), 68);
+        assert_eq!(offset_of!(BubbleUniform, branched_flow_intensity), 72);
+        assert_eq!(offset_of!(BubbleUniform, branched_flow_scale), 76);
     }
 }

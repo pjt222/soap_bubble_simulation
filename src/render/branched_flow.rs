@@ -301,6 +301,17 @@ impl BranchedFlowSimulator {
         let tex_width = params.tex_width;
         let tex_height = params.tex_height;
 
+        // Verify dimensions match the hardcoded constants in bubble.wgsl
+        // (BRANCHED_TEX_WIDTH = 512, BRANCHED_TEX_HEIGHT = 256)
+        assert_eq!(
+            tex_width, 512,
+            "BranchedFlowParams tex_width must match BRANCHED_TEX_WIDTH in bubble.wgsl"
+        );
+        assert_eq!(
+            tex_height, 256,
+            "BranchedFlowParams tex_height must match BRANCHED_TEX_HEIGHT in bubble.wgsl"
+        );
+
         // Create shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Branched Flow Compute Shader"),
@@ -616,6 +627,27 @@ mod tests {
             28 * 4, // 28 fields * 4 bytes each
             "BranchedFlowParams size must match WGSL uniform layout (112 bytes)"
         );
+    }
+
+    #[test]
+    fn params_field_offsets_match_wgsl() {
+        // Verify critical field offsets match the WGSL struct declaration.
+        // BranchedFlowParams uses [f32; 3] arrays for entry_point and beam_dir
+        // which map to 6 scalar fields in WGSL — offsets must stay in sync.
+        use std::mem::offset_of;
+
+        assert_eq!(offset_of!(BranchedFlowParams, entry_point), 0);
+        assert_eq!(offset_of!(BranchedFlowParams, beam_dir), 12);
+        assert_eq!(offset_of!(BranchedFlowParams, num_rays), 24);
+        assert_eq!(offset_of!(BranchedFlowParams, ray_steps), 28);
+        assert_eq!(offset_of!(BranchedFlowParams, step_size), 32);
+        assert_eq!(offset_of!(BranchedFlowParams, bend_strength), 36);
+        assert_eq!(offset_of!(BranchedFlowParams, tex_width), 48);
+        assert_eq!(offset_of!(BranchedFlowParams, tex_height), 52);
+        assert_eq!(offset_of!(BranchedFlowParams, time), 56);
+        assert_eq!(offset_of!(BranchedFlowParams, thickness_scale), 60);
+        assert_eq!(offset_of!(BranchedFlowParams, num_scatterers), 80);
+        assert_eq!(offset_of!(BranchedFlowParams, patch_enabled), 96);
     }
 
     #[test]

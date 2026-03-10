@@ -201,24 +201,7 @@ fn drainage_step(@builtin(global_invocation_id) global_id: vec3<u32>) {
     concentration_out[idx] = new_c;
 }
 
-// Second pass: average pole values from neighboring ring
-@compute @workgroup_size(64)
-fn average_poles(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let phi_idx = global_id.x;
-
-    if (phi_idx >= params.grid_width) {
-        return;
-    }
-
-    // Top pole: copy from adjacent ring
-    let top_idx = get_index(0u, phi_idx);
-    let top_neighbor_idx = get_index(1u, phi_idx);
-    thickness_out[top_idx] = thickness_in[top_neighbor_idx];
-    concentration_out[top_idx] = concentration_in[top_neighbor_idx];
-
-    // Bottom pole: copy from adjacent ring
-    let bottom_idx = get_index(params.grid_height - 1u, phi_idx);
-    let bottom_neighbor_idx = get_index(params.grid_height - 2u, phi_idx);
-    thickness_out[bottom_idx] = thickness_in[bottom_neighbor_idx];
-    concentration_out[bottom_idx] = concentration_in[bottom_neighbor_idx];
-}
+// NOTE: average_poles entry point was removed — it was never dispatched from
+// gpu_drainage.rs and contained a latent race condition (non-atomic read-modify-write
+// on thickness_out from the same dispatch). Pole handling is done inline in
+// drainage_step (lines 85-89) by copying current values unchanged.

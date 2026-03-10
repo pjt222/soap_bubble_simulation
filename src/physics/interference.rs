@@ -334,12 +334,10 @@ impl InterferenceCalculator {
         let fresnel = self.calculate_fresnel_reflection(cos_theta_incident);
         let reflectance = fresnel.reflectance_average;
 
-        // Airy formula for thin-film interference
-        // I = 4*R*sin^2(delta/2) / (1 + R)^2
-        // where R is the reflectance and delta is the phase difference
-        //
-        // For a more physically accurate model with multiple reflections:
+        // Airy formula for thin-film interference (reflected intensity):
         // I = (2*R*(1 - cos(delta))) / (1 + R^2 - 2*R*cos(delta))
+        // Equivalently: I = F*sin^2(delta/2) / (1 + F*sin^2(delta/2))
+        // where F = 4R/(1-R)^2 is the coefficient of finesse
 
         let cos_phase = phase_difference.cos();
         let numerator = 2.0 * reflectance * (1.0 - cos_phase);
