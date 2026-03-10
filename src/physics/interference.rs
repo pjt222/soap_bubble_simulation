@@ -230,7 +230,8 @@ impl InterferenceCalculator {
         wavelength_nm: f64,
     ) -> f64 {
         // Geometric path difference through film (factor of 2 for round trip)
-        let geometric_path = 2.0 * self.refractive_index_film * film_thickness_nm * cos_theta_transmitted;
+        let geometric_path =
+            2.0 * self.refractive_index_film * film_thickness_nm * cos_theta_transmitted;
 
         // Add lambda/2 phase shift from reflection at air-to-film interface
         // (reflection from going low-n to high-n medium)
@@ -265,7 +266,8 @@ impl InterferenceCalculator {
     /// `FresnelCoefficients` containing reflectance for both polarizations
     pub fn calculate_fresnel_reflection(&self, cos_theta_incident: f64) -> FresnelCoefficients {
         let cos_theta_incident_clamped = cos_theta_incident.clamp(-1.0, 1.0);
-        let cos_theta_transmitted = self.calculate_transmission_angle_cos(cos_theta_incident_clamped);
+        let cos_theta_transmitted =
+            self.calculate_transmission_angle_cos(cos_theta_incident_clamped);
 
         let n_incident = self.refractive_index_medium;
         let n_transmitted = self.refractive_index_film;
@@ -323,8 +325,11 @@ impl InterferenceCalculator {
         let cos_theta_transmitted = self.calculate_transmission_angle_cos(cos_theta_incident);
 
         // Calculate optical path difference
-        let optical_path_difference =
-            self.calculate_optical_path_difference(film_thickness_nm, cos_theta_transmitted, wavelength_nm);
+        let optical_path_difference = self.calculate_optical_path_difference(
+            film_thickness_nm,
+            cos_theta_transmitted,
+            wavelength_nm,
+        );
 
         // Calculate phase difference
         let phase_difference =
@@ -380,12 +385,21 @@ impl InterferenceCalculator {
         film_thickness_nm: f64,
         cos_theta_incident: f64,
     ) -> RgbColor {
-        let red_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[0]);
-        let green_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[1]);
-        let blue_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[2]);
+        let red_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[0],
+        );
+        let green_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[1],
+        );
+        let blue_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[2],
+        );
 
         // Apply gamma correction for perceptually uniform display
         // Using sRGB gamma of approximately 2.2
@@ -413,12 +427,21 @@ impl InterferenceCalculator {
         film_thickness_nm: f64,
         cos_theta_incident: f64,
     ) -> RgbColor {
-        let red_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[0]);
-        let green_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[1]);
-        let blue_intensity =
-            self.calculate_reflected_intensity(film_thickness_nm, cos_theta_incident, self.wavelengths_nm[2]);
+        let red_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[0],
+        );
+        let green_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[1],
+        );
+        let blue_intensity = self.calculate_reflected_intensity(
+            film_thickness_nm,
+            cos_theta_incident,
+            self.wavelengths_nm[2],
+        );
 
         RgbColor::new(red_intensity, green_intensity, blue_intensity)
     }
@@ -493,7 +516,8 @@ impl InterferenceCalculator {
         thickness_samples: usize,
         angle_samples: usize,
     ) -> Vec<Vec<RgbColor>> {
-        let thickness_step = (max_thickness_nm - min_thickness_nm) / (thickness_samples - 1).max(1) as f64;
+        let thickness_step =
+            (max_thickness_nm - min_thickness_nm) / (thickness_samples - 1).max(1) as f64;
         let angle_step = 1.0 / (angle_samples - 1).max(1) as f64;
 
         (0..thickness_samples)
@@ -515,7 +539,6 @@ impl Default for InterferenceCalculator {
         Self::default_soap_film()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -550,7 +573,10 @@ mod tests {
     #[test]
     fn test_default_calculator() {
         let calculator = InterferenceCalculator::default();
-        assert!((calculator.refractive_index_film() - constants::REFRACTIVE_INDEX_SOAP_FILM).abs() < EPSILON);
+        assert!(
+            (calculator.refractive_index_film() - constants::REFRACTIVE_INDEX_SOAP_FILM).abs()
+                < EPSILON
+        );
     }
 
     #[test]
@@ -602,7 +628,11 @@ mod tests {
             let color = calculator.calculate_interference_color(thickness, 1.0);
             // At least one channel should have significant intensity
             let max_channel = color.red.max(color.green).max(color.blue);
-            assert!(max_channel > 0.01, "Thickness {} produced no color", thickness);
+            assert!(
+                max_channel > 0.01,
+                "Thickness {} produced no color",
+                thickness
+            );
         }
     }
 
@@ -614,10 +644,9 @@ mod tests {
         let color_300nm = calculator.calculate_interference_color(300.0, 1.0);
 
         // Colors at different thicknesses should differ
-        let difference =
-            (color_100nm.red - color_300nm.red).abs() +
-            (color_100nm.green - color_300nm.green).abs() +
-            (color_100nm.blue - color_300nm.blue).abs();
+        let difference = (color_100nm.red - color_300nm.red).abs()
+            + (color_100nm.green - color_300nm.green).abs()
+            + (color_100nm.blue - color_300nm.blue).abs();
 
         assert!(difference > 0.01, "Colors should vary with thickness");
     }
@@ -630,10 +659,9 @@ mod tests {
         let color_angled = calculator.calculate_interference_color(300.0, 0.5);
 
         // Colors at different angles should differ
-        let difference =
-            (color_normal.red - color_angled.red).abs() +
-            (color_normal.green - color_angled.green).abs() +
-            (color_normal.blue - color_angled.blue).abs();
+        let difference = (color_normal.red - color_angled.red).abs()
+            + (color_normal.green - color_angled.green).abs()
+            + (color_normal.blue - color_angled.blue).abs();
 
         assert!(difference > 0.001, "Colors should vary with viewing angle");
     }
@@ -686,5 +714,4 @@ mod tests {
         assert!(color.green >= 0.0 && color.green <= 1.0);
         assert!(color.blue >= 0.0 && color.blue <= 1.0);
     }
-
 }

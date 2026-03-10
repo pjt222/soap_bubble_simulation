@@ -49,9 +49,9 @@ impl Camera {
     pub fn new(aspect: f32) -> Self {
         Self {
             target: Vec3::ZERO,
-            distance: 0.2,  // 20cm from center, good for 5cm bubble
+            distance: 0.2, // 20cm from center, good for 5cm bubble
             yaw: 0.0,
-            pitch: 0.3,     // Slightly above horizontal
+            pitch: 0.3, // Slightly above horizontal
             fov: 45.0_f32.to_radians(),
             aspect,
             near: 0.001,

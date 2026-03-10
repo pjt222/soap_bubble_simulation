@@ -101,11 +101,12 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // First, let egui handle the event
-        let egui_consumed = if let (Some(pipeline), Some(window)) = (&mut self.pipeline, &self.window) {
-            pipeline.handle_event(window, &event)
-        } else {
-            false
-        };
+        let egui_consumed =
+            if let (Some(pipeline), Some(window)) = (&mut self.pipeline, &self.window) {
+                pipeline.handle_event(window, &event)
+            } else {
+                false
+            };
 
         // If egui consumed the event, don't process it further (except for essential events)
         match event {

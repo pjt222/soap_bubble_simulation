@@ -6,12 +6,12 @@
 use wgpu::util::DeviceExt;
 
 use crate::physics::geometry::{SphereMesh, Vertex};
-use crate::render::camera::Camera;
-use crate::render::pipeline::BubbleUniform;
 use crate::render::branched_flow::create_branched_flow_buffer;
+use crate::render::camera::Camera;
 use crate::render::interference_lut::{
-    generate_interference_lut, LUT_THICKNESS_SAMPLES, LUT_ANGLE_SAMPLES,
+    LUT_ANGLE_SAMPLES, LUT_THICKNESS_SAMPLES, generate_interference_lut,
 };
+use crate::render::pipeline::BubbleUniform;
 
 /// Headless render pipeline for testing without a window
 ///
@@ -96,7 +96,8 @@ impl HeadlessRenderPipeline {
             view_formats: &[],
         });
 
-        let render_texture_view = render_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let render_texture_view =
+            render_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create depth texture
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -140,10 +141,7 @@ impl HeadlessRenderPipeline {
         let branched_flow_buffer = create_branched_flow_buffer(&device);
 
         // Create interference LUT texture (pre-computed thin-film colors)
-        let interference_lut_data = generate_interference_lut(
-            bubble_uniform.refractive_index,
-            1.0,
-        );
+        let interference_lut_data = generate_interference_lut(bubble_uniform.refractive_index, 1.0);
         let interference_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Headless Interference LUT Texture"),
             size: wgpu::Extent3d {
@@ -177,7 +175,8 @@ impl HeadlessRenderPipeline {
                 depth_or_array_layers: 1,
             },
         );
-        let interference_lut_view = interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let interference_lut_view =
+            interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let interference_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Headless Interference LUT Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -389,9 +388,11 @@ impl HeadlessRenderPipeline {
     pub fn render(&mut self) {
         self.update_uniforms();
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Headless Render Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Headless Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -453,9 +454,11 @@ impl HeadlessRenderPipeline {
         });
 
         // Create command encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Headless Copy Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Headless Copy Encoder"),
+            });
 
         // Copy texture to buffer
         encoder.copy_texture_to_buffer(

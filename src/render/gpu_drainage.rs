@@ -46,21 +46,21 @@ pub struct DrainageParams {
 impl Default for DrainageParams {
     fn default() -> Self {
         Self {
-            dt: 0.001,                    // 1ms time step
-            gravity: 9.81,                // Earth gravity
-            viscosity: 0.001,             // Water-like (Pa·s)
-            density: 1000.0,              // Water density (kg/m³)
-            diffusion_coeff: 1e-9,        // Thickness diffusion
-            bubble_radius: 0.025,         // 2.5cm radius
-            critical_thickness: 30e-9,    // 30nm critical thickness
+            dt: 0.001,                 // 1ms time step
+            gravity: 9.81,             // Earth gravity
+            viscosity: 0.001,          // Water-like (Pa·s)
+            density: 1000.0,           // Water density (kg/m³)
+            diffusion_coeff: 1e-9,     // Thickness diffusion
+            bubble_radius: 0.025,      // 2.5cm radius
+            critical_thickness: 30e-9, // 30nm critical thickness
             grid_width: 128,
             grid_height: 64,
             // Marangoni parameters
-            marangoni_enabled: 0,         // Disabled by default
-            gamma_air: 0.072,             // N/m (clean water-air interface)
-            gamma_reduction: 0.045,       // How much soap reduces tension
-            surfactant_diffusion: 1e-9,   // m²/s
-            marangoni_coeff: 0.01,        // Stress coefficient
+            marangoni_enabled: 0,       // Disabled by default
+            gamma_air: 0.072,           // N/m (clean water-air interface)
+            gamma_reduction: 0.045,     // How much soap reduces tension
+            surfactant_diffusion: 1e-9, // m²/s
+            marangoni_coeff: 0.01,      // Stress coefficient
             _padding1: 0,
             _padding2: 0,
         }
@@ -127,7 +127,7 @@ impl GPUDrainageSimulator {
         let initial_thickness_data: Vec<f32> = vec![initial_thickness; total_cells];
 
         // Initialize surfactant concentration with uniform values (normalized 0-1)
-        let initial_concentration: f32 = 0.5;  // 50% coverage
+        let initial_concentration: f32 = 0.5; // 50% coverage
         let initial_conc_data: Vec<f32> = vec![initial_concentration; total_cells];
 
         // Create double-buffered storage for thickness
@@ -135,12 +135,16 @@ impl GPUDrainageSimulator {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Thickness Buffer A"),
                 contents: bytemuck::cast_slice(&initial_thickness_data),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             }),
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Thickness Buffer B"),
                 contents: bytemuck::cast_slice(&initial_thickness_data),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             }),
         ];
 
@@ -149,12 +153,16 @@ impl GPUDrainageSimulator {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Concentration Buffer A"),
                 contents: bytemuck::cast_slice(&initial_conc_data),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             }),
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Concentration Buffer B"),
                 contents: bytemuck::cast_slice(&initial_conc_data),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             }),
         ];
 
@@ -324,7 +332,7 @@ impl GPUDrainageSimulator {
             params,
             current_time: 0.0,
             enabled: false,
-            time_scale: 100.0,  // Speed up for visible effect
+            time_scale: 100.0, // Speed up for visible effect
             steps_per_frame: 10,
             marangoni_enabled: false,
         }
@@ -417,18 +425,37 @@ impl GPUDrainageSimulator {
 
         // Reset thickness buffers
         let thickness_data: Vec<f32> = vec![initial_thickness; total_cells];
-        queue.write_buffer(&self.thickness_buffers[0], 0, bytemuck::cast_slice(&thickness_data));
-        queue.write_buffer(&self.thickness_buffers[1], 0, bytemuck::cast_slice(&thickness_data));
+        queue.write_buffer(
+            &self.thickness_buffers[0],
+            0,
+            bytemuck::cast_slice(&thickness_data),
+        );
+        queue.write_buffer(
+            &self.thickness_buffers[1],
+            0,
+            bytemuck::cast_slice(&thickness_data),
+        );
 
         // Reset concentration buffers to uniform 50%
         let conc_data: Vec<f32> = vec![0.5; total_cells];
-        queue.write_buffer(&self.concentration_buffers[0], 0, bytemuck::cast_slice(&conc_data));
-        queue.write_buffer(&self.concentration_buffers[1], 0, bytemuck::cast_slice(&conc_data));
+        queue.write_buffer(
+            &self.concentration_buffers[0],
+            0,
+            bytemuck::cast_slice(&conc_data),
+        );
+        queue.write_buffer(
+            &self.concentration_buffers[1],
+            0,
+            bytemuck::cast_slice(&conc_data),
+        );
 
         self.current_buffer = 0;
         self.current_time = 0.0;
 
-        log::info!("GPU drainage simulation reset to {} nm", initial_thickness * 1e9);
+        log::info!(
+            "GPU drainage simulation reset to {} nm",
+            initial_thickness * 1e9
+        );
     }
 
     /// Enable or disable Marangoni effect.
@@ -436,7 +463,10 @@ impl GPUDrainageSimulator {
         self.marangoni_enabled = enabled;
         self.params.marangoni_enabled = if enabled { 1 } else { 0 };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
-        log::info!("Marangoni effect {}", if enabled { "enabled" } else { "disabled" });
+        log::info!(
+            "Marangoni effect {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Set Marangoni physical parameters.

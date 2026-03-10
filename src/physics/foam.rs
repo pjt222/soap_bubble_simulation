@@ -354,10 +354,18 @@ impl BubbleCluster {
 
         // Update neighbor lists based on connections
         for connection in &self.connections {
-            if let Some(bubble_a) = self.bubbles.iter_mut().find(|b| b.id == connection.bubble_a) {
+            if let Some(bubble_a) = self
+                .bubbles
+                .iter_mut()
+                .find(|b| b.id == connection.bubble_a)
+            {
                 bubble_a.neighbors.push(connection.bubble_b);
             }
-            if let Some(bubble_b) = self.bubbles.iter_mut().find(|b| b.id == connection.bubble_b) {
+            if let Some(bubble_b) = self
+                .bubbles
+                .iter_mut()
+                .find(|b| b.id == connection.bubble_b)
+            {
                 bubble_b.neighbors.push(connection.bubble_a);
             }
         }
@@ -413,9 +421,9 @@ impl BubbleCluster {
 
         // Surrounding bubbles - positioned to slightly overlap with central
         // Central radius = 0.025, so place neighbors at distance < sum_of_radii
-        cluster.add_bubble(Vec3::new(0.042, 0.0, 0.0), 0.02);      // 0.042 < 0.025+0.02=0.045
-        cluster.add_bubble(Vec3::new(-0.038, 0.015, 0.0), 0.022);  // closer
-        cluster.add_bubble(Vec3::new(0.0, 0.040, 0.0), 0.018);     // 0.040 < 0.025+0.018=0.043
+        cluster.add_bubble(Vec3::new(0.042, 0.0, 0.0), 0.02); // 0.042 < 0.025+0.02=0.045
+        cluster.add_bubble(Vec3::new(-0.038, 0.015, 0.0), 0.022); // closer
+        cluster.add_bubble(Vec3::new(0.0, 0.040, 0.0), 0.018); // 0.040 < 0.025+0.018=0.043
         cluster.add_bubble(Vec3::new(0.018, -0.038, 0.015), 0.02); // closer
 
         cluster.update_connections();
@@ -499,8 +507,8 @@ mod tests {
         let id1 = cluster.add_bubble(Vec3::ZERO, 0.5);
         let id2 = cluster.add_bubble(Vec3::new(0.8, 0.0, 0.0), 0.5);
 
-        let vol_before = cluster.get_bubble(id1).unwrap().volume()
-            + cluster.get_bubble(id2).unwrap().volume();
+        let vol_before =
+            cluster.get_bubble(id1).unwrap().volume() + cluster.get_bubble(id2).unwrap().volume();
 
         let merged_id = cluster.merge_bubbles(id1, id2).unwrap();
         let vol_after = cluster.get_bubble(merged_id).unwrap().volume();
@@ -523,7 +531,11 @@ mod tests {
         // Simulate several more steps
         for i in 0..10 {
             sim.step(0.016);
-            println!("After {} steps: {} connections", i + 2, sim.connection_count());
+            println!(
+                "After {} steps: {} connections",
+                i + 2,
+                sim.connection_count()
+            );
         }
 
         // Note: This test is for diagnosis, not assertion

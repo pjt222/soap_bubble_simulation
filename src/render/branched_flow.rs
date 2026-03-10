@@ -316,7 +316,7 @@ impl BranchedFlowSimulator {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Branched Flow Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("shaders/branched_flow_compute.wgsl").into()
+                include_str!("shaders/branched_flow_compute.wgsl").into(),
             ),
         });
 
@@ -527,11 +527,7 @@ impl BranchedFlowSimulator {
             patch_bounds,
         );
         // Only write the active scatterers (not the full buffer)
-        queue.write_buffer(
-            &self.scatterer_buffer,
-            0,
-            bytemuck::cast_slice(&scatterers),
-        );
+        queue.write_buffer(&self.scatterer_buffer, 0, bytemuck::cast_slice(&scatterers));
 
         // Clear dirty flag after upload
         self.scatterers_dirty = false;
@@ -653,7 +649,8 @@ mod tests {
     #[test]
     fn set_entry_point_produces_normalized_vectors() {
         // Test various angles
-        let test_angles: [(f32, f32); 4] = [(0.0, 0.0), (45.0, 30.0), (180.0, -45.0), (270.0, 89.0)];
+        let test_angles: [(f32, f32); 4] =
+            [(0.0, 0.0), (45.0, 30.0), (180.0, -45.0), (270.0, 89.0)];
         for (azimuth, elevation) in test_angles {
             let az_rad = azimuth.to_radians();
             let el_rad = elevation.to_radians();
@@ -706,27 +703,50 @@ mod tests {
     fn default_params_are_physically_reasonable() {
         let params = BranchedFlowParams::default();
 
-        assert!(params.num_rays >= 1024, "Need enough rays for visible pattern");
-        assert!(params.ray_steps >= 100, "Need enough steps for ray propagation");
-        assert!(params.step_size > 0.0 && params.step_size < 0.1, "Step size should be small");
+        assert!(
+            params.num_rays >= 1024,
+            "Need enough rays for visible pattern"
+        );
+        assert!(
+            params.ray_steps >= 100,
+            "Need enough steps for ray propagation"
+        );
+        assert!(
+            params.step_size > 0.0 && params.step_size < 0.1,
+            "Step size should be small"
+        );
         assert!(params.bend_strength > 0.0, "Bend strength must be positive");
-        assert!(params.spread_angle > 0.0 && params.spread_angle < std::f32::consts::PI,
-            "Spread angle should be a reasonable radian value");
-        assert!(params.intensity_falloff > 0.0 && params.intensity_falloff < 0.1,
-            "Intensity falloff should be small per step");
-        assert!(params.thickness_scale > 0.0,
-            "Thickness scale must be positive");
+        assert!(
+            params.spread_angle > 0.0 && params.spread_angle < std::f32::consts::PI,
+            "Spread angle should be a reasonable radian value"
+        );
+        assert!(
+            params.intensity_falloff > 0.0 && params.intensity_falloff < 0.1,
+            "Intensity falloff should be small per step"
+        );
+        assert!(
+            params.thickness_scale > 0.0,
+            "Thickness scale must be positive"
+        );
         assert_eq!(params.tex_width, 512);
         assert_eq!(params.tex_height, 256);
         // Particle scattering defaults
-        assert!(params.num_scatterers >= 100 && params.num_scatterers <= MAX_SCATTERERS,
-            "Num scatterers should be reasonable");
-        assert!(params.scatterer_strength > 0.0,
-            "Scatterer strength must be positive");
-        assert!(params.scatterer_radius > 0.0 && params.scatterer_radius < 1.0,
-            "Scatterer radius should be in UV space (0-1)");
-        assert!(params.particle_weight >= 0.0 && params.particle_weight <= 1.0,
-            "Particle weight should be a blend factor (0-1)");
+        assert!(
+            params.num_scatterers >= 100 && params.num_scatterers <= MAX_SCATTERERS,
+            "Num scatterers should be reasonable"
+        );
+        assert!(
+            params.scatterer_strength > 0.0,
+            "Scatterer strength must be positive"
+        );
+        assert!(
+            params.scatterer_radius > 0.0 && params.scatterer_radius < 1.0,
+            "Scatterer radius should be in UV space (0-1)"
+        );
+        assert!(
+            params.particle_weight >= 0.0 && params.particle_weight <= 1.0,
+            "Particle weight should be a blend factor (0-1)"
+        );
     }
 
     #[test]
@@ -789,10 +809,16 @@ mod tests {
     fn generate_scatterers_positions_in_range() {
         let scatterers = generate_scatterers(200, 0.0, 0.5, 0.03, None);
         for s in &scatterers {
-            assert!(s.pos_u >= 0.0 && s.pos_u <= 1.0,
-                "Scatterer pos_u out of range: {}", s.pos_u);
-            assert!(s.pos_v >= 0.0 && s.pos_v <= 1.0,
-                "Scatterer pos_v out of range: {}", s.pos_v);
+            assert!(
+                s.pos_u >= 0.0 && s.pos_u <= 1.0,
+                "Scatterer pos_u out of range: {}",
+                s.pos_u
+            );
+            assert!(
+                s.pos_v >= 0.0 && s.pos_v <= 1.0,
+                "Scatterer pos_v out of range: {}",
+                s.pos_v
+            );
         }
     }
 
@@ -811,8 +837,11 @@ mod tests {
     fn generate_scatterers_inv_sigma_sq_is_positive() {
         let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
         for s in &scatterers {
-            assert!(s.inv_sigma_sq > 0.0,
-                "inv_sigma_sq must be positive: {}", s.inv_sigma_sq);
+            assert!(
+                s.inv_sigma_sq > 0.0,
+                "inv_sigma_sq must be positive: {}",
+                s.inv_sigma_sq
+            );
         }
     }
 
@@ -824,8 +853,9 @@ mod tests {
         // At least some positions should differ due to time-based jitter
         let mut different = 0;
         for i in 0..50 {
-            if (scatterers_t0[i].pos_u - scatterers_t1[i].pos_u).abs() > 0.001 ||
-               (scatterers_t0[i].pos_v - scatterers_t1[i].pos_v).abs() > 0.001 {
+            if (scatterers_t0[i].pos_u - scatterers_t1[i].pos_u).abs() > 0.001
+                || (scatterers_t0[i].pos_v - scatterers_t1[i].pos_v).abs() > 0.001
+            {
                 different += 1;
             }
         }
@@ -848,10 +878,20 @@ mod tests {
         let max_v = 0.7 + 0.1;
 
         for s in &scatterers {
-            assert!(s.pos_u >= min_u && s.pos_u <= max_u,
-                "Scatterer pos_u {} outside patch bounds [{}, {}]", s.pos_u, min_u, max_u);
-            assert!(s.pos_v >= min_v && s.pos_v <= max_v,
-                "Scatterer pos_v {} outside patch bounds [{}, {}]", s.pos_v, min_v, max_v);
+            assert!(
+                s.pos_u >= min_u && s.pos_u <= max_u,
+                "Scatterer pos_u {} outside patch bounds [{}, {}]",
+                s.pos_u,
+                min_u,
+                max_u
+            );
+            assert!(
+                s.pos_v >= min_v && s.pos_v <= max_v,
+                "Scatterer pos_v {} outside patch bounds [{}, {}]",
+                s.pos_v,
+                min_v,
+                max_v
+            );
         }
     }
 

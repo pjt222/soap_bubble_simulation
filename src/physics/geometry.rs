@@ -142,7 +142,8 @@ impl SphereMesh {
     /// * `aspect_ratio` - Polar/equatorial ratio. 1.0 = sphere, <1.0 = oblate (flattened by gravity)
     pub fn new_ellipsoid(radius: f32, subdivision_level: u32, aspect_ratio: f32) -> Self {
         let segments = 16 * (1 << subdivision_level);
-        let (vertices, indices) = Self::generate_uv_ellipsoid(radius, segments, segments / 2, aspect_ratio);
+        let (vertices, indices) =
+            Self::generate_uv_ellipsoid(radius, segments, segments / 2, aspect_ratio);
 
         Self {
             vertices,
@@ -156,13 +157,18 @@ impl SphereMesh {
     /// Generate a UV ellipsoid mesh (latitude/longitude grid)
     /// For aspect_ratio = 1.0, generates a perfect sphere
     /// For aspect_ratio < 1.0, generates an oblate spheroid (flattened at poles)
-    fn generate_uv_ellipsoid(radius: f32, lon_segments: u32, lat_segments: u32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<u32>) {
+    fn generate_uv_ellipsoid(
+        radius: f32,
+        lon_segments: u32,
+        lat_segments: u32,
+        aspect_ratio: f32,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
         // Radii: equatorial (x, z) and polar (y)
-        let r_eq = radius;           // equatorial radius
-        let r_pol = radius * aspect_ratio;  // polar radius (smaller for oblate)
+        let r_eq = radius; // equatorial radius
+        let r_pol = radius * aspect_ratio; // polar radius (smaller for oblate)
 
         // For ellipsoid normal calculation: n = (x/a², y/b², z/a²) normalized
         // where a = r_eq, b = r_pol
@@ -191,7 +197,10 @@ impl SphereMesh {
                 // = (2x/a², 2y/b², 2z/a²), normalized
                 let normal = Vec3::new(x * inv_a2, y * inv_b2, z * inv_a2).normalize();
 
-                let uv = [lon as f32 / lon_segments as f32, lat as f32 / lat_segments as f32];
+                let uv = [
+                    lon as f32 / lon_segments as f32,
+                    lat as f32 / lat_segments as f32,
+                ];
 
                 vertices.push(Vertex::new(position, normal, uv));
             }
@@ -506,11 +515,7 @@ mod tests {
 
             // Normal should point in same direction as position (outward)
             let dot = pos.normalize().dot(normal);
-            assert!(
-                dot > 0.99,
-                "Normal not pointing outward: dot = {}",
-                dot
-            );
+            assert!(dot > 0.99, "Normal not pointing outward: dot = {}", dot);
         }
     }
 
@@ -520,16 +525,8 @@ mod tests {
 
         for vertex in &mesh.vertices {
             let [u, v] = vertex.uv;
-            assert!(
-                (0.0..=1.0).contains(&u),
-                "U coordinate out of range: {}",
-                u
-            );
-            assert!(
-                (0.0..=1.0).contains(&v),
-                "V coordinate out of range: {}",
-                v
-            );
+            assert!((0.0..=1.0).contains(&u), "U coordinate out of range: {}", u);
+            assert!((0.0..=1.0).contains(&v), "V coordinate out of range: {}", v);
         }
     }
 
@@ -610,12 +607,16 @@ mod tests {
             assert!(
                 u >= min_u - 1e-6 && u <= max_u + 1e-6,
                 "U coordinate {} outside patch bounds [{}, {}]",
-                u, min_u, max_u
+                u,
+                min_u,
+                max_u
             );
             assert!(
                 v >= min_v - 1e-6 && v <= max_v + 1e-6,
                 "V coordinate {} outside patch bounds [{}, {}]",
-                v, min_v, max_v
+                v,
+                min_v,
+                max_v
             );
         }
     }

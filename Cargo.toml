@@ -35,6 +35,8 @@ egui-winit = "0.31"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+naga = { version = "24", features = ["wgsl-in"] }
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

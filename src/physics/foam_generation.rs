@@ -4,7 +4,7 @@
 //! arrangements (lattices, Poisson disk) and size distributions (normal,
 //! log-normal, Schulz-Flory, bimodal).
 
-use super::foam::{BubbleCluster};
+use super::foam::BubbleCluster;
 use glam::Vec3;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -415,11 +415,12 @@ impl FoamGenerator {
                 let phi = (rand_f32() * 2.0 - 1.0).acos();
                 let r = min_distance * (1.0 + rand_f32());
 
-                let candidate = point + Vec3::new(
-                    r * phi.sin() * theta.cos(),
-                    r * phi.cos(),
-                    r * phi.sin() * theta.sin(),
-                );
+                let candidate = point
+                    + Vec3::new(
+                        r * phi.sin() * theta.cos(),
+                        r * phi.cos(),
+                        r * phi.sin() * theta.sin(),
+                    );
 
                 // Check bounds
                 if candidate.x.abs() > bounds

@@ -283,22 +283,18 @@ impl ScreenshotTestFixture {
 // ============================================================================
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_default_bubble_appearance() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
-    let mut fixture = fixture.unwrap();
-
-    // Set deterministic state
     fixture.pipeline.set_thickness(500.0);
     fixture.pipeline.set_time(0.0);
     fixture.pipeline.set_camera_distance(0.2);
 
     match fixture.render_and_compare("default_bubble") {
-        Ok(()) => {} // Match!
+        Ok(()) => {}
         Err(ComparisonError::NewGoldenCreated(path)) => {
             println!("Created golden image: {}", path.display());
         }
@@ -307,14 +303,11 @@ async fn test_default_bubble_appearance() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_thin_film_200nm() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(200.0);
     fixture.pipeline.set_time(0.0);
@@ -330,14 +323,11 @@ async fn test_thin_film_200nm() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_thin_film_400nm() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(400.0);
     fixture.pipeline.set_time(0.0);
@@ -353,14 +343,11 @@ async fn test_thin_film_400nm() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_thin_film_600nm() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(600.0);
     fixture.pipeline.set_time(0.0);
@@ -376,14 +363,11 @@ async fn test_thin_film_600nm() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_thin_film_800nm() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(800.0);
     fixture.pipeline.set_time(0.0);
@@ -399,18 +383,15 @@ async fn test_thin_film_800nm() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_zoomed_in_view() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(500.0);
     fixture.pipeline.set_time(0.0);
-    fixture.pipeline.set_camera_distance(0.1); // Closer
+    fixture.pipeline.set_camera_distance(0.1);
 
     match fixture.render_and_compare("zoomed_in") {
         Ok(()) => {}
@@ -422,18 +403,15 @@ async fn test_zoomed_in_view() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_zoomed_out_view() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(500.0);
     fixture.pipeline.set_time(0.0);
-    fixture.pipeline.set_camera_distance(0.5); // Farther
+    fixture.pipeline.set_camera_distance(0.5);
 
     match fixture.render_and_compare("zoomed_out") {
         Ok(()) => {}
@@ -445,19 +423,16 @@ async fn test_zoomed_out_view() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_rotated_view() {
-    let fixture = ScreenshotTestFixture::new(256, 256, 0.05).await;
-    if fixture.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut fixture = fixture.unwrap();
+    let mut fixture = ScreenshotTestFixture::new(256, 256, 0.05)
+        .await
+        .expect("GPU required");
 
     fixture.pipeline.set_thickness(500.0);
     fixture.pipeline.set_time(0.0);
     fixture.pipeline.set_camera_distance(0.2);
-    fixture.pipeline.orbit_camera(100.0, 50.0); // Rotate camera
+    fixture.pipeline.orbit_camera(100.0, 50.0);
 
     match fixture.render_and_compare("rotated_view") {
         Ok(()) => {}

@@ -98,8 +98,8 @@ impl FoamSimulator {
     /// Bubbles experience reduced effective gravity due to buoyancy.
     fn compute_buoyancy(&self, bubble: &Bubble) -> Vec3 {
         // Mass of soap film (thin shell)
-        let shell_volume = 4.0 * std::f32::consts::PI * bubble.radius.powi(2)
-            * (bubble.thickness_nm * 1e-9);
+        let shell_volume =
+            4.0 * std::f32::consts::PI * bubble.radius.powi(2) * (bubble.thickness_nm * 1e-9);
         let film_mass = shell_volume * self.density;
 
         // Buoyancy from displaced air (small effect)
@@ -130,10 +130,8 @@ impl FoamSimulator {
 
         // Van der Waals attraction (long-range, weak)
         if distance < sum_radii * 3.0 && distance > sum_radii {
-            let vdw_force = self.van_der_waals_strength
-                * bubble_a.radius
-                * bubble_b.radius
-                / distance.powi(2);
+            let vdw_force =
+                self.van_der_waals_strength * bubble_a.radius * bubble_b.radius / distance.powi(2);
             force += direction * vdw_force;
         }
 
@@ -180,8 +178,8 @@ impl FoamSimulator {
         // Semi-implicit Euler integration
         for (i, bubble) in bubbles.iter_mut().enumerate() {
             // Approximate mass (film mass)
-            let shell_volume = 4.0 * std::f32::consts::PI * bubble.radius.powi(2)
-                * (bubble.thickness_nm * 1e-9);
+            let shell_volume =
+                4.0 * std::f32::consts::PI * bubble.radius.powi(2) * (bubble.thickness_nm * 1e-9);
             let mass = (shell_volume * self.density).max(1e-9);
 
             // Update velocity

@@ -135,7 +135,7 @@ impl TestHarness {
 
 /// Helper to compute the average color of a frame
 pub fn average_color(pixels: &[u8]) -> (f64, f64, f64, f64) {
-    if pixels.is_empty() || pixels.len() % 4 != 0 {
+    if pixels.is_empty() || !pixels.len().is_multiple_of(4) {
         return (0.0, 0.0, 0.0, 0.0);
     }
 
@@ -192,42 +192,26 @@ pub fn frame_diff_ratio(a: &[u8], b: &[u8], tolerance: u8) -> f64 {
 // ============================================================================
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_harness_creation() {
-    let harness = TestHarness::new(256, 256).await;
-    // May fail on systems without GPU
-    if let Some(h) = harness {
-        assert_eq!(h.size(), (256, 256));
-    }
+    let harness = TestHarness::new(256, 256).await.expect("GPU required");
+    assert_eq!(harness.size(), (256, 256));
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_full_render_cycle() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut harness = harness.unwrap();
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
     let frame = harness.render_frame();
 
     assert!(!frame.is_empty(), "Frame should not be empty");
-    assert_eq!(
-        frame.len(),
-        256 * 256 * 4,
-        "Frame should be 256x256 RGBA"
-    );
+    assert_eq!(frame.len(), 256 * 256 * 4, "Frame should be 256x256 RGBA");
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_frame_has_content() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut harness = harness.unwrap();
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
     let frame = harness.render_frame();
 
     // Frame should not be all zeros (completely black)
@@ -236,70 +220,43 @@ async fn test_frame_has_content() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_camera_orbit_changes_view() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
 
-    let mut harness = harness.unwrap();
-
-    // Render initial frame
     let frame1 = harness.render_frame().to_vec();
-
-    // Orbit camera
     harness.orbit_camera(100.0, 0.0);
-
-    // Render new frame
     let frame2 = harness.render_frame().to_vec();
 
-    // Frames should be different
-    assert_ne!(frame1, frame2, "Camera orbit should change the rendered view");
+    assert_ne!(
+        frame1, frame2,
+        "Camera orbit should change the rendered view"
+    );
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_zoom_changes_view() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
 
-    let mut harness = harness.unwrap();
-
-    // Render initial frame
     let frame1 = harness.render_frame().to_vec();
-
-    // Zoom in
     harness.zoom_camera(3.0);
-
-    // Render new frame
     let frame2 = harness.render_frame().to_vec();
 
-    // Frames should be different
     assert_ne!(frame1, frame2, "Zoom should change the rendered view");
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_thickness_changes_appearance() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
 
-    let mut harness = harness.unwrap();
-
-    // Render at default thickness
     harness.set_thickness(500.0);
     let frame1 = harness.render_frame().to_vec();
 
-    // Change thickness significantly
     harness.set_thickness(200.0);
     let frame2 = harness.render_frame().to_vec();
 
-    // Frames should be different (different interference colors)
     assert_ne!(
         frame1, frame2,
         "Different film thickness should produce different colors"
@@ -307,14 +264,9 @@ async fn test_thickness_changes_appearance() {
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_scenario_execution() {
-    let harness = TestHarness::new(256, 256).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
-
-    let mut harness = harness.unwrap();
+    let mut harness = TestHarness::new(256, 256).await.expect("GPU required");
 
     let scenario = vec![
         TestStep::SetThickness(500.0),
@@ -331,7 +283,6 @@ async fn test_scenario_execution() {
 
     assert_eq!(frames.len(), 4, "Should have captured 4 frames");
 
-    // All frames should have content
     for (i, frame) in frames.iter().enumerate() {
         assert!(!frame.is_empty(), "Frame {} should not be empty", i);
         assert_eq!(
@@ -342,51 +293,48 @@ async fn test_scenario_execution() {
         );
     }
 
-    // Consecutive frames should be different (due to camera/thickness changes)
     assert_ne!(frames[0], frames[1], "Frame 0 and 1 should differ (orbit)");
     assert_ne!(frames[1], frames[2], "Frame 1 and 2 should differ (zoom)");
-    assert_ne!(frames[2], frames[3], "Frame 2 and 3 should differ (thickness)");
+    assert_ne!(
+        frames[2], frames[3],
+        "Frame 2 and 3 should differ (thickness)"
+    );
 }
 
 #[tokio::test]
+#[ignore] // Requires GPU
 async fn test_multiple_renders_deterministic() {
-    let harness = TestHarness::new(128, 128).await;
-    if harness.is_none() {
-        eprintln!("Skipping test: no GPU available");
-        return;
-    }
+    let mut harness = TestHarness::new(128, 128).await.expect("GPU required");
 
-    let mut harness = harness.unwrap();
-
-    // Set specific state
     harness.set_thickness(500.0);
     harness.set_time(0.0);
     harness.set_camera_distance(0.2);
 
-    // Render twice with same state
     let frame1 = harness.render_frame().to_vec();
     let frame2 = harness.render_frame().to_vec();
 
-    // Should be identical (deterministic rendering)
     assert_eq!(
         frame1, frame2,
         "Rendering same state twice should be deterministic"
     );
 }
 
-#[tokio::test]
-async fn test_frame_diff_utility() {
-    let a = vec![255, 0, 0, 255, 0, 255, 0, 255]; // Red, Green pixels
-    let b = vec![255, 0, 0, 255, 0, 255, 0, 255]; // Same
-    let c = vec![0, 0, 255, 255, 255, 255, 0, 255]; // Blue, Yellow pixels
+#[test]
+fn test_frame_diff_utility() {
+    let a = vec![255, 0, 0, 255, 0, 255, 0, 255];
+    let b = vec![255, 0, 0, 255, 0, 255, 0, 255];
+    let c = vec![0, 0, 255, 255, 255, 255, 0, 255];
 
     assert_eq!(frame_diff_ratio(&a, &b, 0), 0.0, "Identical frames");
-    assert_eq!(frame_diff_ratio(&a, &c, 0), 1.0, "Completely different frames");
+    assert_eq!(
+        frame_diff_ratio(&a, &c, 0),
+        1.0,
+        "Completely different frames"
+    );
 }
 
-#[tokio::test]
-async fn test_average_color_utility() {
-    // All red pixels
+#[test]
+fn test_average_color_utility() {
     let red = vec![255, 0, 0, 255, 255, 0, 0, 255];
     let (r, g, b, a) = average_color(&red);
     assert!((r - 255.0).abs() < 0.001);

@@ -6,8 +6,8 @@
 use std::f32::consts::PI;
 
 /// LUT dimensions - balance between quality and memory
-pub const LUT_THICKNESS_SAMPLES: u32 = 256;  // 0-2000nm range
-pub const LUT_ANGLE_SAMPLES: u32 = 64;       // 0-90° (cos_theta 0-1)
+pub const LUT_THICKNESS_SAMPLES: u32 = 256; // 0-2000nm range
+pub const LUT_ANGLE_SAMPLES: u32 = 64; // 0-90° (cos_theta 0-1)
 
 /// Maximum thickness in nanometers covered by the LUT
 pub const LUT_MAX_THICKNESS_NM: f32 = 2000.0;
@@ -22,8 +22,8 @@ pub fn generate_interference_lut(refractive_index: f32, intensity: f32) -> Vec<u
     for angle_idx in 0..LUT_ANGLE_SAMPLES {
         for thickness_idx in 0..LUT_THICKNESS_SAMPLES {
             // Map indices to physical values
-            let thickness_nm = (thickness_idx as f32 / (LUT_THICKNESS_SAMPLES - 1) as f32)
-                * LUT_MAX_THICKNESS_NM;
+            let thickness_nm =
+                (thickness_idx as f32 / (LUT_THICKNESS_SAMPLES - 1) as f32) * LUT_MAX_THICKNESS_NM;
             let cos_theta = angle_idx as f32 / (LUT_ANGLE_SAMPLES - 1) as f32;
 
             // Compute interference color
@@ -134,15 +134,12 @@ fn airy_interference(phase: f32, reflectance: f32) -> f32 {
 
 /// CIE 1931 color matching functions (Gaussian approximation)
 fn cie_color_matching(wavelength: f32) -> [f32; 3] {
-    let x = 1.056 * gaussian(wavelength, 599.8, 37.9)
-        + 0.362 * gaussian(wavelength, 442.0, 16.0)
+    let x = 1.056 * gaussian(wavelength, 599.8, 37.9) + 0.362 * gaussian(wavelength, 442.0, 16.0)
         - 0.065 * gaussian(wavelength, 501.1, 20.4);
 
-    let y = 0.821 * gaussian(wavelength, 568.8, 46.9)
-        + 0.286 * gaussian(wavelength, 530.9, 31.1);
+    let y = 0.821 * gaussian(wavelength, 568.8, 46.9) + 0.286 * gaussian(wavelength, 530.9, 31.1);
 
-    let z = 1.217 * gaussian(wavelength, 437.0, 11.8)
-        + 0.681 * gaussian(wavelength, 459.0, 26.0);
+    let z = 1.217 * gaussian(wavelength, 437.0, 11.8) + 0.681 * gaussian(wavelength, 459.0, 26.0);
 
     [x.max(0.0), y.max(0.0), z.max(0.0)]
 }

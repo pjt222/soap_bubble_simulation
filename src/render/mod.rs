@@ -11,19 +11,19 @@
 //! - Headless: Headless rendering for automated testing
 //! - Interference LUT: Pre-computed interference color lookup table
 
-pub mod pipeline;
-pub mod camera;
-pub mod gpu_drainage;
-pub mod foam_renderer;
-pub mod caustics;
 pub mod branched_flow;
+pub mod camera;
+pub mod caustics;
+pub mod foam_renderer;
+pub mod gpu_drainage;
 pub mod headless;
 pub mod interference_lut;
+pub mod pipeline;
 
-pub use pipeline::RenderPipeline;
-pub use camera::Camera;
-pub use gpu_drainage::GPUDrainageSimulator;
-pub use foam_renderer::{FoamRenderer, BubbleInstance};
-pub use caustics::CausticRenderer;
 pub use branched_flow::BranchedFlowSimulator;
+pub use camera::Camera;
+pub use caustics::CausticRenderer;
+pub use foam_renderer::{BubbleInstance, FoamRenderer};
+pub use gpu_drainage::GPUDrainageSimulator;
 pub use headless::HeadlessRenderPipeline;
+pub use pipeline::RenderPipeline;

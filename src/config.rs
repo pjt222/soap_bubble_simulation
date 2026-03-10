@@ -56,10 +56,10 @@ pub struct FluidParameters {
 impl Default for FluidParameters {
     fn default() -> Self {
         Self {
-            viscosity: 0.001,             // ~water viscosity
-            surface_tension: 0.025,       // soap solution
-            density: 1000.0,              // kg/m^3
-            surfactant_diffusion: 1e-9,   // m^2/s
+            viscosity: 0.001,           // ~water viscosity
+            surface_tension: 0.025,     // soap solution
+            density: 1000.0,            // kg/m^3
+            surfactant_diffusion: 1e-9, // m^2/s
             surfactant_concentration: 0.5,
         }
     }
@@ -93,11 +93,11 @@ fn default_buoyancy() -> f64 {
 impl Default for EnvironmentParameters {
     fn default() -> Self {
         Self {
-            gravity: 9.81,       // Earth gravity
-            temperature: 293.15, // 20 degrees Celsius
-            pressure: 101325.0,  // 1 atm
+            gravity: 9.81,         // Earth gravity
+            temperature: 293.15,   // 20 degrees Celsius
+            pressure: 101325.0,    // 1 atm
             wind: [0.0, 0.0, 0.0], // No wind by default
-            buoyancy: 1.0,       // Normal buoyancy
+            buoyancy: 1.0,         // Normal buoyancy
         }
     }
 }
@@ -604,5 +604,41 @@ mod tests {
         let mut config = SimulationConfig::default();
         config.fluid.surface_tension = 0.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_from_file_nonexistent_returns_io_error() {
+        let result = SimulationConfig::from_file("/nonexistent/path/config.json");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Io { .. }),
+            "Expected Io error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_file_malformed_json_returns_parse_error() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        write!(tmp, "{{ not valid json !!!").unwrap();
+        let result = SimulationConfig::from_file(tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse { .. }),
+            "Expected Parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_file_valid_json_roundtrip() {
+        use std::io::Write;
+        let config = SimulationConfig::default();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        write!(tmp, "{json}").unwrap();
+        let loaded = SimulationConfig::from_file(tmp.path()).unwrap();
+        assert!((loaded.bubble.diameter - config.bubble.diameter).abs() < f64::EPSILON);
     }
 }

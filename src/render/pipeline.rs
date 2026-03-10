@@ -1,21 +1,21 @@
 //! wgpu render pipeline for soap bubble visualization
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 use std::path::Path;
+use wgpu::util::DeviceExt;
 
 use crate::config::SimulationConfig;
-use crate::physics::drainage::DrainageSimulator;
-use crate::physics::geometry::{LodMeshCache, SpherePatch, Vertex};
-use crate::physics::foam_dynamics::FoamSimulator;
-use crate::render::camera::Camera;
-use crate::render::gpu_drainage::GPUDrainageSimulator;
-use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
-use crate::render::branched_flow::{BranchedFlowSimulator, create_branched_flow_buffer};
-use crate::render::interference_lut::{
-    generate_interference_lut, LUT_THICKNESS_SAMPLES, LUT_ANGLE_SAMPLES,
-};
 use crate::export::image_export;
+use crate::physics::drainage::DrainageSimulator;
+use crate::physics::foam_dynamics::FoamSimulator;
+use crate::physics::geometry::{LodMeshCache, SpherePatch, Vertex};
+use crate::render::branched_flow::{BranchedFlowSimulator, create_branched_flow_buffer};
+use crate::render::camera::Camera;
+use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
+use crate::render::gpu_drainage::GPUDrainageSimulator;
+use crate::render::interference_lut::{
+    LUT_ANGLE_SAMPLES, LUT_THICKNESS_SAMPLES, generate_interference_lut,
+};
 
 /// Bubble-specific uniform data
 #[repr(C)]
@@ -95,7 +95,7 @@ impl Default for BubbleUniform {
             branched_flow_scale: 5.0,
             branched_flow_sharpness: 2.0,
             // Light direction (default: from upper-right, normalized)
-            light_dir_x: 0.577,  // 1/sqrt(3)
+            light_dir_x: 0.577, // 1/sqrt(3)
             light_dir_y: 0.577,
             light_dir_z: 0.577,
             // Patch view mode (enabled by default for focused visualization)
@@ -154,7 +154,7 @@ pub struct RenderPipeline {
     last_dt: f32,
     // Animation state
     rotation_playing: bool,
-    rotation_speed: f32,  // radians per second for camera yaw
+    rotation_speed: f32, // radians per second for camera yaw
     film_playing: bool,
     film_speed: f32,
     // Export state
@@ -164,7 +164,7 @@ pub struct RenderPipeline {
     // External forces
     bubble_velocity: [f32; 3],
     wind_strength: f32,
-    wind_direction: [f32; 3],  // Normalized direction
+    wind_direction: [f32; 3], // Normalized direction
     buoyancy_strength: f32,
     forces_enabled: bool,
     // Drainage simulation
@@ -173,12 +173,12 @@ pub struct RenderPipeline {
     drainage_time_scale: f32,
     // Gravity deformation
     deformation_enabled: bool,
-    aspect_ratio: f32,  // 1.0 = sphere, <1.0 = oblate (flattened)
+    aspect_ratio: f32, // 1.0 = sphere, <1.0 = oblate (flattened)
     // LOD system
     lod_cache: LodMeshCache,
     current_lod_level: u32,
     lod_enabled: bool,
-    lod_thresholds: [f32; 4],  // Distance thresholds for LOD transitions [5→4, 4→3, 3→2, 2→1]
+    lod_thresholds: [f32; 4], // Distance thresholds for LOD transitions [5→4, 4→3, 3→2, 2→1]
     // GPU drainage simulation
     gpu_drainage: GPUDrainageSimulator,
     gpu_drainage_enabled: bool,
@@ -244,7 +244,10 @@ impl RenderPipeline {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| "No compatible GPU adapter found. Ensure your GPU drivers are up to date.".to_string())?;
+            .ok_or_else(|| {
+                "No compatible GPU adapter found. Ensure your GPU drivers are up to date."
+                    .to_string()
+            })?;
 
         // Request device and queue
         let (device, queue) = adapter
@@ -357,7 +360,8 @@ impl RenderPipeline {
                 depth_or_array_layers: 1,
             },
         );
-        let interference_lut_view = interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let interference_lut_view =
+            interference_lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let interference_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Interference LUT Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -578,10 +582,7 @@ impl RenderPipeline {
             vertex: wgpu::VertexState {
                 module: &wall_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[
-                    WallVertex::buffer_layout(),
-                    WallInstance::buffer_layout(),
-                ],
+                buffers: &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -679,10 +680,9 @@ impl RenderPipeline {
 
         // Initialize GPU drainage simulator
         let gpu_drainage = GPUDrainageSimulator::new(
-            &device,
-            500e-9,  // Initial thickness: 500nm
-            128,     // Grid width (phi)
-            64,      // Grid height (theta)
+            &device, 500e-9, // Initial thickness: 500nm
+            128,    // Grid width (phi)
+            64,     // Grid height (theta)
         );
 
         // Initialize foam renderer
@@ -760,7 +760,7 @@ impl RenderPipeline {
             last_dt: 1.0 / 60.0,
             // Animation state
             rotation_playing: false,
-            rotation_speed: 0.5,  // radians per second
+            rotation_speed: 0.5, // radians per second
             film_playing: true,
             film_speed: 1.0,
             // Export state
@@ -770,21 +770,21 @@ impl RenderPipeline {
             // External forces
             bubble_velocity: [0.0, 0.0, 0.0],
             wind_strength: 0.0,
-            wind_direction: [1.0, 0.0, 0.0],  // Default: blowing in +X direction
-            buoyancy_strength: 0.02,  // Light upward force
+            wind_direction: [1.0, 0.0, 0.0], // Default: blowing in +X direction
+            buoyancy_strength: 0.02,         // Light upward force
             forces_enabled: false,
             // Drainage simulation (initialized lazily or with default config)
             drainage_simulator: None,
             physics_drainage_enabled: false,
-            drainage_time_scale: 100.0,  // Speed up simulation for visible effect
+            drainage_time_scale: 100.0, // Speed up simulation for visible effect
             // Gravity deformation (disabled by default)
             deformation_enabled: false,
-            aspect_ratio: 1.0,  // Perfect sphere
+            aspect_ratio: 1.0, // Perfect sphere
             // LOD system
             lod_cache,
             current_lod_level: subdivision_level,
-            lod_enabled: false,  // Disabled by default, user can enable
-            lod_thresholds: [0.08, 0.15, 0.30, 0.60],  // Distance thresholds in meters
+            lod_enabled: false, // Disabled by default, user can enable
+            lod_thresholds: [0.08, 0.15, 0.30, 0.60], // Distance thresholds in meters
             // GPU drainage simulation
             gpu_drainage,
             gpu_drainage_enabled: false,
@@ -882,7 +882,11 @@ impl RenderPipeline {
     /// Set gravity deformation (aspect ratio)
     /// aspect_ratio: 1.0 = sphere, <1.0 = oblate (flattened at poles)
     pub fn set_deformation(&mut self, enabled: bool, aspect_ratio: f32) {
-        let new_ratio = if enabled { aspect_ratio.clamp(0.7, 1.0) } else { 1.0 };
+        let new_ratio = if enabled {
+            aspect_ratio.clamp(0.7, 1.0)
+        } else {
+            1.0
+        };
         if (self.aspect_ratio - new_ratio).abs() < 0.001 && self.deformation_enabled == enabled {
             return; // No significant change
         }
@@ -965,7 +969,11 @@ impl RenderPipeline {
     /// Get foam statistics (bubble count, connections, walls).
     pub fn foam_stats(&self) -> (usize, usize, usize) {
         if let Some(ref sim) = self.foam_simulator {
-            (sim.bubble_count(), sim.connection_count(), self.shared_wall_renderer.instance_count() as usize)
+            (
+                sim.bubble_count(),
+                sim.connection_count(),
+                self.shared_wall_renderer.instance_count() as usize,
+            )
         } else {
             (0, 0, 0)
         }
@@ -976,17 +984,21 @@ impl RenderPipeline {
         // Use LOD cache for mesh generation
         let mesh = self.lod_cache.get_mesh(self.subdivision_level);
 
-        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: mesh.vertex_bytes(),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: mesh.vertex_bytes(),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
-        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: mesh.index_bytes(),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        self.index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: mesh.index_bytes(),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         self.num_indices = mesh.indices.len() as u32;
     }
@@ -999,19 +1011,24 @@ impl RenderPipeline {
             self.patch_half_size,
             32,
         );
-        let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(self.radius, self.aspect_ratio);
+        let (patch_vertices, patch_indices) =
+            patch.generate_mesh_indexed(self.radius, self.aspect_ratio);
 
-        self.patch_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Patch Vertex Buffer"),
-            contents: bytemuck::cast_slice(&patch_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.patch_vertex_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Patch Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&patch_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
-        self.patch_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Patch Index Buffer"),
-            contents: bytemuck::cast_slice(&patch_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        self.patch_index_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Patch Index Buffer"),
+                    contents: bytemuck::cast_slice(&patch_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
         self.patch_num_indices = patch_indices.len() as u32;
 
@@ -1066,17 +1083,21 @@ impl RenderPipeline {
         // Get mesh from cache and create new GPU buffers
         let mesh = self.lod_cache.get_mesh(level);
 
-        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: mesh.vertex_bytes(),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: mesh.vertex_bytes(),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
-        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: mesh.index_bytes(),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        self.index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: mesh.index_bytes(),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         self.num_indices = mesh.indices.len() as u32;
 
@@ -1135,17 +1156,22 @@ impl RenderPipeline {
 
     /// Handle window resize
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 &&
-           (new_size.width != self.config.width || new_size.height != self.config.height) {
+        if new_size.width > 0
+            && new_size.height > 0
+            && (new_size.width != self.config.width || new_size.height != self.config.height)
+        {
             // Wait for GPU to finish any pending work before recreating resources
             self.device.poll(wgpu::Maintain::Wait);
 
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            self.depth_texture = Self::create_depth_texture(&self.device, &self.config, self.msaa_samples);
-            self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, self.msaa_samples);
-            self.camera.set_aspect(new_size.width as f32 / new_size.height as f32);
+            self.depth_texture =
+                Self::create_depth_texture(&self.device, &self.config, self.msaa_samples);
+            self.msaa_texture =
+                Self::create_msaa_texture(&self.device, &self.config, self.msaa_samples);
+            self.camera
+                .set_aspect(new_size.width as f32 / new_size.height as f32);
         }
     }
 
@@ -1168,66 +1194,76 @@ impl RenderPipeline {
         self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, samples);
 
         // Recreate render pipeline with new multisample state
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Bubble Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
-        });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Bubble Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
+            });
 
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&self.bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&self.bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
-        self.render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::buffer_layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        self.render_pipeline =
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Render Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[Vertex::buffer_layout()],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.config.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: samples,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    multiview: None,
+                    cache: None,
+                });
 
         log::info!("MSAA changed to {}x", samples);
     }
 
     /// Handle window events for egui
-    pub fn handle_event(&mut self, window: &winit::window::Window, event: &winit::event::WindowEvent) -> bool {
+    pub fn handle_event(
+        &mut self,
+        window: &winit::window::Window,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
         let response = self.egui_state.on_window_event(window, event);
         response.consumed
     }
@@ -1273,7 +1309,8 @@ impl RenderPipeline {
 
             // Update velocity: v += (F - drag*v) * dt
             for i in 0..3 {
-                let total_force = wind_force[i] + buoyancy_force[i] - drag * self.bubble_velocity[i];
+                let total_force =
+                    wind_force[i] + buoyancy_force[i] - drag * self.bubble_velocity[i];
                 self.bubble_velocity[i] += total_force * dt;
             }
 
@@ -1303,34 +1340,34 @@ impl RenderPipeline {
         if self.physics_drainage_enabled
             && let Some(ref mut simulator) = self.drainage_simulator
         {
-                // Step the drainage simulation (with time scaling for visible effect)
-                let scaled_dt = (dt * self.drainage_time_scale) as f64;
-                simulator.step(scaled_dt);
+            // Step the drainage simulation (with time scaling for visible effect)
+            let scaled_dt = (dt * self.drainage_time_scale) as f64;
+            simulator.step(scaled_dt);
 
-                // Get thickness statistics from the simulation
-                let field = simulator.thickness_field();
-                let min_thickness = field.min_thickness() as f32 * 1e9;  // Convert to nm
-                let max_thickness = field.max_thickness() as f32 * 1e9;
+            // Get thickness statistics from the simulation
+            let field = simulator.thickness_field();
+            let min_thickness = field.min_thickness() as f32 * 1e9; // Convert to nm
+            let max_thickness = field.max_thickness() as f32 * 1e9;
 
-                // Sample thickness at equator (theta = PI/2) to get representative value
-                let equator_thickness = simulator.get_thickness(
-                    std::f64::consts::FRAC_PI_2,
-                    0.0
-                ) as f32 * 1e9;
+            // Sample thickness at equator (theta = PI/2) to get representative value
+            let equator_thickness =
+                simulator.get_thickness(std::f64::consts::FRAC_PI_2, 0.0) as f32 * 1e9;
 
-                // Update the base thickness to reflect drainage
-                // Use the equator thickness as it's a good representative
-                self.bubble_uniform.base_thickness_nm = equator_thickness;
+            // Update the base thickness to reflect drainage
+            // Use the equator thickness as it's a good representative
+            self.bubble_uniform.base_thickness_nm = equator_thickness;
 
-                // Adjust drainage_speed based on actual simulation progress
-                // This affects the procedural overlay in the shader
-                let drain_ratio = min_thickness / max_thickness;
-                self.bubble_uniform.drainage_speed = (1.0 - drain_ratio).clamp(0.0, 2.0);
+            // Adjust drainage_speed based on actual simulation progress
+            // This affects the procedural overlay in the shader
+            let drain_ratio = min_thickness / max_thickness;
+            self.bubble_uniform.drainage_speed = (1.0 - drain_ratio).clamp(0.0, 2.0);
 
-                // Check for burst condition
+            // Check for burst condition
             if simulator.has_critical_region() {
-                log::info!("Bubble reached critical thickness - would burst at t={:.2}s",
-                    simulator.current_time());
+                log::info!(
+                    "Bubble reached critical thickness - would burst at t={:.2}s",
+                    simulator.current_time()
+                );
             }
         }
 
@@ -1476,7 +1513,11 @@ impl RenderPipeline {
         let mut laser_azimuth = entry[2].atan2(entry[0]).to_degrees();
         let mut laser_elevation = entry[1].asin().to_degrees();
         // Beam parameters
-        let mut beam_spread = self.branched_flow_simulator.params.spread_angle.to_degrees();
+        let mut beam_spread = self
+            .branched_flow_simulator
+            .params
+            .spread_angle
+            .to_degrees();
         let mut bend_strength = self.branched_flow_simulator.params.bend_strength;
         let mut num_rays = self.branched_flow_simulator.params.num_rays;
         // Particle scattering parameters
@@ -1494,7 +1535,7 @@ impl RenderPipeline {
         let mut foam_enabled = self.foam_enabled;
         let mut foam_paused = self.foam_paused;
         let mut foam_time_scale = self.foam_time_scale;
-        let foam_stats = self.foam_stats();  // (bubbles, connections, walls)
+        let foam_stats = self.foam_stats(); // (bubbles, connections, walls)
         let mut add_bubble_requested = false;
         let mut reset_foam_requested = false;
         let mut foam_gen_params = self.foam_generation_params.clone();
@@ -1668,11 +1709,13 @@ impl RenderPipeline {
 
         // Handle drainage reset request
         if reset_drainage {
-            self.reset_drainage(500.0);  // Reset to 500nm
+            self.reset_drainage(500.0); // Reset to 500nm
         }
 
         // Handle deformation changes
-        if deformation_enabled != self.deformation_enabled || (aspect_ratio - self.aspect_ratio).abs() > 0.001 {
+        if deformation_enabled != self.deformation_enabled
+            || (aspect_ratio - self.aspect_ratio).abs() > 0.001
+        {
             self.set_deformation(deformation_enabled, aspect_ratio);
         }
 
@@ -1693,12 +1736,13 @@ impl RenderPipeline {
         self.gpu_drainage.time_scale = gpu_drainage_time_scale;
         self.gpu_drainage.steps_per_frame = gpu_drainage_steps;
         if reset_gpu_drainage {
-            self.gpu_drainage.reset(&self.queue, 500e-9);  // Reset to 500nm
+            self.gpu_drainage.reset(&self.queue, 500e-9); // Reset to 500nm
         }
 
         // Handle Marangoni changes
         if marangoni_enabled != self.gpu_drainage.marangoni_enabled {
-            self.gpu_drainage.set_marangoni_enabled(&self.queue, marangoni_enabled);
+            self.gpu_drainage
+                .set_marangoni_enabled(&self.queue, marangoni_enabled);
         }
         if (marangoni_coeff - self.gpu_drainage.params().marangoni_coeff).abs() > 0.0001 {
             let params = self.gpu_drainage.params();
@@ -1715,8 +1759,9 @@ impl RenderPipeline {
         self.caustic_renderer.enabled = caustics_enabled;
         let caustic_params_changed =
             (caustic_intensity - self.caustic_renderer.params.caustic_intensity).abs() > 0.001
-            || (caustic_sharpness - self.caustic_renderer.params.caustic_sharpness).abs() > 0.001
-            || (ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001;
+                || (caustic_sharpness - self.caustic_renderer.params.caustic_sharpness).abs()
+                    > 0.001
+                || (ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001;
         if caustic_params_changed {
             self.caustic_renderer.params.caustic_intensity = caustic_intensity;
             self.caustic_renderer.params.caustic_sharpness = caustic_sharpness;
@@ -1732,7 +1777,8 @@ impl RenderPipeline {
         self.bubble_uniform.branched_flow_intensity = branched_flow_intensity;
         self.bubble_uniform.branched_flow_sharpness = branched_flow_sharpness;
         // Update laser entry point
-        self.branched_flow_simulator.set_entry_point(laser_azimuth, laser_elevation);
+        self.branched_flow_simulator
+            .set_entry_point(laser_azimuth, laser_elevation);
         // Update beam parameters
         self.branched_flow_simulator.params.spread_angle = beam_spread.to_radians();
         self.branched_flow_simulator.params.bend_strength = bend_strength;
@@ -1743,7 +1789,8 @@ impl RenderPipeline {
         self.branched_flow_simulator.params.scatterer_radius = scatterer_radius;
         self.branched_flow_simulator.params.particle_weight = particle_weight;
         // Sync film dynamics so branched flow rays bend through the same dynamic landscape
-        self.branched_flow_simulator.params.base_thickness_nm = self.bubble_uniform.base_thickness_nm;
+        self.branched_flow_simulator.params.base_thickness_nm =
+            self.bubble_uniform.base_thickness_nm;
         self.branched_flow_simulator.params.swirl_intensity = self.bubble_uniform.swirl_intensity;
         self.branched_flow_simulator.params.drainage_speed = self.bubble_uniform.drainage_speed;
         self.branched_flow_simulator.params.pattern_scale = self.bubble_uniform.pattern_scale;
@@ -1752,8 +1799,7 @@ impl RenderPipeline {
         self.patch_view_enabled = patch_view_enabled;
         self.branched_flow_simulator.params.patch_enabled = if patch_view_enabled { 1 } else { 0 };
         // Check if patch parameters changed (regenerate mesh if so)
-        let patch_params_changed =
-            (patch_center_u - self.patch_center_u).abs() > 0.001
+        let patch_params_changed = (patch_center_u - self.patch_center_u).abs() > 0.001
             || (patch_center_v - self.patch_center_v).abs() > 0.001
             || (patch_half_size - self.patch_half_size).abs() > 0.001;
         if patch_params_changed {
@@ -1791,10 +1837,13 @@ impl RenderPipeline {
         }
 
         // Handle egui platform output
-        self.egui_state.handle_platform_output(window, egui_output.platform_output);
+        self.egui_state
+            .handle_platform_output(window, egui_output.platform_output);
 
         // Tessellate egui
-        let clipped_primitives = self.egui_ctx.tessellate(egui_output.shapes, egui_output.pixels_per_point);
+        let clipped_primitives = self
+            .egui_ctx
+            .tessellate(egui_output.shapes, egui_output.pixels_per_point);
 
         // Update egui textures
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
@@ -1803,7 +1852,8 @@ impl RenderPipeline {
         };
 
         for (id, image_delta) in &egui_output.textures_delta.set {
-            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
         }
 
         let mut encoder = self
@@ -1825,8 +1875,10 @@ impl RenderPipeline {
         // Branched flow compute pass (ray tracing through film)
         if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
             // Update scatterer positions (creates animated particle distribution)
-            self.branched_flow_simulator.update_scatterers(&self.queue, self.bubble_uniform.film_time);
-            self.branched_flow_simulator.step(&mut encoder, self.bubble_uniform.film_time);
+            self.branched_flow_simulator
+                .update_scatterers(&self.queue, self.bubble_uniform.film_time);
+            self.branched_flow_simulator
+                .step(&mut encoder, self.bubble_uniform.film_time);
             self.branched_flow_simulator.update_params(&self.queue);
         }
 
@@ -1884,20 +1936,32 @@ impl RenderPipeline {
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.foam_vertex_buffer.slice(..));
                 render_pass.set_vertex_buffer(1, self.foam_renderer.instance_buffer().slice(..));
-                render_pass.set_index_buffer(self.foam_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.foam_num_indices, 0, 0..self.foam_renderer.instance_count());
+                render_pass
+                    .set_index_buffer(self.foam_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(
+                    0..self.foam_num_indices,
+                    0,
+                    0..self.foam_renderer.instance_count(),
+                );
 
                 // Render shared walls (Plateau borders) between touching bubbles
                 if self.shared_wall_renderer.has_walls() {
                     render_pass.set_pipeline(&self.wall_pipeline);
                     render_pass.set_bind_group(0, &self.bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, self.shared_wall_renderer.vertex_buffer().slice(..));
-                    render_pass.set_vertex_buffer(1, self.shared_wall_renderer.instance_buffer().slice(..));
-                    render_pass.set_index_buffer(self.shared_wall_renderer.index_buffer().slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass
+                        .set_vertex_buffer(0, self.shared_wall_renderer.vertex_buffer().slice(..));
+                    render_pass.set_vertex_buffer(
+                        1,
+                        self.shared_wall_renderer.instance_buffer().slice(..),
+                    );
+                    render_pass.set_index_buffer(
+                        self.shared_wall_renderer.index_buffer().slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
                     render_pass.draw_indexed(
                         0..self.shared_wall_renderer.num_mesh_indices(),
                         0,
-                        0..self.shared_wall_renderer.instance_count()
+                        0..self.shared_wall_renderer.instance_count(),
                     );
                 }
             } else if self.patch_view_enabled && self.branched_flow_simulator.enabled {
@@ -1905,14 +1969,16 @@ impl RenderPipeline {
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.patch_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(self.patch_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(self.patch_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.patch_num_indices, 0, 0..1);
             } else {
                 // Full sphere view
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
             }
 
@@ -1947,11 +2013,11 @@ impl RenderPipeline {
             // 2. The reference does not escape this scope (egui renders synchronously)
             // 3. No other references to the encoder exist while render_pass is alive
             // TODO: Remove when upgrading to egui-wgpu >= 0.32 (accepts non-static lifetime)
-            let render_pass: &mut wgpu::RenderPass<'static> = unsafe {
-                std::mem::transmute(&mut render_pass)
-            };
+            let render_pass: &mut wgpu::RenderPass<'static> =
+                unsafe { std::mem::transmute(&mut render_pass) };
 
-            self.egui_renderer.render(render_pass, &clipped_primitives, &screen_descriptor);
+            self.egui_renderer
+                .render(render_pass, &clipped_primitives, &screen_descriptor);
         }
 
         // Free egui textures
@@ -2157,7 +2223,7 @@ impl RenderPipeline {
         foam_enabled: &mut bool,
         foam_paused: &mut bool,
         foam_time_scale: &mut f32,
-        foam_stats: (usize, usize, usize),  // (bubbles, connections, walls)
+        foam_stats: (usize, usize, usize), // (bubbles, connections, walls)
         add_bubble_requested: &mut bool,
         reset_foam_requested: &mut bool,
         // Foam generation parameters
@@ -2172,13 +2238,17 @@ impl RenderPipeline {
                 ui.heading("Film Properties");
                 ui.separator();
 
-                ui.add(egui::Slider::new(thickness, 100.0..=1500.0)
-                    .text("Thickness")
-                    .suffix(" nm"));
+                ui.add(
+                    egui::Slider::new(thickness, 100.0..=1500.0)
+                        .text("Thickness")
+                        .suffix(" nm"),
+                );
 
-                ui.add(egui::Slider::new(refractive_index, 1.0..=2.0)
-                    .text("Refractive index")
-                    .fixed_decimals(2));
+                ui.add(
+                    egui::Slider::new(refractive_index, 1.0..=2.0)
+                        .text("Refractive index")
+                        .fixed_decimals(2),
+                );
 
                 // Preset buttons
                 ui.horizontal(|ui| {
@@ -2202,17 +2272,23 @@ impl RenderPipeline {
                 ui.heading("Render Settings");
                 ui.separator();
 
-                ui.add(egui::Slider::new(interference_intensity, 0.5..=10.0)
-                    .text("Color intensity")
-                    .fixed_decimals(1));
+                ui.add(
+                    egui::Slider::new(interference_intensity, 0.5..=10.0)
+                        .text("Color intensity")
+                        .fixed_decimals(1),
+                );
 
-                ui.add(egui::Slider::new(base_alpha, 0.0..=1.0)
-                    .text("Base opacity")
-                    .fixed_decimals(2));
+                ui.add(
+                    egui::Slider::new(base_alpha, 0.0..=1.0)
+                        .text("Base opacity")
+                        .fixed_decimals(2),
+                );
 
-                ui.add(egui::Slider::new(edge_alpha, 0.0..=1.0)
-                    .text("Edge opacity")
-                    .fixed_decimals(2));
+                ui.add(
+                    egui::Slider::new(edge_alpha, 0.0..=1.0)
+                        .text("Edge opacity")
+                        .fixed_decimals(2),
+                );
 
                 ui.horizontal(|ui| {
                     ui.label("Edge blend:");
@@ -2252,11 +2328,13 @@ impl RenderPipeline {
 
                 if *lod_enabled {
                     // Show current LOD level when auto-LOD is enabled
-                    ui.label(format!("LOD Level: {} ({} tri)", current_lod_level, num_triangles));
+                    ui.label(format!(
+                        "LOD Level: {} ({} tri)",
+                        current_lod_level, num_triangles
+                    ));
                 } else {
                     // Manual subdivision control when LOD is disabled
-                    ui.add(egui::Slider::new(subdivision, 1..=5)
-                        .text("Mesh detail"));
+                    ui.add(egui::Slider::new(subdivision, 1..=5).text("Mesh detail"));
                 }
 
                 ui.horizontal(|ui| {
@@ -2275,60 +2353,84 @@ impl RenderPipeline {
 
                 ui.collapsing("Camera Orbit", |ui| {
                     ui.horizontal(|ui| {
-                        let play_text = if *rotation_playing { "\u{23F8} Pause" } else { "\u{25B6} Play" };
+                        let play_text = if *rotation_playing {
+                            "\u{23F8} Pause"
+                        } else {
+                            "\u{25B6} Play"
+                        };
                         if ui.button(play_text).clicked() {
                             *rotation_playing = !*rotation_playing;
                         }
                     });
 
-                    ui.add(egui::Slider::new(rotation_speed, 0.1..=2.0)
-                        .text("Speed")
-                        .suffix(" rad/s")
-                        .fixed_decimals(2));
+                    ui.add(
+                        egui::Slider::new(rotation_speed, 0.1..=2.0)
+                            .text("Speed")
+                            .suffix(" rad/s")
+                            .fixed_decimals(2),
+                    );
                 });
 
                 ui.collapsing("Film Dynamics", |ui| {
                     ui.horizontal(|ui| {
-                        let play_text = if *film_playing { "\u{23F8} Pause" } else { "\u{25B6} Play" };
+                        let play_text = if *film_playing {
+                            "\u{23F8} Pause"
+                        } else {
+                            "\u{25B6} Play"
+                        };
                         if ui.button(play_text).clicked() {
                             *film_playing = !*film_playing;
                         }
                     });
 
-                    ui.add(egui::Slider::new(film_speed, 0.1..=3.0)
-                        .text("Speed")
-                        .fixed_decimals(1));
+                    ui.add(
+                        egui::Slider::new(film_speed, 0.1..=3.0)
+                            .text("Speed")
+                            .fixed_decimals(1),
+                    );
 
-                    ui.add(egui::Slider::new(swirl_intensity, 0.0..=2.0)
-                        .text("Swirl")
-                        .fixed_decimals(2));
+                    ui.add(
+                        egui::Slider::new(swirl_intensity, 0.0..=2.0)
+                            .text("Swirl")
+                            .fixed_decimals(2),
+                    );
 
-                    ui.add(egui::Slider::new(drainage_speed, 0.0..=2.0)
-                        .text("Drainage")
-                        .fixed_decimals(2));
+                    ui.add(
+                        egui::Slider::new(drainage_speed, 0.0..=2.0)
+                            .text("Drainage")
+                            .fixed_decimals(2),
+                    );
 
-                    ui.add(egui::Slider::new(pattern_scale, 0.5..=3.0)
-                        .text("Pattern scale")
-                        .fixed_decimals(1));
+                    ui.add(
+                        egui::Slider::new(pattern_scale, 0.5..=3.0)
+                            .text("Pattern scale")
+                            .fixed_decimals(1),
+                    );
                 });
 
                 ui.collapsing("External Forces", |ui| {
                     ui.checkbox(forces_enabled, "Enable forces");
 
                     if *forces_enabled {
-                        ui.add(egui::Slider::new(wind_strength, 0.0..=0.5)
-                            .text("Wind")
-                            .suffix(" m/s²")
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(wind_strength, 0.0..=0.5)
+                                .text("Wind")
+                                .suffix(" m/s²")
+                                .fixed_decimals(2),
+                        );
 
-                        ui.add(egui::Slider::new(buoyancy_strength, 0.0..=0.1)
-                            .text("Buoyancy")
-                            .suffix(" m/s²")
-                            .fixed_decimals(3));
+                        ui.add(
+                            egui::Slider::new(buoyancy_strength, 0.0..=0.1)
+                                .text("Buoyancy")
+                                .suffix(" m/s²")
+                                .fixed_decimals(3),
+                        );
 
                         ui.separator();
-                        ui.label(format!("Position: ({:.3}, {:.3}, {:.3})",
-                            bubble_pos[0], bubble_pos[1], bubble_pos[2]));
+                        ui.label(format!(
+                            "Position: ({:.3}, {:.3}, {:.3})",
+                            bubble_pos[0], bubble_pos[1], bubble_pos[2]
+                        ));
                     }
                 });
 
@@ -2336,10 +2438,12 @@ impl RenderPipeline {
                     ui.checkbox(physics_drainage_enabled, "Enable CPU simulation");
 
                     if *physics_drainage_enabled {
-                        ui.add(egui::Slider::new(drainage_time_scale, 1.0..=500.0)
-                            .text("Time scale")
-                            .logarithmic(true)
-                            .fixed_decimals(0));
+                        ui.add(
+                            egui::Slider::new(drainage_time_scale, 1.0..=500.0)
+                                .text("Time scale")
+                                .logarithmic(true)
+                                .fixed_decimals(0),
+                        );
 
                         ui.separator();
                         if has_drainage_sim {
@@ -2359,21 +2463,24 @@ impl RenderPipeline {
                     ui.checkbox(gpu_drainage_enabled, "Enable GPU simulation");
 
                     if *gpu_drainage_enabled {
-                        ui.add(egui::Slider::new(gpu_drainage_time_scale, 10.0..=500.0)
-                            .text("Time scale")
-                            .logarithmic(true)
-                            .fixed_decimals(0));
+                        ui.add(
+                            egui::Slider::new(gpu_drainage_time_scale, 10.0..=500.0)
+                                .text("Time scale")
+                                .logarithmic(true)
+                                .fixed_decimals(0),
+                        );
 
-                        ui.add(egui::Slider::new(gpu_drainage_steps, 1..=50)
-                            .text("Steps/frame"));
+                        ui.add(egui::Slider::new(gpu_drainage_steps, 1..=50).text("Steps/frame"));
 
                         ui.separator();
                         ui.checkbox(marangoni_enabled, "Marangoni effect");
                         if *marangoni_enabled {
-                            ui.add(egui::Slider::new(marangoni_coeff, 0.001..=0.1)
-                                .text("Strength")
-                                .logarithmic(true)
-                                .fixed_decimals(3));
+                            ui.add(
+                                egui::Slider::new(marangoni_coeff, 0.001..=0.1)
+                                    .text("Strength")
+                                    .logarithmic(true)
+                                    .fixed_decimals(3),
+                            );
                             ui.label("Surfactant-driven flow");
                         }
 
@@ -2399,18 +2506,24 @@ impl RenderPipeline {
                             ui.colored_label(egui::Color32::YELLOW, "⚠ Requires GPU Drainage");
                         }
 
-                        ui.add(egui::Slider::new(caustic_intensity, 0.5..=5.0)
-                            .text("Intensity")
-                            .fixed_decimals(1));
+                        ui.add(
+                            egui::Slider::new(caustic_intensity, 0.5..=5.0)
+                                .text("Intensity")
+                                .fixed_decimals(1),
+                        );
 
-                        ui.add(egui::Slider::new(caustic_sharpness, 1.0..=3.0)
-                            .text("Sharpness")
-                            .fixed_decimals(1));
+                        ui.add(
+                            egui::Slider::new(caustic_sharpness, 1.0..=3.0)
+                                .text("Sharpness")
+                                .fixed_decimals(1),
+                        );
 
-                        ui.add(egui::Slider::new(ground_y, -0.15..=-0.05)
-                            .text("Ground height")
-                            .suffix(" m")
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(ground_y, -0.15..=-0.05)
+                                .text("Ground height")
+                                .suffix(" m")
+                                .fixed_decimals(2),
+                        );
                     }
 
                     ui.separator();
@@ -2425,63 +2538,85 @@ impl RenderPipeline {
                         }
 
                         ui.label("Injection Point");
-                        ui.add(egui::Slider::new(laser_azimuth, -180.0..=180.0)
-                            .text("Azimuth")
-                            .suffix("°")
-                            .fixed_decimals(0));
+                        ui.add(
+                            egui::Slider::new(laser_azimuth, -180.0..=180.0)
+                                .text("Azimuth")
+                                .suffix("°")
+                                .fixed_decimals(0),
+                        );
 
-                        ui.add(egui::Slider::new(laser_elevation, -90.0..=90.0)
-                            .text("Elevation")
-                            .suffix("°")
-                            .fixed_decimals(0));
+                        ui.add(
+                            egui::Slider::new(laser_elevation, -90.0..=90.0)
+                                .text("Elevation")
+                                .suffix("°")
+                                .fixed_decimals(0),
+                        );
 
                         ui.separator();
                         ui.label("Beam Properties");
 
-                        ui.add(egui::Slider::new(beam_spread, 1.0..=45.0)
-                            .text("Spread")
-                            .suffix("°")
-                            .fixed_decimals(0));
+                        ui.add(
+                            egui::Slider::new(beam_spread, 1.0..=45.0)
+                                .text("Spread")
+                                .suffix("°")
+                                .fixed_decimals(0),
+                        );
 
-                        ui.add(egui::Slider::new(bend_strength, 0.01..=50.0)
-                            .text("GRIN bending")
-                            .logarithmic(true)
-                            .fixed_decimals(3));
+                        ui.add(
+                            egui::Slider::new(bend_strength, 0.01..=50.0)
+                                .text("GRIN bending")
+                                .logarithmic(true)
+                                .fixed_decimals(3),
+                        );
 
-                        ui.add(egui::Slider::new(num_rays, 256..=65536)
-                            .text("Ray count")
-                            .logarithmic(true));
+                        ui.add(
+                            egui::Slider::new(num_rays, 256..=65536)
+                                .text("Ray count")
+                                .logarithmic(true),
+                        );
 
                         ui.separator();
                         ui.label("Display");
 
-                        ui.add(egui::Slider::new(branched_flow_intensity, 0.1..=20.0)
-                            .text("Brightness")
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(branched_flow_intensity, 0.1..=20.0)
+                                .text("Brightness")
+                                .fixed_decimals(2),
+                        );
 
-                        ui.add(egui::Slider::new(branched_flow_sharpness, 0.5..=3.0)
-                            .text("Contrast")
-                            .fixed_decimals(1));
+                        ui.add(
+                            egui::Slider::new(branched_flow_sharpness, 0.5..=3.0)
+                                .text("Contrast")
+                                .fixed_decimals(1),
+                        );
 
                         ui.separator();
                         ui.label("Particle Scattering");
 
-                        ui.add(egui::Slider::new(particle_weight, 0.0..=1.0)
-                            .text("Weight")
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(particle_weight, 0.0..=1.0)
+                                .text("Weight")
+                                .fixed_decimals(2),
+                        );
 
-                        ui.add(egui::Slider::new(num_scatterers, 100..=2000)
-                            .text("Scatterers")
-                            .logarithmic(true));
+                        ui.add(
+                            egui::Slider::new(num_scatterers, 100..=2000)
+                                .text("Scatterers")
+                                .logarithmic(true),
+                        );
 
-                        ui.add(egui::Slider::new(scatterer_strength, 0.1..=2.0)
-                            .text("Strength")
-                            .logarithmic(true)
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(scatterer_strength, 0.1..=2.0)
+                                .text("Strength")
+                                .logarithmic(true)
+                                .fixed_decimals(2),
+                        );
 
-                        ui.add(egui::Slider::new(scatterer_radius, 0.01..=0.1)
-                            .text("Radius")
-                            .fixed_decimals(3));
+                        ui.add(
+                            egui::Slider::new(scatterer_radius, 0.01..=0.1)
+                                .text("Radius")
+                                .fixed_decimals(3),
+                        );
 
                         ui.separator();
                         ui.label("Hybrid model: GRIN + particles");
@@ -2493,17 +2628,23 @@ impl RenderPipeline {
                         ui.checkbox(patch_view_enabled, "Focus on patch");
 
                         if *patch_view_enabled {
-                            ui.add(egui::Slider::new(patch_center_u, 0.1..=0.9)
-                                .text("Center U")
-                                .fixed_decimals(2));
+                            ui.add(
+                                egui::Slider::new(patch_center_u, 0.1..=0.9)
+                                    .text("Center U")
+                                    .fixed_decimals(2),
+                            );
 
-                            ui.add(egui::Slider::new(patch_center_v, 0.1..=0.9)
-                                .text("Center V")
-                                .fixed_decimals(2));
+                            ui.add(
+                                egui::Slider::new(patch_center_v, 0.1..=0.9)
+                                    .text("Center V")
+                                    .fixed_decimals(2),
+                            );
 
-                            ui.add(egui::Slider::new(patch_half_size, 0.05..=0.3)
-                                .text("Patch size")
-                                .fixed_decimals(3));
+                            ui.add(
+                                egui::Slider::new(patch_half_size, 0.05..=0.3)
+                                    .text("Patch size")
+                                    .fixed_decimals(3),
+                            );
 
                             let area_percent = (*patch_half_size * 2.0).powi(2) * 100.0;
                             ui.label(format!("~{:.1}% of sphere", area_percent));
@@ -2515,9 +2656,11 @@ impl RenderPipeline {
                     ui.checkbox(deformation_enabled, "Enable deformation");
 
                     if *deformation_enabled {
-                        ui.add(egui::Slider::new(aspect_ratio, 0.7..=1.0)
-                            .text("Aspect ratio")
-                            .fixed_decimals(2));
+                        ui.add(
+                            egui::Slider::new(aspect_ratio, 0.7..=1.0)
+                                .text("Aspect ratio")
+                                .fixed_decimals(2),
+                        );
 
                         ui.separator();
                         let deform_percent = (1.0 - *aspect_ratio) * 100.0;
@@ -2531,15 +2674,21 @@ impl RenderPipeline {
 
                     if *foam_enabled {
                         ui.horizontal(|ui| {
-                            let pause_text = if *foam_paused { "\u{25B6} Start" } else { "\u{23F8} Pause" };
+                            let pause_text = if *foam_paused {
+                                "\u{25B6} Start"
+                            } else {
+                                "\u{23F8} Pause"
+                            };
                             if ui.button(pause_text).clicked() {
                                 *foam_paused = !*foam_paused;
                             }
                         });
 
-                        ui.add(egui::Slider::new(foam_time_scale, 0.1..=5.0)
-                            .text("Time scale")
-                            .fixed_decimals(1));
+                        ui.add(
+                            egui::Slider::new(foam_time_scale, 0.1..=5.0)
+                                .text("Time scale")
+                                .fixed_decimals(1),
+                        );
 
                         ui.separator();
                         ui.label(format!("Bubbles: {}", foam_stats.0));
@@ -2560,8 +2709,10 @@ impl RenderPipeline {
 
                         // Bubble count
                         let mut bubble_count = foam_gen_params.bubble_count as i32;
-                        if ui.add(egui::Slider::new(&mut bubble_count, 2..=30)
-                            .text("Bubble count")).changed() {
+                        if ui
+                            .add(egui::Slider::new(&mut bubble_count, 2..=30).text("Bubble count"))
+                            .changed()
+                        {
                             foam_gen_params.bubble_count = bubble_count as u32;
                         }
 
@@ -2576,7 +2727,7 @@ impl RenderPipeline {
                                         ui.selectable_value(
                                             &mut foam_gen_params.positioning_mode,
                                             *mode,
-                                            mode.name()
+                                            mode.name(),
                                         );
                                     }
                                 });
@@ -2586,22 +2737,26 @@ impl RenderPipeline {
                         use crate::physics::foam_generation::PositioningMode;
                         let is_grid_mode = matches!(
                             foam_gen_params.positioning_mode,
-                            PositioningMode::SimpleCubic |
-                            PositioningMode::BodyCenteredCubic |
-                            PositioningMode::FaceCenteredCubic |
-                            PositioningMode::HexagonalClosePacked |
-                            PositioningMode::PoissonDisk
+                            PositioningMode::SimpleCubic
+                                | PositioningMode::BodyCenteredCubic
+                                | PositioningMode::FaceCenteredCubic
+                                | PositioningMode::HexagonalClosePacked
+                                | PositioningMode::PoissonDisk
                         );
 
                         if is_grid_mode {
-                            ui.add(egui::Slider::new(&mut foam_gen_params.spacing, 0.03..=0.10)
-                                .text("Spacing")
-                                .suffix(" m")
-                                .fixed_decimals(3));
+                            ui.add(
+                                egui::Slider::new(&mut foam_gen_params.spacing, 0.03..=0.10)
+                                    .text("Spacing")
+                                    .suffix(" m")
+                                    .fixed_decimals(3),
+                            );
 
-                            ui.add(egui::Slider::new(&mut foam_gen_params.jitter, 0.0..=0.5)
-                                .text("Jitter")
-                                .fixed_decimals(2));
+                            ui.add(
+                                egui::Slider::new(&mut foam_gen_params.jitter, 0.0..=0.5)
+                                    .text("Jitter")
+                                    .fixed_decimals(2),
+                            );
                         }
 
                         ui.separator();
@@ -2617,77 +2772,122 @@ impl RenderPipeline {
                                         ui.selectable_value(
                                             &mut foam_gen_params.size_distribution,
                                             *dist,
-                                            dist.name()
+                                            dist.name(),
                                         );
                                     }
                                 });
                         });
 
                         // Radius range (always shown)
-                        ui.add(egui::Slider::new(&mut foam_gen_params.min_radius, 0.005..=0.03)
-                            .text("Min radius")
-                            .suffix(" m")
-                            .fixed_decimals(3));
+                        ui.add(
+                            egui::Slider::new(&mut foam_gen_params.min_radius, 0.005..=0.03)
+                                .text("Min radius")
+                                .suffix(" m")
+                                .fixed_decimals(3),
+                        );
 
-                        ui.add(egui::Slider::new(&mut foam_gen_params.max_radius, 0.02..=0.06)
-                            .text("Max radius")
-                            .suffix(" m")
-                            .fixed_decimals(3));
+                        ui.add(
+                            egui::Slider::new(&mut foam_gen_params.max_radius, 0.02..=0.06)
+                                .text("Max radius")
+                                .suffix(" m")
+                                .fixed_decimals(3),
+                        );
 
                         // Context-sensitive sliders based on distribution type
                         use crate::physics::foam_generation::SizeDistribution;
                         match foam_gen_params.size_distribution {
                             SizeDistribution::Normal | SizeDistribution::LogNormal => {
-                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.04)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.mean_radius,
+                                        0.01..=0.04,
+                                    )
                                     .text("Mean radius")
                                     .suffix(" m")
-                                    .fixed_decimals(3));
+                                    .fixed_decimals(3),
+                                );
 
                                 if foam_gen_params.size_distribution == SizeDistribution::Normal {
-                                    ui.add(egui::Slider::new(&mut foam_gen_params.std_dev, 0.001..=0.015)
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut foam_gen_params.std_dev,
+                                            0.001..=0.015,
+                                        )
                                         .text("Std dev")
                                         .suffix(" m")
-                                        .fixed_decimals(3));
+                                        .fixed_decimals(3),
+                                    );
                                 } else {
-                                    ui.add(egui::Slider::new(&mut foam_gen_params.sigma, 0.1..=0.8)
-                                        .text("Sigma")
-                                        .fixed_decimals(2));
+                                    ui.add(
+                                        egui::Slider::new(&mut foam_gen_params.sigma, 0.1..=0.8)
+                                            .text("Sigma")
+                                            .fixed_decimals(2),
+                                    );
                                 }
                             }
                             SizeDistribution::SchulzFlory => {
-                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.04)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.mean_radius,
+                                        0.01..=0.04,
+                                    )
                                     .text("Mean radius")
                                     .suffix(" m")
-                                    .fixed_decimals(3));
+                                    .fixed_decimals(3),
+                                );
 
-                                ui.add(egui::Slider::new(&mut foam_gen_params.pdi, 1.1..=3.0)
-                                    .text("PDI (Mw/Mn)")
-                                    .fixed_decimals(2));
+                                ui.add(
+                                    egui::Slider::new(&mut foam_gen_params.pdi, 1.1..=3.0)
+                                        .text("PDI (Mw/Mn)")
+                                        .fixed_decimals(2),
+                                );
                             }
                             SizeDistribution::Bimodal => {
-                                ui.add(egui::Slider::new(&mut foam_gen_params.mean_radius, 0.01..=0.03)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.mean_radius,
+                                        0.01..=0.03,
+                                    )
                                     .text("Mean 1")
                                     .suffix(" m")
-                                    .fixed_decimals(3));
+                                    .fixed_decimals(3),
+                                );
 
-                                ui.add(egui::Slider::new(&mut foam_gen_params.std_dev, 0.001..=0.01)
-                                    .text("Std 1")
-                                    .suffix(" m")
-                                    .fixed_decimals(3));
+                                ui.add(
+                                    egui::Slider::new(&mut foam_gen_params.std_dev, 0.001..=0.01)
+                                        .text("Std 1")
+                                        .suffix(" m")
+                                        .fixed_decimals(3),
+                                );
 
-                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_ratio, 0.1..=0.9)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.bimodal_ratio,
+                                        0.1..=0.9,
+                                    )
                                     .text("Ratio")
-                                    .fixed_decimals(2));
+                                    .fixed_decimals(2),
+                                );
 
-                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_mean2, 0.02..=0.05)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.bimodal_mean2,
+                                        0.02..=0.05,
+                                    )
                                     .text("Mean 2")
                                     .suffix(" m")
-                                    .fixed_decimals(3));
+                                    .fixed_decimals(3),
+                                );
 
-                                ui.add(egui::Slider::new(&mut foam_gen_params.bimodal_std2, 0.001..=0.01)
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut foam_gen_params.bimodal_std2,
+                                        0.001..=0.01,
+                                    )
                                     .text("Std 2")
                                     .suffix(" m")
-                                    .fixed_decimals(3));
+                                    .fixed_decimals(3),
+                                );
                             }
                             SizeDistribution::Uniform => {
                                 // Uniform just uses min/max, already shown above
@@ -2769,7 +2969,10 @@ impl RenderPipeline {
                 });
 
                 if *recording {
-                    ui.colored_label(egui::Color32::RED, format!("\u{1F534} Recording... Frame {}", frame_counter));
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("\u{1F534} Recording... Frame {}", frame_counter),
+                    );
                 }
 
                 ui.small("F12: Screenshot | F11: Toggle Recording");
@@ -2801,13 +3004,17 @@ impl RenderPipeline {
         });
 
         // Get current frame texture
-        let output = self.surface.get_current_texture()
+        let output = self
+            .surface
+            .get_current_texture()
             .map_err(|e| format!("Failed to get surface texture: {}", e))?;
 
         // Create command encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Screenshot Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Screenshot Encoder"),
+            });
 
         // Copy texture to buffer
         encoder.copy_texture_to_buffer(
@@ -2909,16 +3116,34 @@ mod tests {
         let uniform = BubbleUniform::default();
 
         // Visual properties
-        assert!((uniform.refractive_index - 1.33).abs() < 1e-6, "refractive_index");
-        assert!((uniform.base_thickness_nm - 500.0).abs() < 1e-6, "base_thickness_nm");
-        assert!((uniform.interference_intensity - 4.0).abs() < 1e-6, "interference_intensity");
+        assert!(
+            (uniform.refractive_index - 1.33).abs() < 1e-6,
+            "refractive_index"
+        );
+        assert!(
+            (uniform.base_thickness_nm - 500.0).abs() < 1e-6,
+            "base_thickness_nm"
+        );
+        assert!(
+            (uniform.interference_intensity - 4.0).abs() < 1e-6,
+            "interference_intensity"
+        );
         assert!((uniform.base_alpha - 0.3).abs() < 1e-6, "base_alpha");
         assert!((uniform.edge_alpha - 0.6).abs() < 1e-6, "edge_alpha");
 
         // Film dynamics - these are critical for animation
-        assert!((uniform.film_time - 0.0).abs() < 1e-6, "film_time should start at 0");
-        assert!((uniform.swirl_intensity - 1.0).abs() < 1e-6, "swirl_intensity");
-        assert!((uniform.drainage_speed - 0.5).abs() < 1e-6, "drainage_speed");
+        assert!(
+            (uniform.film_time - 0.0).abs() < 1e-6,
+            "film_time should start at 0"
+        );
+        assert!(
+            (uniform.swirl_intensity - 1.0).abs() < 1e-6,
+            "swirl_intensity"
+        );
+        assert!(
+            (uniform.drainage_speed - 0.5).abs() < 1e-6,
+            "drainage_speed"
+        );
         assert!((uniform.pattern_scale - 1.0).abs() < 1e-6, "pattern_scale");
     }
 

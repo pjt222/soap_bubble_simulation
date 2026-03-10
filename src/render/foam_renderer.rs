@@ -765,13 +765,31 @@ mod tests {
 
         // Check all properties
         assert!((instance.radius - 0.05).abs() < 1e-6, "radius mismatch");
-        assert!((instance.aspect_ratio - 0.8).abs() < 1e-6, "aspect_ratio mismatch");
-        assert!((instance.thickness_nm - 750.0).abs() < 1e-6, "thickness_nm mismatch");
-        assert!((instance.refractive_index - 1.35).abs() < 1e-6, "refractive_index mismatch");
+        assert!(
+            (instance.aspect_ratio - 0.8).abs() < 1e-6,
+            "aspect_ratio mismatch"
+        );
+        assert!(
+            (instance.thickness_nm - 750.0).abs() < 1e-6,
+            "thickness_nm mismatch"
+        );
+        assert!(
+            (instance.refractive_index - 1.35).abs() < 1e-6,
+            "refractive_index mismatch"
+        );
 
         // Verify translation in model matrix (column 3)
-        assert!((instance.model_3[0] - 1.0).abs() < 1e-6, "translation x mismatch");
-        assert!((instance.model_3[1] - 2.0).abs() < 1e-6, "translation y mismatch");
-        assert!((instance.model_3[2] - 3.0).abs() < 1e-6, "translation z mismatch");
+        assert!(
+            (instance.model_3[0] - 1.0).abs() < 1e-6,
+            "translation x mismatch"
+        );
+        assert!(
+            (instance.model_3[1] - 2.0).abs() < 1e-6,
+            "translation y mismatch"
+        );
+        assert!(
+            (instance.model_3[2] - 3.0).abs() < 1e-6,
+            "translation z mismatch"
+        );
     }
 }

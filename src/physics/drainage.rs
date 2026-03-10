@@ -178,18 +178,12 @@ impl ThicknessField {
 
     /// Get the minimum thickness in the field.
     pub fn min_thickness(&self) -> f64 {
-        self.data
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min)
+        self.data.iter().copied().fold(f64::INFINITY, f64::min)
     }
 
     /// Get the maximum thickness in the field.
     pub fn max_thickness(&self) -> f64 {
-        self.data
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max)
+        self.data.iter().copied().fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Get raw data slice for direct access.
@@ -238,7 +232,6 @@ pub struct DrainageSimulator {
     current_time: f64,
 
     // === Marginal Regeneration (TFE) Fields ===
-
     /// Active TFE fronts propagating from the equator
     tfe_fronts: Vec<TfeFront>,
 
@@ -280,10 +273,10 @@ impl DrainageSimulator {
             current_time: 0.0,
             // Marginal regeneration defaults
             tfe_fronts: Vec::new(),
-            tfe_thickness_ratio: 0.85,  // Monier 2025: 0.8-0.9
+            tfe_thickness_ratio: 0.85, // Monier 2025: 0.8-0.9
             marginal_regeneration_enabled: true,
-            next_tfe_spawn_time: 0.5,  // First TFE after 0.5s
-            tfe_spawn_interval: 2.0,   // New TFE every ~2s
+            next_tfe_spawn_time: 0.5, // First TFE after 0.5s
+            tfe_spawn_interval: 2.0,  // New TFE every ~2s
         }
     }
 
@@ -308,7 +301,9 @@ impl DrainageSimulator {
         let diffusion_scaled = self.diffusion_coefficient;
 
         // Copy current state to scratch for reading while writing updates
-        self.scratch.data_mut().copy_from_slice(self.thickness.data());
+        self.scratch
+            .data_mut()
+            .copy_from_slice(self.thickness.data());
 
         // Update interior points (skip poles at theta=0 and theta=PI)
         for theta_index in 1..(num_theta - 1) {
@@ -353,18 +348,22 @@ impl DrainageSimulator {
                 let radius_squared = self.bubble_radius * self.bubble_radius;
 
                 // Second derivative in theta
-                let d2h_dtheta2 = (thickness_theta_plus - 2.0 * thickness_current + thickness_theta_minus)
+                let d2h_dtheta2 = (thickness_theta_plus - 2.0 * thickness_current
+                    + thickness_theta_minus)
                     / (delta_theta * delta_theta);
 
                 // First derivative in theta (for cot(theta) term)
-                let dh_dtheta = (thickness_theta_plus - thickness_theta_minus) / (2.0 * delta_theta);
+                let dh_dtheta =
+                    (thickness_theta_plus - thickness_theta_minus) / (2.0 * delta_theta);
 
                 // Second derivative in phi
-                let d2h_dphi2 = (thickness_phi_plus - 2.0 * thickness_current + thickness_phi_minus)
+                let d2h_dphi2 = (thickness_phi_plus - 2.0 * thickness_current
+                    + thickness_phi_minus)
                     / (delta_phi * delta_phi);
 
                 // Surface Laplacian
-                let laplacian = (d2h_dtheta2 + cos_theta / sin_theta_safe * dh_dtheta
+                let laplacian = (d2h_dtheta2
+                    + cos_theta / sin_theta_safe * dh_dtheta
                     + d2h_dphi2 / (sin_theta_safe * sin_theta_safe))
                     / radius_squared;
 
@@ -408,7 +407,8 @@ impl DrainageSimulator {
         }
 
         // Remove fronts that have reached the poles
-        self.tfe_fronts.retain(|f| f.extent < std::f64::consts::FRAC_PI_2 * 0.95);
+        self.tfe_fronts
+            .retain(|f| f.extent < std::f64::consts::FRAC_PI_2 * 0.95);
 
         // Apply TFE thickness reduction with spatial culling
         // Only iterate cells that could possibly be affected by fronts
@@ -699,6 +699,59 @@ mod tests {
             (thickness_at_0 - thickness_at_2pi).abs() < 1e-12,
             "Phi should be periodic"
         );
+    }
+
+    #[test]
+    fn test_tfe_front_contains_at_creation() {
+        let front = TfeFront::new(0.0, 1.0, 0.1);
+        // Extent 0.0: only the exact equator line passes the extent check
+        assert!(
+            front.contains(std::f64::consts::FRAC_PI_2, 0.0),
+            "Point exactly at equator with matching phi should be inside"
+        );
+        // Slightly off equator should be outside
+        assert!(!front.contains(std::f64::consts::FRAC_PI_2 + 0.01, 0.0));
+    }
+
+    #[test]
+    fn test_tfe_front_contains_after_advance() {
+        let mut front = TfeFront::new(0.0, 1.0, 0.5);
+        front.advance(1.0); // extent = 0.5 rad
+
+        // Point near equator, within phi width
+        assert!(front.contains(std::f64::consts::FRAC_PI_2, 0.0));
+        // Point near equator but outside phi width
+        assert!(!front.contains(std::f64::consts::FRAC_PI_2, 2.0));
+        // Point far from equator (outside extent)
+        assert!(!front.contains(0.1, 0.0));
+    }
+
+    #[test]
+    fn test_tfe_front_advance_clamps_at_half_pi() {
+        let mut front = TfeFront::new(0.0, 1.0, 10.0);
+        front.advance(100.0); // velocity * dt = 1000 >> PI/2
+        assert!((front.extent - std::f64::consts::FRAC_PI_2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_tfe_front_contains_phi_wrapping() {
+        let mut front = TfeFront::new(0.1, 0.4, 1.0);
+        front.advance(1.0);
+
+        // phi near 2*PI should wrap to be close to phi_center=0.1
+        let near_wrap = 2.0 * std::f64::consts::PI - 0.05; // wraps to ~0.05
+        assert!(front.contains(std::f64::consts::FRAC_PI_2, near_wrap));
+    }
+
+    #[test]
+    fn test_tfe_front_theta_range() {
+        let mut front = TfeFront::new(0.0, 1.0, 0.5);
+        front.advance(1.0); // extent = 0.5
+
+        let (min_theta, max_theta) = front.theta_range();
+        let equator = std::f64::consts::FRAC_PI_2;
+        assert!((min_theta - (equator - 0.5)).abs() < f64::EPSILON);
+        assert!((max_theta - (equator + 0.5)).abs() < f64::EPSILON);
     }
 
     #[test]

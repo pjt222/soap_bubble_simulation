@@ -6,8 +6,8 @@
 //! - GPU-accelerated rendering
 
 pub mod config;
+pub mod export;
 pub mod physics;
 pub mod render;
-pub mod export;
 
 pub use config::SimulationConfig;
