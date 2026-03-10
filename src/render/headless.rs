@@ -5,6 +5,7 @@
 
 use wgpu::util::DeviceExt;
 
+use crate::config::SimulationConfig;
 use crate::physics::geometry::{SphereMesh, Vertex};
 use crate::render::branched_flow::create_branched_flow_buffer;
 use crate::render::camera::Camera;
@@ -44,10 +45,13 @@ impl HeadlessRenderPipeline {
     /// # Arguments
     /// * `width` - Render target width in pixels
     /// * `height` - Render target height in pixels
+    /// * `sim_config` - Optional simulation config; uses defaults if None
     ///
     /// # Returns
     /// A new HeadlessRenderPipeline or None if GPU initialization fails
-    pub async fn new(width: u32, height: u32) -> Option<Self> {
+    pub async fn new(width: u32, height: u32, sim_config: Option<&SimulationConfig>) -> Option<Self> {
+        let default_config = SimulationConfig::default();
+        let sim_config = sim_config.unwrap_or(&default_config);
         // Create wgpu instance
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -121,8 +125,12 @@ impl HeadlessRenderPipeline {
         let camera = Camera::new(width as f32 / height as f32);
         let camera_uniform = camera.uniform();
 
-        // Create bubble uniform
-        let bubble_uniform = BubbleUniform::default();
+        // Create bubble uniform from config
+        let bubble_uniform = BubbleUniform {
+            base_thickness_nm: sim_config.bubble.film_thickness_nm as f32,
+            refractive_index: sim_config.bubble.refractive_index as f32,
+            ..BubbleUniform::default()
+        };
 
         // Create uniform buffers
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -188,60 +196,9 @@ impl HeadlessRenderPipeline {
             ..Default::default()
         });
 
-        // Create bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Interference LUT texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Interference LUT sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-            label: Some("headless_bind_group_layout"),
-        });
+        // Create bind group layout (shared definition with main pipeline)
+        let bind_group_layout =
+            crate::render::pipeline::create_bubble_bind_group_layout(&device, "headless_bind_group_layout");
 
         // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -330,7 +287,7 @@ impl HeadlessRenderPipeline {
         });
 
         // Create sphere mesh
-        let radius = 0.025; // 5cm diameter bubble
+        let radius = sim_config.bubble.diameter as f32 / 2.0;
         let mesh = SphereMesh::new(radius, 3);
 
         // Create vertex buffer
@@ -558,7 +515,7 @@ mod tests {
     #[test]
     fn test_headless_pipeline_creation() {
         // Use pollster to run async test
-        let result = pollster::block_on(HeadlessRenderPipeline::new(256, 256));
+        let result = pollster::block_on(HeadlessRenderPipeline::new(256, 256, None));
         // May fail on systems without GPU, which is acceptable for unit tests
         if result.is_some() {
             let pipeline = result.unwrap();

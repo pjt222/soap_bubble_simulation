@@ -78,8 +78,8 @@ impl ApplicationHandler for App {
 
         self.window = Some(window.clone());
 
-        // Create render pipeline
-        let pipeline = match pollster::block_on(RenderPipeline::new(window)) {
+        // Create render pipeline (config propagated here — no post-construction patching needed)
+        let pipeline = match pollster::block_on(RenderPipeline::new(window, &self.config)) {
             Ok(p) => p,
             Err(e) => {
                 log::error!("GPU initialization failed: {e}");
@@ -89,12 +89,6 @@ impl ApplicationHandler for App {
         };
         self.pipeline = Some(pipeline);
         self.last_frame = Instant::now();
-
-        // Apply config to pipeline
-        if let Some(ref mut pipeline) = self.pipeline {
-            pipeline.set_thickness_nm(self.config.bubble.film_thickness_nm as f32);
-            pipeline.set_refractive_index(self.config.bubble.refractive_index as f32);
-        }
 
         log::info!("Window created, rendering started");
     }

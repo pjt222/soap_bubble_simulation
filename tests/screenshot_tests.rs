@@ -262,7 +262,7 @@ pub struct ScreenshotTestFixture {
 impl ScreenshotTestFixture {
     /// Create a new test fixture
     pub async fn new(width: u32, height: u32, tolerance: f64) -> Option<Self> {
-        let pipeline = HeadlessRenderPipeline::new(width, height).await?;
+        let pipeline = HeadlessRenderPipeline::new(width, height, None).await?;
         let comparator = ScreenshotComparator::new(GOLDEN_DIR, tolerance);
         Some(Self {
             pipeline,

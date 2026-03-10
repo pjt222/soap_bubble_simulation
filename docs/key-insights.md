@@ -1511,7 +1511,7 @@ fn generate_diff_image(golden: &RgbaImage, actual: &RgbaImage) -> RgbaImage {
 ```rust
 #[test]
 fn test_default_bubble_appearance() {
-    let mut pipeline = pollster::block_on(HeadlessRenderPipeline::new(256, 256))
+    let mut pipeline = pollster::block_on(HeadlessRenderPipeline::new(256, 256, None))
         .expect("GPU required");
 
     let pixels = pipeline.render_to_buffer();

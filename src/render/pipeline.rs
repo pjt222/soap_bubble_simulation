@@ -112,6 +112,70 @@ impl Default for BubbleUniform {
     }
 }
 
+/// Create the standard bind group layout shared by main and headless pipelines.
+///
+/// Bindings: 0=camera uniform, 1=bubble uniform, 2=branched flow storage,
+/// 3=interference LUT texture, 4=interference LUT sampler.
+pub fn create_bubble_bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Branched flow texture (storage buffer, read-only in fragment shader)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Interference LUT texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Interference LUT sampler
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+        label: Some(label),
+    })
+}
+
 /// Main render pipeline for the soap bubble simulation.
 ///
 /// Owns all wgpu state (device, queue, surface), GPU buffers, compute pipelines
@@ -202,10 +266,15 @@ pub struct RenderPipeline {
 impl RenderPipeline {
     /// Create a new render pipeline.
     ///
-    /// Returns an error if GPU initialization fails (no compatible adapter,
-    /// surface creation error, or device request denied).
+    /// Accepts a `SimulationConfig` to derive initial bubble properties (thickness,
+    /// refractive index, diameter) from the config/CLI. Returns an error if GPU
+    /// initialization fails (no compatible adapter, surface creation error, or
+    /// device request denied).
     // put id:'gpu_init_device', label:'Initialize GPU device', input:'final_config.internal', output:'gpu_device.internal'
-    pub async fn new(window: std::sync::Arc<winit::window::Window>) -> Result<Self, String> {
+    pub async fn new(
+        window: std::sync::Arc<winit::window::Window>,
+        sim_config: &SimulationConfig,
+    ) -> Result<Self, String> {
         let size = window.inner_size();
 
         // Create wgpu instance
@@ -286,8 +355,12 @@ impl RenderPipeline {
         let camera = Camera::new(size.width as f32 / size.height as f32);
         let camera_uniform = camera.uniform();
 
-        // Create bubble uniform
-        let bubble_uniform = BubbleUniform::default();
+        // Create bubble uniform from config
+        let bubble_uniform = BubbleUniform {
+            base_thickness_nm: sim_config.bubble.film_thickness_nm as f32,
+            refractive_index: sim_config.bubble.refractive_index as f32,
+            ..BubbleUniform::default()
+        };
 
         // put id:'gpu_init_uniforms', label:'Upload uniforms to GPU', input:'gpu_device.internal', output:'uniform_buffers_gpu.internal'
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -356,61 +429,8 @@ impl RenderPipeline {
             ..Default::default()
         });
 
-        // Create bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Branched flow texture (storage buffer, read-only in fragment shader)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Interference LUT texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Interference LUT sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-            label: Some("bind_group_layout"),
-        });
+        // Create bind group layout (shared definition with headless pipeline)
+        let bind_group_layout = create_bubble_bind_group_layout(&device, "bind_group_layout");
 
         // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -606,8 +626,8 @@ impl RenderPipeline {
         // Initialize shared wall renderer
         let shared_wall_renderer = SharedWallRenderer::new(&device, 128);
 
-        // Create UV sphere mesh with LOD support (5cm diameter)
-        let radius = 0.025;
+        // Create UV sphere mesh with LOD support
+        let radius = sim_config.bubble.diameter as f32 / 2.0;
         let subdivision_level = 3_u32;
         let mut lod_cache = LodMeshCache::new(radius, 1.0);
 

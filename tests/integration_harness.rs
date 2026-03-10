@@ -31,7 +31,7 @@ pub enum TestStep {
 impl TestHarness {
     /// Create a new test harness with specified render dimensions
     pub async fn new(width: u32, height: u32) -> Option<Self> {
-        let pipeline = HeadlessRenderPipeline::new(width, height).await?;
+        let pipeline = HeadlessRenderPipeline::new(width, height, None).await?;
         Some(Self {
             pipeline,
             frames: Vec::new(),
