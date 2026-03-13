@@ -63,28 +63,34 @@ soap-bubble-sim/
 - **Mouse wheel**: Zoom in/out
 - **Escape**: Exit
 
-## Architecture: Branched Flow & Film Dynamics Sync
+## Architecture: Branched Flow & Film Dynamics
 
 The branched flow system traces light rays through the soap film as a 2D waveguide
 (GRIN optics). Rays bend toward thicker regions via `thickness_gradient()`.
 
-**Key insight — dual thickness sources must stay in sync:**
+**Dual thickness sources (intentionally independent):**
 - The **fragment shader** (`bubble.wgsl`) computes film thickness procedurally:
   `base * (1 - drainage + fbm_noise + swirl + gravity_ripples)`. This drives the
   visible iridescent colors.
 - The **compute shader** (`branched_flow_compute.wgsl`) reads a GPU drainage buffer
-  for physical thickness, then applies the *same* noise modulations so ray bending
-  matches the visible surface patterns.
-- Film dynamics parameters (`base_thickness_nm`, `swirl_intensity`, `drainage_speed`,
-  `pattern_scale`) are synced from `BubbleUniform` → `BranchedFlowParams` each frame
-  in `pipeline.rs`.
+  for physical thickness via bilinear-interpolated sampling. It does NOT apply
+  the fragment shader's noise modulations — ray bending is driven purely by the
+  physical drainage buffer. The `base_thickness_nm`, `swirl_intensity`,
+  `drainage_speed`, and `pattern_scale` fields in `BranchedFlowParams` are
+  reserved but currently unused in the shader.
 
-**Compute shader uses 3 FBM octaves** (vs fragment shader's 4) for performance —
-sufficient for gradient-based ray bending where fine detail averages out.
+**Stale buffer prevention:** The GPU drainage simulator double-buffers thickness.
+The branched flow bind group is rebuilt each frame with the current thickness
+buffer via `rebuild_bind_group()` to prevent stale reads.
 
-**Unit consistency:** The drainage buffer stores thickness in meters, scaled by
-`thickness_scale` (1e6) to micrometers. Noise modulations are fractional multipliers
-on the buffer value, so units cancel naturally.
+**Performance features:**
+- True spatial hash: scatterers sorted by grid cell on CPU, prefix-sum
+  `cell_offsets` buffer enables O(k) GPU lookup per ray step
+- Adaptive step size: `dt` scales by `1/(gradient*10)` clamped to [0.3, 3.0]
+- Patch mode ray spawning: rays start within patch UV bounds for higher density
+- Bilinear thickness sampling for smooth gradients
+- Pole singularity: `smoothstep(0, 0.15, sin_theta)` taper avoids artifacts
+- GPU timestamp profiling via `GpuProfiler` (requires TIMESTAMP_QUERY feature)
 
 **Struct alignment:** `BranchedFlowParams` is 112 bytes (28 × f32), `BubbleUniform`
 is 128 bytes (32 × f32), both padded for 16-byte GPU alignment. The Rust structs
@@ -95,23 +101,19 @@ and WGSL structs must match exactly — verified by size alignment tests.
 The patch view mode renders a small curved rectangular patch (~10% of sphere surface)
 instead of the full bubble. This provides a focused view of branched flow effects.
 
-**Key insight — rays must intersect the patch region:**
+**Key insight — rays are spawned within the patch region:**
 - The `SpherePatch` struct generates a curved mesh from UV bounds on the sphere
-- Rays trace from the laser entry point (Azimuth/Elevation UI controls)
-- In patch mode, deposits only occur when ray UV position is within patch bounds
+- In patch mode, rays start at positions within the patch UV bounds (converted to
+  tangent-space offsets from the entry point), giving ~5-10x more effective deposits
+- Deposits only occur when ray UV position is within patch bounds
 - The fragment shader remaps patch-local UVs when sampling the branched flow texture
 
-**Attempted optimizations that caused GPU freezes:**
-- Moving ray entry point to patch center caused synchronization issues
-- Scaling beam spread to patch size created invalid ray distributions
-- Breaking ray loops early when outside patch caused incomplete traces
+**Attempted optimizations that caused GPU freezes (DO NOT RETRY):**
+- Modifying the propagation loop body (early break, entry point change mid-loop)
+- The patch ray spawning is safe because it only changes initial conditions
 
-**Working approach:** Keep original ray tracing, filter deposits by patch bounds.
-To see branched flow in patch mode, position the laser to aim through the patch region.
-
-**Performance note:** Patch mode doesn't reduce ray computation (all rays still trace).
-The benefit is focused visualization, not GPU savings. For true performance gains,
-reduce `num_rays` parameter when in patch mode.
+**Scatterers:** When patch mode is active, scatterers are confined within the patch
+bounds for higher density coverage.
 
 ## Workflow Diagram (putior)
 

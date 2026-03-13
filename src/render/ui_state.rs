@@ -110,6 +110,8 @@ pub struct UiDisplayInfo {
     pub bubble_pos: [f32; 3],
     pub has_drainage_sim: bool,
     pub foam_stats: (usize, usize, usize),
+    /// GPU timing results (per-pass milliseconds), None if profiling unavailable
+    pub gpu_timing: Option<crate::render::gpu_timing::GpuTimingResults>,
 }
 
 impl UiState {
@@ -855,6 +857,25 @@ impl UiState {
                             ui.label(format!("{:.1} s", info.time));
                             ui.end_row();
                         });
+
+                    if let Some(ref gpu) = info.gpu_timing {
+                        ui.separator();
+                        ui.label("GPU Pass Timing");
+                        egui::Grid::new("gpu_timing_grid")
+                            .num_columns(2)
+                            .spacing([20.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("BF Clear:");
+                                ui.label(format!("{:.2} ms", gpu.branched_flow_clear_ms));
+                                ui.end_row();
+                                ui.label("BF Trace:");
+                                ui.label(format!("{:.2} ms", gpu.branched_flow_trace_ms));
+                                ui.end_row();
+                                ui.label("Total GPU:");
+                                ui.label(format!("{:.2} ms", gpu.total_ms()));
+                                ui.end_row();
+                            });
+                    }
                 });
 
                 ui.separator();

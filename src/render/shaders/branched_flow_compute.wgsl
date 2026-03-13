@@ -9,9 +9,9 @@
 // - Caustics form where rays converge -> bright branch lines
 // - Pattern is tree-like with successive bifurcations
 //
-// Performance optimization: Spatial hashing for O(1) scatterer lookups
-// Instead of checking all 2048 scatterers per ray step, we use a grid
-// where each cell contains indices to nearby scatterers.
+// Performance: True spatial hash with prefix-sum cell_offsets for O(k) scatterer lookups.
+// Adaptive step size scales dt by inverse gradient magnitude.
+// Patch mode concentrates ray spawning within visible patch region.
 
 struct BranchedFlowParams {
     // Laser injection point on bubble surface (normalized direction from center)
@@ -57,7 +57,7 @@ struct BranchedFlowParams {
 struct Scatterer {
     pos_u: f32,           // UV position (0-1)
     pos_v: f32,
-    strength: f32,        // Signed: positive attracts, negative repels
+    strength: f32,        // Signed: positive repels, negative attracts
     inv_sigma_sq: f32,    // Precomputed 1/(2σ²)
 };
 
@@ -65,6 +65,7 @@ struct Scatterer {
 @group(0) @binding(1) var<storage, read> thickness_field: array<f32>;
 @group(0) @binding(2) var<storage, read_write> caustic_texture: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> scatterers: array<Scatterer>;
+@group(0) @binding(4) var<storage, read> cell_offsets: array<u32>;
 
 // Thickness field dimensions (matches GPU drainage grid)
 const THICKNESS_WIDTH: u32 = 128u;
@@ -78,16 +79,10 @@ const PI: f32 = 3.14159265359;
 
 // ============================================================================
 // Spatial Hash Grid for Scatterer Lookups
-// Grid divides UV space into cells; each ray only checks scatterers in nearby cells
-//
-// NOTE: This is a grid-based EARLY-EXIT optimization, not true O(k) spatial hashing.
-// We still iterate all scatterers O(n), but skip the expensive force calculation
-// for scatterers outside the 3x3 cell neighborhood. True O(k) would require
-// pre-built cell→scatterer index buffers.
-//
-// Performance: ~2-3x speedup (not ~100x like true spatial hashing)
-// Physics: Correct - search radius (1 cell for 3σ cutoff) ensures no scatterers
-//          within force range are missed.
+// Scatterers are pre-sorted by grid cell on the CPU. The cell_offsets buffer
+// (binding 4) is a prefix-sum array: cell_offsets[i] is the index of the first
+// scatterer in cell i, cell_offsets[i+1] is one past the last.
+// Each ray only checks scatterers in the 3x3 cell neighborhood → O(k) per step.
 // ============================================================================
 
 // Grid dimensions - chosen so each cell is ~3σ (scatterer radius)
@@ -185,10 +180,25 @@ fn hash31(p: vec3<f32>) -> f32 {
 
 // Sample film thickness at UV position (uses the GPU drainage buffer)
 fn sample_thickness_at_uv(uv: vec2<f32>) -> f32 {
-    let x = u32(clamp(uv.x, 0.0, 1.0) * f32(THICKNESS_WIDTH - 1u));
-    let y = u32(clamp(uv.y, 0.0, 1.0) * f32(THICKNESS_HEIGHT - 1u));
-    let idx = y * THICKNESS_WIDTH + x;
-    return thickness_field[idx];
+    let fx = clamp(uv.x, 0.0, 1.0) * f32(THICKNESS_WIDTH - 1u);
+    let fy = clamp(uv.y, 0.0, 1.0) * f32(THICKNESS_HEIGHT - 1u);
+
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, THICKNESS_WIDTH - 1u);
+    let y1 = min(y0 + 1u, THICKNESS_HEIGHT - 1u);
+
+    let sx = fx - floor(fx);
+    let sy = fy - floor(fy);
+
+    let h00 = thickness_field[y0 * THICKNESS_WIDTH + x0];
+    let h10 = thickness_field[y0 * THICKNESS_WIDTH + x1];
+    let h01 = thickness_field[y1 * THICKNESS_WIDTH + x0];
+    let h11 = thickness_field[y1 * THICKNESS_WIDTH + x1];
+
+    let h0 = mix(h00, h10, sx);
+    let h1 = mix(h01, h11, sx);
+    return mix(h0, h1, sy);
 }
 
 // Compute thickness gradient at UV position with spherical metric correction.
@@ -206,10 +216,13 @@ fn thickness_gradient_uv(uv: vec2<f32>) -> vec2<f32> {
 
     // UV.y maps to theta: theta = UV.y * PI (0 at north pole, PI at south pole)
     let theta = uv.y * 3.14159265;
-    let sin_theta = max(sin(theta), 0.01); // Clamp to avoid division by zero at poles
+    let sin_theta = sin(theta);
+    let clamped_sin_theta = max(sin_theta, 0.1);
+    // Smoothly taper gradient to zero near poles to avoid singularity artifacts
+    let pole_taper = smoothstep(0.0, 0.15, sin_theta);
 
     // phi gradient (UV.x direction) needs 1/sin(theta) spherical metric correction
-    let grad_x = (h_right - h_left) / (2.0 * eps * sin_theta);
+    let grad_x = (h_right - h_left) / (2.0 * eps * clamped_sin_theta) * pole_taper;
     // theta gradient (UV.y direction) — no correction needed
     let grad_y = (h_up - h_down) / (2.0 * eps);
 
@@ -239,12 +252,9 @@ fn scatterer_force(ray_uv: vec2<f32>, s: Scatterer) -> vec2<f32> {
     }
 
     let exp_term = exp(-r_sq * s.inv_sigma_sq);
-    // Force direction: delta points from scatterer to ray
-    // For positive strength (attractive): force points toward scatterer (negative delta)
-    // For negative strength (repulsive): force points away from scatterer (positive delta)
-    // The formula gives: F = strength * delta * inv_sigma_sq * 2 * exp_term
-    // delta points FROM scatterer TO ray, so for positive strength the force
-    // pushes rays AWAY from the scatterer (repulsive). Negative strength attracts.
+    // Force direction: delta points FROM scatterer TO ray.
+    // Positive strength: force along delta (repels ray from scatterer).
+    // Negative strength: force against delta (attracts ray toward scatterer).
     return delta * s.strength * s.inv_sigma_sq * 2.0 * exp_term;
 }
 
@@ -257,39 +267,31 @@ fn scatterer_in_range(ray_uv: vec2<f32>, scatterer_uv: vec2<f32>, inv_sigma_sq: 
     return r_sq < 4.5 / inv_sigma_sq;
 }
 
-// Sum forces from scatterers in nearby grid cells (spatial hash optimization)
-// Instead of checking all 2048 scatterers, only check those in the 3x3 neighborhood
+// Sum forces from scatterers in nearby grid cells (true spatial hash)
+// Uses pre-sorted scatterer buffer + prefix-sum cell_offsets for O(k) lookup
+// where k is the number of scatterers in the 3x3 neighborhood (~10-30 typical)
 fn total_scatterer_force(ray_uv: vec2<f32>) -> vec2<f32> {
     var force = vec2<f32>(0.0);
-    let n = min(params.num_scatterers, 2048u);
 
     // Get ray's grid cell
     let ray_cell = uv_to_grid_cell(ray_uv);
 
-    // Interaction radius in grid cells (ceil of 3σ / cell_size)
-    // With σ=0.03 and cell_size=0.1, this is ceil(0.09/0.1) = 1
-    let search_radius = 1u;
+    // Search 3x3 neighborhood
+    let min_cu = select(0u, ray_cell.x - 1u, ray_cell.x >= 1u);
+    let max_cu = min(ray_cell.x + 1u, GRID_SIZE_U - 1u);
+    let min_cv = select(0u, ray_cell.y - 1u, ray_cell.y >= 1u);
+    let max_cv = min(ray_cell.y + 1u, GRID_SIZE_V - 1u);
 
-    // Search neighboring cells (3x3 for search_radius=1)
-    let min_u = select(0u, ray_cell.x - search_radius, ray_cell.x >= search_radius);
-    let max_u = min(ray_cell.x + search_radius, GRID_SIZE_U - 1u);
-    let min_v = select(0u, ray_cell.y - search_radius, ray_cell.y >= search_radius);
-    let max_v = min(ray_cell.y + search_radius, GRID_SIZE_V - 1u);
-
-    // Iterate through all scatterers but early-exit based on grid position
-    // This is a simplified approach that still iterates all scatterers but
-    // skips the expensive force calculation for distant ones
-    for (var i = 0u; i < n; i++) {
-        let s = scatterers[i];
-        let s_cell = uv_to_grid_cell(vec2<f32>(s.pos_u, s.pos_v));
-
-        // Skip if scatterer is outside the search neighborhood
-        if (s_cell.x < min_u || s_cell.x > max_u || s_cell.y < min_v || s_cell.y > max_v) {
-            continue;
+    // Only check scatterers indexed by the prefix-sum cell_offsets array
+    for (var cv = min_cv; cv <= max_cv; cv++) {
+        for (var cu = min_cu; cu <= max_cu; cu++) {
+            let cell_idx = cv * GRID_SIZE_U + cu;
+            let start = cell_offsets[cell_idx];
+            let end = cell_offsets[cell_idx + 1u];
+            for (var i = start; i < end; i++) {
+                force += scatterer_force(ray_uv, scatterers[i]);
+            }
         }
-
-        // Scatterer is in nearby cell, compute force
-        force += scatterer_force(ray_uv, s);
     }
 
     return force;
@@ -324,7 +326,7 @@ fn deposit_bilinear(uv: vec2<f32>, intensity: f32) {
     let w11 = sx * sy;
 
     // Deposit to all 4 neighboring pixels with appropriate weights
-    let base_deposit = intensity * 256.0;
+    let base_deposit = intensity * 64.0;
 
     let idx00 = y0 * params.tex_width + x0;
     let idx10 = y0 * params.tex_width + x1;
@@ -394,6 +396,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Starting position: spread perpendicular to beam direction
     var pos_2d = perp_dir * pos_offset + vel_2d * along_offset;
 
+    // Patch mode: concentrate rays within visible patch for higher deposit density
+    if (params.patch_enabled != 0u) {
+        let patch_phi = (params.patch_center_u * 2.0 - 1.0) * PI;
+        let patch_theta = params.patch_center_v * PI;
+        let patch_center_3d = normalize(vec3<f32>(
+            sin(patch_theta) * cos(patch_phi),
+            cos(patch_theta),
+            sin(patch_theta) * sin(patch_phi)
+        ));
+        let to_patch = patch_center_3d - entry_point;
+        let patch_offset = vec2<f32>(
+            dot(to_patch, tangent1),
+            dot(to_patch, tangent2)
+        );
+        let patch_spread = params.patch_half_size * PI;
+        pos_2d = patch_offset
+            + perp_dir * (rand1 - 0.5) * patch_spread
+            + vel_2d * (rand2 - 0.5) * patch_spread * 0.5;
+    }
+
     var intensity = 1.0;
     let dt = params.step_size;
 
@@ -413,20 +435,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let pos_3d = normalize(entry_point + tangent1 * pos_2d.x + tangent2 * pos_2d.y);
         let uv = normal_to_uv(pos_3d);
 
-        // === DEPOSIT: Continuous thin trail ===
-        // Use very small deposit per step - branches emerge from ray convergence
-        // In patch mode, only deposit if within patch bounds
-        if (params.patch_enabled != 0u) {
-            if (is_in_patch(uv)) {
-                let local_uv = uv_to_patch_local(uv);
-                deposit_bilinear(local_uv, intensity * 0.15);
-            }
-            // Continue tracing even if outside patch (ray might re-enter)
-        } else {
-            deposit_bilinear(uv, intensity * 0.15);
-        }
-
-        // === KICK: Hybrid deflection model ===
+        // === KICK: Compute forces first for adaptive stepping ===
         // 1. GRIN force: rays bend toward thicker regions (smooth, correlated)
         let grin_force = thickness_gradient_uv(uv) * (1.0 - params.particle_weight);
 
@@ -435,7 +444,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Combined force drives velocity change
         let total_force = grin_force + particle_force;
-        vel_2d = vel_2d + total_force * params.bend_strength * dt;
+
+        // Adaptive step: larger in flat regions, smaller where gradient is steep
+        let gradient_mag = length(total_force);
+        let step_factor = clamp(1.0 / max(gradient_mag * 10.0, 0.333), 0.3, 3.0);
+        let adaptive_dt = dt * step_factor;
+
+        // === DEPOSIT: Scale by step factor for energy conservation ===
+        // Larger steps deposit more per step to maintain constant energy per distance
+        if (params.patch_enabled != 0u) {
+            if (is_in_patch(uv)) {
+                let local_uv = uv_to_patch_local(uv);
+                deposit_bilinear(local_uv, intensity * 0.15 * step_factor);
+            }
+        } else {
+            deposit_bilinear(uv, intensity * 0.15 * step_factor);
+        }
+
+        // Apply force with adaptive time step
+        vel_2d = vel_2d + total_force * params.bend_strength * adaptive_dt;
 
         // Normalize velocity (constant speed, direction changes).
         // NOTE: This renormalization breaks the symplectic property of the kick-drift
@@ -446,8 +473,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             vel_2d = vel_2d / vel_mag;
         }
 
-        // === DRIFT: Move forward ===
-        pos_2d = pos_2d + vel_2d * dt;
+        // === DRIFT: Move forward with adaptive step ===
+        pos_2d = pos_2d + vel_2d * adaptive_dt;
 
         // Gradual intensity falloff
         intensity = intensity * (1.0 - params.intensity_falloff);
