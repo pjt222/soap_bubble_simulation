@@ -36,11 +36,14 @@ struct BranchedFlowParams {
     time: f32,
     // Scale factor for thickness values (meters -> micrometers = 1e6)
     thickness_scale: f32,
-    // Film dynamics parameters (synced from BubbleUniform)
-    base_thickness_nm: f32,
-    swirl_intensity: f32,
-    drainage_speed: f32,
-    pattern_scale: f32,
+    // Film dynamics parameters (synced from BubbleUniform but currently UNUSED).
+    // Reserved for future: implementing FBM noise modulations in the compute shader
+    // so ray bending matches the fragment shader's procedural thickness patterns.
+    // See CLAUDE.md "Architecture: Branched Flow" for details.
+    base_thickness_nm: f32,   // unused — reserved for compute-side noise
+    swirl_intensity: f32,     // unused — reserved for compute-side noise
+    drainage_speed: f32,      // unused — reserved for compute-side noise
+    pattern_scale: f32,       // unused — reserved for compute-side noise
     // Particle scattering parameters
     num_scatterers: u32,      // Number of active scatterers
     scatterer_strength: f32,  // Base scattering strength
@@ -68,8 +71,8 @@ struct Scatterer {
 @group(0) @binding(4) var<storage, read> cell_offsets: array<u32>;
 
 // Thickness field dimensions (matches GPU drainage grid)
-const THICKNESS_WIDTH: u32 = 128u;
-const THICKNESS_HEIGHT: u32 = 64u;
+const THICKNESS_WIDTH: u32 = 256u;
+const THICKNESS_HEIGHT: u32 = 128u;
 
 // Number of cosine modes for random potential (more = finer detail)
 const NUM_POTENTIAL_MODES: i32 = 12;
@@ -108,6 +111,62 @@ fn normal_to_uv(n: vec3<f32>) -> vec2<f32> {
     let u = (phi + PI) / (2.0 * PI);  // 0 to 1
     let v = theta / PI;  // 0 to 1
     return vec2<f32>(u, v);
+}
+
+// ============================================================================
+// UV ↔ Tangent Frame Coordinate Transformation
+//
+// The thickness gradient and scatterer forces are computed in UV space (phi, theta
+// directions on the sphere). But vel_2d lives in the tangent frame defined at the
+// laser entry point (tangent1, tangent2). These frames diverge as rays propagate
+// away from the entry point — applying UV forces directly to vel_2d causes rays
+// to bend in increasingly wrong directions at >1 radian from entry.
+//
+// Fix: compute the local phi-hat and theta-hat unit vectors at the ray's current
+// 3D position, convert the UV force to a 3D vector on the sphere surface, then
+// project back into the entry-point tangent frame.
+// ============================================================================
+
+// Transform a force in UV space (phi, theta directions) at the given sphere
+// position into the entry-point tangent frame (tangent1, tangent2).
+fn uv_force_to_tangent_frame(
+    uv_force: vec2<f32>,
+    pos_3d: vec3<f32>,
+    tangent1: vec3<f32>,
+    tangent2: vec3<f32>,
+) -> vec2<f32> {
+    let n = pos_3d; // Already normalized (point on unit sphere)
+
+    // Compute local spherical coordinate unit vectors at current position:
+    //   phi_hat: tangent to latitude circle (east, direction of increasing phi)
+    //   theta_hat: along meridian toward south pole (direction of increasing theta)
+    let xz_len = sqrt(n.x * n.x + n.z * n.z);
+
+    var local_phi_hat: vec3<f32>;
+    var local_theta_hat: vec3<f32>;
+
+    if (xz_len > 0.001) {
+        // phi_hat = (-sin(phi), 0, cos(phi)) = (-n.z/|xz|, 0, n.x/|xz|)
+        local_phi_hat = vec3<f32>(-n.z / xz_len, 0.0, n.x / xz_len);
+        // theta_hat = cross(normal, phi_hat) = dP/dtheta (normalized)
+        //           = (n.y*n.x/|xz|, -|xz|, n.y*n.z/|xz|)
+        local_theta_hat = cross(n, local_phi_hat);
+    } else {
+        // At poles (sin(theta) ≈ 0): phi is undefined, use arbitrary tangent frame.
+        // Forces are already tapered to zero near poles by smoothstep in
+        // thickness_gradient_uv(), so this branch has negligible effect.
+        local_phi_hat = vec3<f32>(1.0, 0.0, 0.0);
+        local_theta_hat = vec3<f32>(0.0, 0.0, 1.0);
+    }
+
+    // Convert 2D UV-space force to 3D force on sphere surface
+    let force_3d = local_phi_hat * uv_force.x + local_theta_hat * uv_force.y;
+
+    // Project 3D force into entry-point tangent frame
+    return vec2<f32>(
+        dot(force_3d, tangent1),
+        dot(force_3d, tangent2)
+    );
 }
 
 // ============================================================================
@@ -437,13 +496,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // === KICK: Compute forces first for adaptive stepping ===
         // 1. GRIN force: rays bend toward thicker regions (smooth, correlated)
-        let grin_force = thickness_gradient_uv(uv) * (1.0 - params.particle_weight);
+        let grin_force_uv = thickness_gradient_uv(uv) * (1.0 - params.particle_weight);
 
         // 2. Particle force: discrete scatterers create local deflections (uncorrelated)
-        let particle_force = total_scatterer_force(uv) * params.particle_weight;
+        let particle_force_uv = total_scatterer_force(uv) * params.particle_weight;
 
-        // Combined force drives velocity change
-        let total_force = grin_force + particle_force;
+        // Combined force in UV space (phi, theta directions at current position)
+        let total_force_uv = grin_force_uv + particle_force_uv;
+
+        // Transform from UV space to entry-point tangent frame.
+        // This corrects for the fact that phi-hat and theta-hat directions on the
+        // sphere rotate relative to the entry-point tangent frame as rays propagate.
+        // Without this transform, ray bending is increasingly wrong at >1 radian.
+        let total_force = uv_force_to_tangent_frame(total_force_uv, pos_3d, tangent1, tangent2);
 
         // Adaptive step: larger in flat regions, smaller where gradient is steep
         let gradient_mag = length(total_force);

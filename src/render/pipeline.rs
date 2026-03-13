@@ -704,11 +704,11 @@ impl RenderPipeline {
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
 
-        // Initialize GPU drainage simulator
+        // Initialize GPU drainage simulator (256×128 grid for accurate GRIN gradients)
         let gpu_drainage = GPUDrainageSimulator::new(
             &device, 500e-9, // Initial thickness: 500nm
-            128,    // Grid width (phi)
-            64,     // Grid height (theta)
+            256,    // Grid width (phi)
+            128,    // Grid height (theta)
         );
 
         // Initialize foam renderer

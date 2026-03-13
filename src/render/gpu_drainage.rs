@@ -53,8 +53,8 @@ impl Default for DrainageParams {
             diffusion_coeff: 1e-9,     // Thickness diffusion
             bubble_radius: 0.025,      // 2.5cm radius
             critical_thickness: 30e-9, // 30nm critical thickness
-            grid_width: 128,
-            grid_height: 64,
+            grid_width: 256,
+            grid_height: 128,
             // Marangoni parameters
             marangoni_enabled: 0,       // Disabled by default
             gamma_air: 0.072,           // N/m (clean water-air interface)

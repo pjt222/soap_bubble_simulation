@@ -271,8 +271,8 @@ pub struct BranchedFlowSimulator {
     /// Texture dimensions
     tex_width: u32,
     tex_height: u32,
-    /// Dirty flag: whether scatterers need regeneration
-    /// Set when parameters change, cleared after upload
+    /// Dirty flag: whether scatterers need full regeneration
+    /// Set when structural parameters change (count, radius, patch), cleared after upload
     scatterers_dirty: bool,
     /// Cached scatterer parameters for dirty check
     last_num_scatterers: u32,
@@ -282,6 +282,8 @@ pub struct BranchedFlowSimulator {
     last_patch_center_u: f32,
     last_patch_center_v: f32,
     last_patch_half_size: f32,
+    /// Stored scatterers for temporal coherence (Brownian perturbation between regenerations)
+    current_scatterers: Vec<ScattererGPU>,
 }
 
 /// Create a branched flow texture buffer (called early in pipeline init)
@@ -503,6 +505,7 @@ impl BranchedFlowSimulator {
             last_patch_center_u: params.patch_center_u,
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
+            current_scatterers: Vec::new(),
         }
     }
 
@@ -570,39 +573,72 @@ impl BranchedFlowSimulator {
         }
     }
 
-    /// Update scatterer positions only if parameters have changed (dirty flag optimization).
-    /// Called each frame but only regenerates when necessary.
+    /// Update scatterer positions with temporal coherence.
+    ///
+    /// When structural parameters change (count, radius, patch bounds), scatterers are
+    /// fully regenerated. Otherwise, small Brownian perturbations are applied each frame
+    /// so the branching pattern evolves smoothly like real micelle clusters drifting in
+    /// the film, rather than jumping discontinuously.
+    ///
     /// Sorts scatterers by grid cell and builds prefix-sum cell_offsets for O(k) GPU lookup.
     pub fn update_scatterers(&mut self, queue: &wgpu::Queue, time: f32) {
         // Check if parameters changed since last upload
         self.check_scatterer_params_changed();
 
-        // Skip regeneration if scatterers are not dirty
-        if !self.scatterers_dirty {
-            return;
+        if self.scatterers_dirty {
+            // Full regeneration: structural parameters changed
+            let patch_bounds = if self.params.patch_enabled != 0 {
+                Some(PatchBounds {
+                    center_u: self.params.patch_center_u,
+                    center_v: self.params.patch_center_v,
+                    half_size: self.params.patch_half_size,
+                })
+            } else {
+                None
+            };
+
+            self.current_scatterers = generate_scatterers(
+                self.params.num_scatterers.min(MAX_SCATTERERS),
+                time,
+                self.params.scatterer_strength,
+                self.params.scatterer_radius,
+                patch_bounds,
+            );
+            self.scatterers_dirty = false;
+        } else if !self.current_scatterers.is_empty() {
+            // Brownian perturbation: smooth temporal evolution
+            // Each scatterer drifts ~0.001 UV units per frame (~3% of σ per frame).
+            // Over ~30 frames the pattern shifts noticeably but continuously.
+            let perturbation_scale = 0.001f32;
+
+            let (min_u, max_u, min_v, max_v) = if self.params.patch_enabled != 0 {
+                let hs = self.params.patch_half_size;
+                (
+                    (self.params.patch_center_u - hs).max(0.0),
+                    (self.params.patch_center_u + hs).min(1.0),
+                    (self.params.patch_center_v - hs).max(0.0),
+                    (self.params.patch_center_v + hs).min(1.0),
+                )
+            } else {
+                (0.0, 1.0, 0.0, 1.0)
+            };
+
+            for (i, s) in self.current_scatterers.iter_mut().enumerate() {
+                // Pseudo-random perturbation using time × frequency mixing
+                // Different frequencies per scatterer prevent correlated drift
+                let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
+                let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
+                s.pos_u = (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale)
+                    .clamp(min_u, max_u);
+                s.pos_v = (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale)
+                    .clamp(min_v, max_v);
+            }
+        } else {
+            return; // No scatterers to update
         }
 
-        // If patch mode is enabled, confine scatterers within the patch
-        let patch_bounds = if self.params.patch_enabled != 0 {
-            Some(PatchBounds {
-                center_u: self.params.patch_center_u,
-                center_v: self.params.patch_center_v,
-                half_size: self.params.patch_half_size,
-            })
-        } else {
-            None
-        };
-
-        let mut scatterers = generate_scatterers(
-            self.params.num_scatterers.min(MAX_SCATTERERS),
-            time,
-            self.params.scatterer_strength,
-            self.params.scatterer_radius,
-            patch_bounds,
-        );
-
         // Sort scatterers by grid cell for true spatial hash
-        scatterers.sort_by_key(|s| {
+        self.current_scatterers.sort_by_key(|s| {
             let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
             let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
             v_cell * GRID_SIZE_U + u_cell
@@ -611,7 +647,7 @@ impl BranchedFlowSimulator {
         // Build prefix-sum cell_offsets: offsets[i] = start index of cell i in sorted array
         let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
         let mut cell_offsets = vec![0u32; total_cells + 1];
-        for s in &scatterers {
+        for s in &self.current_scatterers {
             let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
             let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
             let cell_idx = (v_cell * GRID_SIZE_U + u_cell) as usize;
@@ -622,15 +658,16 @@ impl BranchedFlowSimulator {
         }
 
         // Upload sorted scatterers and cell offsets
-        queue.write_buffer(&self.scatterer_buffer, 0, bytemuck::cast_slice(&scatterers));
+        queue.write_buffer(
+            &self.scatterer_buffer,
+            0,
+            bytemuck::cast_slice(&self.current_scatterers),
+        );
         queue.write_buffer(
             &self.cell_offsets_buffer,
             0,
             bytemuck::cast_slice(&cell_offsets),
         );
-
-        // Clear dirty flag after upload
-        self.scatterers_dirty = false;
     }
 
     /// Force scatterer regeneration on next update (e.g., for animation)

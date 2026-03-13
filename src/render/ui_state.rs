@@ -374,7 +374,7 @@ impl UiState {
 
                         ui.separator();
                         ui.label(format!("Sim time: {:.2} s", info.gpu_drainage_time));
-                        ui.label("Grid: 128\u{00d7}64 (8k cells)");
+                        ui.label("Grid: 256\u{00d7}128 (32k cells)");
 
                         if ui.button("Reset").clicked() {
                             self.reset_gpu_drainage_requested = true;

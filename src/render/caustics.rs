@@ -56,8 +56,8 @@ pub struct CausticParams {
 impl Default for CausticParams {
     fn default() -> Self {
         Self {
-            grid_width: 128,
-            grid_height: 64,
+            grid_width: 256,
+            grid_height: 128,
             refractive_index: 1.33,
             film_thickness_scale: 1e6,
             light_dir_x: 0.0,
