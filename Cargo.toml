@@ -2,6 +2,8 @@
 name = "soap-bubble-sim"
 version = "0.1.0"
 edition = "2024"
+# as_chunks / as_chunks_mut (1.88), u64::is_multiple_of (1.87)
+rust-version = "1.88"
 authors = ["Philipp Thoss <ph.thoss@gmx.de>"]
 description = "Physically accurate 3D soap bubble simulation with GPU rendering"
 license = "MIT"

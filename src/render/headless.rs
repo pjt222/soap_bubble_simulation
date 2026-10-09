@@ -519,9 +519,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires GPU. With the Mesa Dozen ICD visible, wgpu 24's debug-build Vulkan path
-    // segfaults here and takes the whole lib test binary down (#48); scripts/test-local.sh
-    // -- --ignored runs it on lavapipe.
+    #[ignore] // Requires GPU. With the Mesa Dozen ICD visible, creating any wgpu 24 Vulkan
+    // device in a debug build segfaults (this and the other GPU tests alike) and takes the
+    // whole test binary down (#48); scripts/test-local.sh forces lavapipe, `-- --ignored`
+    // runs them.
     fn test_headless_pipeline_creation() {
         // Use pollster to run async test
         let result = pollster::block_on(HeadlessRenderPipeline::new(256, 256, None));

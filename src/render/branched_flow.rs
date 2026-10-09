@@ -109,9 +109,11 @@ impl Default for BranchedFlowParams {
             entry_point: [0.0, 0.0, 1.0],
             // Beam direction: going down-left across the surface
             beam_dir: [-0.5, -0.866, 0.0],
-            // Rays per frame. 8192 keeps the WSL CPU rasteriser (llvmpipe) interactive. Ray seeds
-            // depend only on ray_idx, so the 0.85 fade re-traces the same paths and adds no samples;
-            // per-frame seeds and a per-adapter ray count are tracked in #47.
+            // Rays per frame. With 200 steps this is 8x fewer ray-steps than the earlier
+            // 32768 x 400, chosen for the WSL CPU rasteriser (llvmpipe); the frame-time gain was
+            // not measured. Ray seeds depend only on ray_idx, so every frame restarts from the
+            // same positions (only scatterer drift varies the paths) and the 0.85 fade adds few
+            // new samples. Per-frame seeds: #47; ray count per adapter type: #37.
             num_rays: 8192,
             // Steps per ray. The adaptive step factor sits at its 0.3 floor for almost every step
             // with the default scatterer field, so range is about ray_steps * step_size * 0.3 (#47).
