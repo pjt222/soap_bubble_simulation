@@ -683,6 +683,45 @@ mod tests {
     }
 
     #[test]
+    fn test_reflected_intensity_peaks_at_oblique_quarter_wave() {
+        // At oblique incidence the first maximum sits at d = lambda / (4 n cos(theta_t)),
+        // fixed by the phase alone, so it guards against using the incidence angle
+        // in place of the refracted angle.
+        let calculator = InterferenceCalculator::default();
+        let n_film = calculator.refractive_index_film();
+        let wavelength_nm = 532.0;
+        for cos_theta_incident in [0.8, 0.5, 0.3] {
+            let cos_theta_transmitted =
+                calculator.calculate_transmission_angle_cos(cos_theta_incident);
+            let quarter_wave_nm = wavelength_nm / (4.0 * n_film * cos_theta_transmitted);
+            let surface_reflectance = calculator
+                .calculate_fresnel_reflection(cos_theta_incident)
+                .reflectance_average;
+            let peak = 4.0 * surface_reflectance / (1.0 + surface_reflectance).powi(2);
+            let at_peak = calculator.calculate_reflected_intensity(
+                quarter_wave_nm,
+                cos_theta_incident,
+                wavelength_nm,
+            );
+            assert!(
+                (at_peak - peak).abs() < 1e-9,
+                "cos_i={cos_theta_incident}: {at_peak} vs peak {peak}"
+            );
+            for offset_nm in [-8.0, 8.0] {
+                let beside = calculator.calculate_reflected_intensity(
+                    quarter_wave_nm + offset_nm,
+                    cos_theta_incident,
+                    wavelength_nm,
+                );
+                assert!(
+                    at_peak > beside,
+                    "cos_i={cos_theta_incident}: not a maximum"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_interference_produces_colors() {
         let calculator = InterferenceCalculator::default();
 
