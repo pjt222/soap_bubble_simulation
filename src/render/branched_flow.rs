@@ -109,10 +109,13 @@ impl Default for BranchedFlowParams {
             entry_point: [0.0, 0.0, 1.0],
             // Beam direction: going down-left across the surface
             beam_dir: [-0.5, -0.866, 0.0],
-            // Many rays needed - branches visible where rays converge
-            num_rays: 32768,
-            // More steps for longer propagation
-            ray_steps: 400,
+            // Rays per frame. 8192 keeps the WSL CPU rasteriser (llvmpipe) interactive. Ray seeds
+            // depend only on ray_idx, so the 0.85 fade re-traces the same paths and adds no samples;
+            // per-frame seeds and a per-adapter ray count are tracked in #47.
+            num_rays: 8192,
+            // Steps per ray. The adaptive step factor sits at its 0.3 floor for almost every step
+            // with the default scatterer field, so range is about ray_steps * step_size * 0.3 (#47).
+            ray_steps: 200,
             // Small steps for smooth ray paths
             step_size: 0.005,
             // Moderate GRIN bending (particle scattering now creates branching)
@@ -131,7 +134,7 @@ impl Default for BranchedFlowParams {
             drainage_speed: 1.0,
             pattern_scale: 1.0,
             // Particle scattering defaults
-            num_scatterers: 800,
+            num_scatterers: 400,
             scatterer_strength: 0.5,
             scatterer_radius: 0.03,
             particle_weight: 0.1,
