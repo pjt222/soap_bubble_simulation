@@ -801,6 +801,17 @@ impl RenderPipeline {
     }
 
     /// Enable or disable foam mode.
+    /// Turn on the GPU compute effects (GPU drainage, caustics, branched flow),
+    /// as if their UI checkboxes were ticked. The UI state is snapshotted from
+    /// these fields every frame, so the setting persists.
+    pub fn enable_compute_effects(&mut self) {
+        self.gpu_drainage_enabled = true;
+        self.gpu_drainage.enabled = true;
+        self.caustic_renderer.enabled = true;
+        self.branched_flow_simulator.enabled = true;
+        self.bubble_uniform.branched_flow_enabled = 1;
+    }
+
     pub fn set_foam_enabled(&mut self, enabled: bool) {
         log::info!("set_foam_enabled({})", enabled);
         self.foam_enabled = enabled;
@@ -1205,10 +1216,13 @@ impl RenderPipeline {
 
     /// Update time for animation
     pub fn update(&mut self, dt: f32) {
-        if let Some(fps) = self.animation.update_fps(dt) {
+        if let Some(report) = self.animation.update_fps(dt) {
             log::info!(
-                "FPS {fps:.1} ({:.2} ms/frame, 60-frame average)",
-                1000.0 / fps
+                "FPS {:.1} ({:.2} ms/frame, mean over {} frames in {:.1} s)",
+                report.fps,
+                1000.0 / report.fps,
+                report.frames,
+                report.seconds
             );
         }
         self.bubble_uniform.time += dt;

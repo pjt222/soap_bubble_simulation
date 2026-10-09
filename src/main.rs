@@ -32,6 +32,12 @@ struct Args {
     /// Override film thickness (nanometers)
     #[arg(long)]
     thickness: Option<f64>,
+
+    /// Start with the GPU compute effects on (GPU drainage, caustics, branched
+    /// flow), as if their UI checkboxes were ticked. Lets the compute path be
+    /// exercised and timed without the UI, e.g. `probe-adapters.sh --app 30 --compute`.
+    #[arg(long)]
+    compute: bool,
 }
 
 /// Application state
@@ -39,17 +45,19 @@ struct App {
     window: Option<Arc<Window>>,
     pipeline: Option<RenderPipeline>,
     config: SimulationConfig,
+    start_with_compute: bool,
     last_frame: Instant,
     mouse_pressed: bool,
     last_mouse_pos: Option<(f64, f64)>,
 }
 
 impl App {
-    fn new(config: SimulationConfig) -> Self {
+    fn new(config: SimulationConfig, start_with_compute: bool) -> Self {
         Self {
             window: None,
             pipeline: None,
             config,
+            start_with_compute,
             last_frame: Instant::now(),
             mouse_pressed: false,
             last_mouse_pos: None,
@@ -79,7 +87,7 @@ impl ApplicationHandler for App {
         self.window = Some(window.clone());
 
         // Create render pipeline (config propagated here — no post-construction patching needed)
-        let pipeline = match pollster::block_on(RenderPipeline::new(window, &self.config)) {
+        let mut pipeline = match pollster::block_on(RenderPipeline::new(window, &self.config)) {
             Ok(p) => p,
             Err(e) => {
                 log::error!("GPU initialization failed: {e}");
@@ -87,6 +95,10 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        if self.start_with_compute {
+            pipeline.enable_compute_effects();
+            log::info!("Compute effects enabled at start (--compute)");
+        }
         self.pipeline = Some(pipeline);
         self.last_frame = Instant::now();
 
@@ -248,6 +260,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(config);
+    let mut app = App::new(config, args.compute);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }

@@ -26,6 +26,18 @@ pub(crate) struct AnimationController {
     fps: f32,
     last_dt: f32,
     seconds_since_fps_report: f32,
+    frames_since_fps_report: u32,
+}
+
+/// Frame rate over one report interval: every frame in it counts once, so
+/// consecutive reports are independent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FpsReport {
+    /// Mean frames per second over the interval
+    pub fps: f32,
+    /// Length of the interval in seconds (at least `FPS_REPORT_INTERVAL_SECONDS`)
+    pub seconds: f32,
+    pub frames: u32,
 }
 
 /// How often `update_fps` reports the frame rate for logging.
@@ -49,6 +61,7 @@ impl AnimationController {
             fps: 0.0,
             last_dt: 0.0,
             seconds_since_fps_report: 0.0,
+            frames_since_fps_report: 0,
         }
     }
 
@@ -134,11 +147,11 @@ impl AnimationController {
         self.bubble_velocity = [0.0, 0.0, 0.0];
     }
 
-    /// Update FPS tracking using circular buffer.
-    /// Record a frame time. Every `FPS_REPORT_INTERVAL_SECONDS` of frame time,
-    /// returns the current 60-frame average FPS so the caller can log it
+    /// Record a frame time. Updates the 60-frame average shown in the UI and,
+    /// once at least `FPS_REPORT_INTERVAL_SECONDS` of frame time has passed,
+    /// returns the mean frame rate over that interval for logging
     /// (`scripts/gpu/probe-adapters.sh --app` compares adapters with it).
-    pub fn update_fps(&mut self, dt: f32) -> Option<f32> {
+    pub fn update_fps(&mut self, dt: f32) -> Option<FpsReport> {
         self.last_dt = dt;
         self.frame_times[self.frame_times_head] = dt;
         self.frame_times_head = (self.frame_times_head + 1) % 60;
@@ -151,12 +164,18 @@ impl AnimationController {
             self.fps = 1.0 / avg_dt;
         }
         self.seconds_since_fps_report += dt;
-        if self.seconds_since_fps_report >= FPS_REPORT_INTERVAL_SECONDS {
-            self.seconds_since_fps_report = 0.0;
-            Some(self.fps)
-        } else {
-            None
+        self.frames_since_fps_report += 1;
+        if self.seconds_since_fps_report < FPS_REPORT_INTERVAL_SECONDS {
+            return None;
         }
+        let report = FpsReport {
+            fps: self.frames_since_fps_report as f32 / self.seconds_since_fps_report,
+            seconds: self.seconds_since_fps_report,
+            frames: self.frames_since_fps_report,
+        };
+        self.seconds_since_fps_report = 0.0;
+        self.frames_since_fps_report = 0;
+        Some(report)
     }
 }
 
@@ -164,16 +183,18 @@ impl AnimationController {
 mod tests {
     use super::*;
 
-    // dt = 0.125 s is exact in binary floating point, so 40 frames sum to exactly 5 s.
+    // dt values that are exact in binary floating point, so interval sums are exact.
     const DT: f32 = 0.125;
 
     #[test]
     fn test_update_fps_reports_once_per_interval() {
         let mut animation = AnimationController::new();
-        let reports: Vec<f32> = (0..120).filter_map(|_| animation.update_fps(DT)).collect();
+        let reports: Vec<FpsReport> = (0..120).filter_map(|_| animation.update_fps(DT)).collect();
         assert_eq!(reports.len(), 3, "120 frames x 0.125 s = 15 s -> 3 reports");
-        for fps in reports {
-            assert!((fps - 8.0).abs() < 1e-3, "reported {fps}");
+        for report in reports {
+            assert_eq!(report.frames, 40);
+            assert_eq!(report.seconds, 5.0);
+            assert_eq!(report.fps, 8.0);
         }
     }
 
@@ -185,6 +206,30 @@ mod tests {
         assert!(
             animation.update_fps(DT).is_some(),
             "40th frame completes 5 s"
+        );
+    }
+
+    #[test]
+    fn test_fps_report_is_the_interval_mean() {
+        let mut animation = AnimationController::new();
+        // Interval 1: 40 frames x 0.125 s.
+        let first = (0..40).filter_map(|_| animation.update_fps(DT)).last();
+        assert_eq!(first.map(|report| report.fps), Some(8.0));
+        // Interval 2: alternating 0.125 / 0.375 s, 20 frames in exactly 5 s -> 4 FPS.
+        // The last frame alone would give 1 / 0.375 = 2.67 FPS, and the 60-frame
+        // UI average (40 x 0.125 + 20 frames over 10 s) 6 FPS; only the interval
+        // mean is 4.
+        let second = (0..20)
+            .filter_map(|frame| animation.update_fps(if frame % 2 == 0 { 0.125 } else { 0.375 }))
+            .last()
+            .expect("second interval reported");
+        assert_eq!(second.frames, 20);
+        assert_eq!(second.seconds, 5.0);
+        assert_eq!(second.fps, 4.0);
+        assert!(
+            (animation.fps() - 6.0).abs() < 1e-4,
+            "UI average {}",
+            animation.fps()
         );
     }
 }
