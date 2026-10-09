@@ -371,7 +371,7 @@ pub struct SpherePatch {
 impl Default for SpherePatch {
     fn default() -> Self {
         Self {
-            center_u: 0.5,
+            center_u: 0.75, // +z, facing the default camera
             center_v: 0.5,
             half_size: 0.158, // ~10% of sphere surface area
             subdivisions: 32,
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn test_sphere_patch_default() {
         let patch = SpherePatch::default();
-        assert_eq!(patch.center_u, 0.5);
+        assert_eq!(patch.center_u, 0.75);
         assert_eq!(patch.center_v, 0.5);
         assert!((patch.half_size - 0.158).abs() < 0.001);
         assert_eq!(patch.subdivisions, 32);

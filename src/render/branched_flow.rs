@@ -143,9 +143,9 @@ impl Default for BranchedFlowParams {
             scatterer_strength: 0.5,
             scatterer_radius: 0.03,
             particle_weight: 0.1,
-            // Patch view mode defaults (enabled, centered at 0.5, ~10% of surface)
+            // Patch view mode defaults (enabled, centred at +z facing the default camera)
             patch_enabled: 1,
-            patch_center_u: 0.5,
+            patch_center_u: 0.75,
             patch_center_v: 0.5,
             patch_half_size: 0.158,
         };

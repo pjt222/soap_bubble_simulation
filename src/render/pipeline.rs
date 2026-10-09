@@ -102,7 +102,7 @@ impl Default for BubbleUniform {
             light_dir_z: 0.577,
             // Patch view mode (enabled by default for focused visualization)
             patch_enabled: 1,
-            patch_center_u: 0.5,
+            patch_center_u: 0.75,
             patch_center_v: 0.5,
             patch_half_size: 0.158,
             _padding1: 0,
@@ -597,8 +597,9 @@ impl RenderPipeline {
         }
         let gpu_profiler = GpuProfiler::new(&device, timestamp_supported, timestamp_period);
 
-        // Create patch mesh for focused branched flow viewing
-        let patch_center_u = 0.5;
+        // Create patch mesh for focused branched flow viewing. u = 0.75 is +z, which faces
+        // the default camera and holds the default laser entry; u = 0.5 (+x) was seen edge-on.
+        let patch_center_u = 0.75;
         let patch_center_v = 0.5;
         let patch_half_size = 0.158; // ~10% of sphere surface
         let patch = SpherePatch::new(patch_center_u, patch_center_v, patch_half_size, 32);
