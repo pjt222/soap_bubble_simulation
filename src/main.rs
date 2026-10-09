@@ -38,6 +38,12 @@ struct Args {
     /// exercised and timed without the UI, e.g. `probe-adapters.sh --app 30 --compute`.
     #[arg(long)]
     compute: bool,
+
+    /// Save a screenshot (screenshots/screenshot_NNNN.png, as F12 does) once this many
+    /// seconds have passed since the first frame. For scripted visual checks, e.g.
+    /// `probe-adapters.sh --app 30 --compute --screenshot-after 20`.
+    #[arg(long, value_name = "SECONDS")]
+    screenshot_after: Option<f32>,
 }
 
 /// Application state
@@ -46,18 +52,27 @@ struct App {
     pipeline: Option<RenderPipeline>,
     config: SimulationConfig,
     start_with_compute: bool,
+    /// Pending `--screenshot-after` request, cleared once issued
+    screenshot_after: Option<f32>,
+    started: Instant,
     last_frame: Instant,
     mouse_pressed: bool,
     last_mouse_pos: Option<(f64, f64)>,
 }
 
 impl App {
-    fn new(config: SimulationConfig, start_with_compute: bool) -> Self {
+    fn new(
+        config: SimulationConfig,
+        start_with_compute: bool,
+        screenshot_after: Option<f32>,
+    ) -> Self {
         Self {
             window: None,
             pipeline: None,
             config,
             start_with_compute,
+            screenshot_after,
+            started: Instant::now(),
             last_frame: Instant::now(),
             mouse_pressed: false,
             last_mouse_pos: None,
@@ -101,6 +116,7 @@ impl ApplicationHandler for App {
         }
         self.pipeline = Some(pipeline);
         self.last_frame = Instant::now();
+        self.started = self.last_frame;
 
         log::info!("Window created, rendering started");
     }
@@ -185,6 +201,14 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
 
                 if let (Some(pipeline), Some(window)) = (&mut self.pipeline, &self.window) {
+                    if let Some(seconds) = self.screenshot_after
+                        && now.duration_since(self.started).as_secs_f32() >= seconds
+                    {
+                        pipeline.request_screenshot();
+                        self.screenshot_after = None;
+                        log::info!("Screenshot requested after {seconds} s (--screenshot-after)");
+                    }
+
                     // Update animation
                     pipeline.update(dt);
 
@@ -260,6 +284,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(config, args.compute);
+    let mut app = App::new(config, args.compute, args.screenshot_after);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }

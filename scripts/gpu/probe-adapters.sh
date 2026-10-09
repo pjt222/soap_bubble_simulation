@@ -4,6 +4,8 @@
 #   scripts/gpu/probe-adapters.sh                        # vulkaninfo summary + per-ICD headless test
 #   scripts/gpu/probe-adapters.sh --app 30               # additionally run the release app for 30 s
 #   scripts/gpu/probe-adapters.sh --app 30 --compute     # ... with GPU compute effects on (app args follow)
+#   scripts/gpu/probe-adapters.sh --app 30 --compute --screenshot-after 20
+#                                                        # ... and save screenshots/screenshot_0000.png at 20 s
 #   WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 scripts/gpu/probe-adapters.sh --app 30
 #                                                        # ... on the Mesa Dozen GPU instead of llvmpipe
 #
@@ -80,7 +82,7 @@ if (( app_seconds > 0 )); then
         timeout "$app_seconds" target/release/soap-bubble-sim "${app_args[@]}" >"$log_file" 2>&1
     exit_code=$?
     echo "  exit $exit_code (124 = stopped by timeout, i.e. ran fine)  log: $log_file"
-    sed -n '/GPU adapter:\|hiding adapter\|not Vulkan compliant\|Compute effects enabled\|panicked\|Validation Error/p' "$log_file" | head -8 | sed 's/^/  /'
+    sed -n '/GPU adapter:\|hiding adapter\|not Vulkan compliant\|Compute effects enabled\|Screenshot requested\|Saved: \|panicked\|Validation Error/p' "$log_file" | head -10 | sed 's/^/  /'
     echo "  frame rate (one line per >= 5 s of frames):"
     if grep -q 'FPS ' "$log_file"; then
         sed -n 's/.*\(FPS [0-9.]* (.*\)$/    \1/p' "$log_file"
