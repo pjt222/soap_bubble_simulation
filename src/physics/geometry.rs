@@ -712,7 +712,7 @@ mod tests {
             let [u, v] = unit_sphere_to_uv(normal);
             let [mesh_u, mesh_v] = vertex.uv;
             let on_pole = normal.y.abs() > 0.9999;
-            let on_seam = mesh_u < 1e-6 || mesh_u > 1.0 - 1e-6;
+            let on_seam = !(1e-6..=1.0 - 1e-6).contains(&mesh_u);
             if !on_pole && !on_seam {
                 assert!(
                     (mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4,

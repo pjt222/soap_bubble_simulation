@@ -1036,9 +1036,7 @@ mod tests {
             .slice(..)
             .map_async(wgpu::MapMode::Read, |result| result.expect("map deposits"));
         device.poll(wgpu::Maintain::Wait);
-        let texels =
-            bytemuck::cast_slice::<u8, u32>(&readback_buffer.slice(..).get_mapped_range()).to_vec();
-        texels
+        bytemuck::cast_slice::<u8, u32>(&readback_buffer.slice(..).get_mapped_range()).to_vec()
     }
 
     #[test]

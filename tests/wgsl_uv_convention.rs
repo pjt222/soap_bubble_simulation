@@ -139,10 +139,7 @@ fn run_wgsl_function(
             result.expect("map readback buffer")
         });
     device.poll(wgpu::Maintain::Wait);
-    let outputs =
-        bytemuck::cast_slice::<u8, [f32; 4]>(&readback_buffer.slice(..).get_mapped_range())
-            .to_vec();
-    outputs
+    bytemuck::cast_slice::<u8, [f32; 4]>(&readback_buffer.slice(..).get_mapped_range()).to_vec()
 }
 
 /// Normals of the patch meshes the UI can produce, plus a coarse grid over the sphere
