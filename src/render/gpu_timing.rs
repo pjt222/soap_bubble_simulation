@@ -54,7 +54,6 @@ const PASS_TIMESTAMP_BYTES: u64 = 16;
 const RESOLVE_SLOT_BYTES: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 
 // Buffer layout invariants required by wgpu, checked at compile time.
-const _: () = assert!(RESOLVE_SLOT_BYTES.is_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT));
 const _: () = assert!(PASS_TIMESTAMP_BYTES.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT));
 const _: () = assert!(PASS_TIMESTAMP_BYTES <= RESOLVE_SLOT_BYTES);
 
@@ -204,7 +203,13 @@ impl GpuProfiler {
     pub fn resolve(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let written = self.written_passes.replace(0);
         self.copied_this_frame = false;
-        if !self.enabled || self.readback_pending || written == 0 {
+        if !self.enabled || self.readback_pending {
+            return;
+        }
+        if written == 0 {
+            // Nothing is timed any more (e.g. branched flow switched off): stop
+            // showing the last measured times.
+            self.results = GpuTimingResults::default();
             return;
         }
         let query_set = self.query_set.as_ref().unwrap();
@@ -341,16 +346,16 @@ mod tests {
         .ok()
     }
 
-    /// Record one frame with a timed (empty) compute pass, as pipeline.rs does.
-    fn record_timed_frame(
+    /// Record one frame with an empty compute pass per timed `GpuPass`, as pipeline.rs does.
+    fn record_frame(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         profiler: &mut GpuProfiler,
-        timed: bool,
+        timed_passes: &[GpuPass],
     ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        if timed {
-            let timestamp_writes = profiler.compute_pass_timestamps(GpuPass::BranchedFlowTrace);
+        for &timed_pass in timed_passes {
+            let timestamp_writes = profiler.compute_pass_timestamps(timed_pass);
             let pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("timed test pass"),
                 timestamp_writes,
@@ -362,6 +367,12 @@ mod tests {
         profiler.begin_readback();
     }
 
+    fn finish_readback(device: &wgpu::Device, profiler: &mut GpuProfiler) {
+        device.poll(wgpu::Maintain::Wait);
+        profiler.poll_results(device);
+        assert!(!profiler.readback_pending);
+    }
+
     #[test]
     #[ignore] // Requires GPU with TIMESTAMP_QUERY (lavapipe works: scripts/test-local.sh -- --ignored)
     fn test_back_to_back_frames_do_not_touch_a_pending_readback() {
@@ -370,25 +381,72 @@ mod tests {
         };
         let mut profiler = GpuProfiler::new(&device, true, queue.get_timestamp_period());
 
-        record_timed_frame(&device, &queue, &mut profiler, true);
+        record_frame(
+            &device,
+            &queue,
+            &mut profiler,
+            &[GpuPass::BranchedFlowTrace],
+        );
         assert!(profiler.readback_pending);
 
         // Second frame before the first readback has been polled: the old code
         // copied into the still-mapping readback buffer and submission failed.
         device.push_error_scope(wgpu::ErrorFilter::Validation);
-        record_timed_frame(&device, &queue, &mut profiler, true);
+        record_frame(
+            &device,
+            &queue,
+            &mut profiler,
+            &[GpuPass::BranchedFlowTrace],
+        );
         let error = pollster::block_on(device.pop_error_scope());
         assert!(
             error.is_none(),
             "submit touched a pending readback: {error:?}"
         );
 
-        device.poll(wgpu::Maintain::Wait);
-        profiler.poll_results(&device);
-        assert!(!profiler.readback_pending);
+        // Sentinel: proves poll_results actually wrote the result.
+        profiler.results.branched_flow_trace_ms = -1.0;
+        finish_readback(&device, &mut profiler);
         assert!(profiler.results.branched_flow_trace_ms >= 0.0);
         assert_eq!(profiler.results.drainage_ms, 0.0);
         assert_eq!(profiler.results.render_ms, 0.0);
+    }
+
+    #[test]
+    #[ignore] // Requires GPU with TIMESTAMP_QUERY (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn test_passes_no_longer_timed_read_as_zero() {
+        let Some((device, queue)) = timestamp_device() else {
+            return;
+        };
+        let mut profiler = GpuProfiler::new(&device, true, queue.get_timestamp_period());
+
+        // Frame 1 times both branched-flow passes.
+        record_frame(
+            &device,
+            &queue,
+            &mut profiler,
+            &[GpuPass::BranchedFlowClear, GpuPass::BranchedFlowTrace],
+        );
+        finish_readback(&device, &mut profiler);
+        assert!(
+            profiler.results.branched_flow_clear_ms > 0.0,
+            "precondition: the clear pass must measure > 0 for this test to discriminate"
+        );
+
+        // Frame 2 times only the trace pass: the clear slot must not keep frame 1's
+        // timestamps (resolve clears the readback buffer).
+        record_frame(
+            &device,
+            &queue,
+            &mut profiler,
+            &[GpuPass::BranchedFlowTrace],
+        );
+        finish_readback(&device, &mut profiler);
+        assert_eq!(profiler.results.branched_flow_clear_ms, 0.0);
+
+        // Frame 3 times nothing (feature switched off): results reset.
+        record_frame(&device, &queue, &mut profiler, &[]);
+        assert_eq!(profiler.results.total_ms(), 0.0);
     }
 
     #[test]
@@ -400,7 +458,7 @@ mod tests {
         let mut profiler = GpuProfiler::new(&device, true, queue.get_timestamp_period());
 
         device.push_error_scope(wgpu::ErrorFilter::Validation);
-        record_timed_frame(&device, &queue, &mut profiler, false);
+        record_frame(&device, &queue, &mut profiler, &[]);
         let error = pollster::block_on(device.pop_error_scope());
         assert!(error.is_none(), "{error:?}");
         assert!(

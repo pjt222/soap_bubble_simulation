@@ -1357,7 +1357,9 @@ impl RenderPipeline {
                 self.gpu_drainage.current_thickness_buffer(),
                 &self.branched_flow_buffer,
             );
-            // 4. Dispatch compute passes with GPU timing
+            // 4. Dispatch compute passes with GPU timing. Requesting timestamps marks
+            //    the passes as written, so request them only when step() will record
+            //    both passes: it returns early only when disabled, which this `if` excludes.
             let clear_ts = self
                 .gpu_profiler
                 .compute_pass_timestamps(GpuPass::BranchedFlowClear);
