@@ -910,8 +910,8 @@ mod tests {
         for i in 1..100u32 {
             let u = halton(i, 2);
             let v = halton(i, 3);
-            assert!(u >= 0.0 && u < 1.0, "Halton base 2 out of range: {u}");
-            assert!(v >= 0.0 && v < 1.0, "Halton base 3 out of range: {v}");
+            assert!((0.0..1.0).contains(&u), "Halton base 2 out of range: {u}");
+            assert!((0.0..1.0).contains(&v), "Halton base 3 out of range: {v}");
         }
     }
 

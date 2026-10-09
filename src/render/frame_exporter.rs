@@ -178,7 +178,7 @@ impl FrameExporter {
             drop(data);
             staging.unmap();
 
-            for chunk in pixels.chunks_exact_mut(4) {
+            for chunk in pixels.as_chunks_mut::<4>().0 {
                 chunk.swap(0, 2);
             }
 
@@ -288,7 +288,7 @@ impl FrameExporter {
         drop(data);
         staging_buffer.unmap();
 
-        for chunk in pixels.chunks_exact_mut(4) {
+        for chunk in pixels.as_chunks_mut::<4>().0 {
             chunk.swap(0, 2);
         }
 

@@ -1913,13 +1913,13 @@ mod tests {
     #[test]
     fn test_bubble_uniform_film_dynamics_present() {
         // Verify all film dynamics fields exist and are accessible
-        let mut uniform = BubbleUniform::default();
-
-        // These should compile and be modifiable
-        uniform.film_time = 10.0;
-        uniform.swirl_intensity = 2.0;
-        uniform.drainage_speed = 0.5;
-        uniform.pattern_scale = 3.0;
+        let uniform = BubbleUniform {
+            film_time: 10.0,
+            swirl_intensity: 2.0,
+            drainage_speed: 0.5,
+            pattern_scale: 3.0,
+            ..Default::default()
+        };
 
         assert!((uniform.film_time - 10.0).abs() < 1e-6);
         assert!((uniform.swirl_intensity - 2.0).abs() < 1e-6);
