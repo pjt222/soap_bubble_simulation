@@ -121,8 +121,10 @@ the shaders do not look: the patch mesh used `φ = 2πu` and rendered half a tur
 - In patch mode every ray starts at a point of the patch UV rectangle (`map_to_patch`),
   converted to its gnomonic chart coordinate. The injection point and beam spread apply only
   to the full-sphere view; the beam angle (`set_beam_angle`, from east toward south at the
-  chart origin) applies to both. Measured on lavapipe, one frame at defaults: 90% of the
-  patch texture lit, against 4.8% (and none of the left half) before #46
+  chart origin) applies to both. Measured on lavapipe, one frame, patch at u = 0.5: 90% of
+  the patch texture lit, against 4.8% (and none of the left half) before #46. The GPU tests
+  keep the patch at u = 0.5 on purpose: at the default u = 0.75 the patch centre is the
+  laser entry, so a wrong chart origin would not show
 - The default patch centre is u = 0.75, v = 0.5 (+z): it faces the default camera and holds
   the default laser entry. Visual check on Dozen (`probe-adapters.sh --app 45 --compute
   --screenshot-after 15`): filaments show on the upstream part of the patch, the downstream

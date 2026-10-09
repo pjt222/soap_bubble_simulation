@@ -679,7 +679,8 @@ mod tests {
         // The fragment shader derives UV from the interpolated normal and draws branched
         // flow only where |u - center_u| and |v - center_v| are within half_size (#46).
         let patches = [
-            (0.5, 0.5, 0.158), // default
+            (0.75, 0.5, 0.158), // default
+            (0.5, 0.5, 0.158),  // default before #46
             (0.2, 0.5, 0.158),
             (0.8, 0.3, 0.158),
             (0.5, 0.5, 0.05),

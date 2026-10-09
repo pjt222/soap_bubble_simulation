@@ -1042,16 +1042,20 @@ mod tests {
     #[test]
     #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
     fn patch_mode_rays_cover_the_patch() {
-        // In patch mode the whole deposit texture maps onto the visible patch. Measured on
-        // lavapipe (one frame, defaults): before #46 4.8% of texels lit and none in the
-        // left half; with the chart centred on the patch but the old beam-line spawn, 14%;
-        // with rays starting over the whole patch, 90% (halves 87-93%).
+        // In patch mode the whole deposit texture maps onto the visible patch. The patch sits
+        // at u = 0.5 (the pre-#46 default), 90 degrees from the default laser entry: at the
+        // current default (u = 0.75) the patch centre IS the laser entry, so a chart at the
+        // wrong origin would go unnoticed. Measured on lavapipe, one frame: before #46 4.8%
+        // of texels lit and none in the left half; chart centred on the patch but the old
+        // beam-line spawn, 14%; rays starting over the whole patch, 90% (halves 87-93%).
         let Some((device, queue)) = test_device() else {
             panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
         };
-        let texels = one_frame_deposits(&device, &queue, |_| {});
+        let texels = one_frame_deposits(&device, &queue, |simulator| {
+            simulator.params.patch_center_u = 0.5;
+        });
         let coverage = DepositCoverage::of(&texels, 512, 256);
-        println!("default patch view, one frame: {coverage:?}");
+        println!("patch at u = 0.5, one frame: {coverage:?}");
         assert!(coverage.lit > 0.6, "{coverage:?}");
         for half in [
             coverage.left_half,
@@ -1073,8 +1077,11 @@ mod tests {
             panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
         };
         // Default laser entry (0, 0, 1) is at u = 0.75, v = 0.5
+        // The patch centre (u = 0.5) differs from the laser entry, so this fails if the
+        // full-sphere chart is centred on the patch instead
         let texels = one_frame_deposits(&device, &queue, |simulator| {
             simulator.params.patch_enabled = 0;
+            simulator.params.patch_center_u = 0.5;
         });
         let (mut weight, mut weighted_u, mut weighted_v) = (0.0f64, 0.0f64, 0.0f64);
         for (index, &texel) in texels.iter().enumerate() {
