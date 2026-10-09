@@ -95,8 +95,7 @@ impl AnimationController {
 
         // Update velocity: v += (F - drag*v) * dt
         for i in 0..3 {
-            let total_force =
-                wind_force[i] + buoyancy_force[i] - drag * self.bubble_velocity[i];
+            let total_force = wind_force[i] + buoyancy_force[i] - drag * self.bubble_velocity[i];
             self.bubble_velocity[i] += total_force * dt;
         }
 

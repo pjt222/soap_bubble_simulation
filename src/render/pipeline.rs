@@ -13,10 +13,10 @@ use crate::render::camera::Camera;
 use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
 use crate::render::frame_exporter::FrameExporter;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
+use crate::render::gpu_timing::{GpuPass, GpuProfiler};
 use crate::render::interference_lut::{
     LUT_ANGLE_SAMPLES, LUT_THICKNESS_SAMPLES, generate_interference_lut,
 };
-use crate::render::gpu_timing::{GpuPass, GpuProfiler};
 use crate::render::ui_state::{UiDisplayInfo, UiState};
 
 /// Bubble-specific uniform data
@@ -305,9 +305,7 @@ impl RenderPipeline {
             })?;
 
         // Check if timestamp queries are supported (for GPU profiling)
-        let timestamp_supported = adapter
-            .features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY);
+        let timestamp_supported = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         // timestamp_period will be obtained from queue after device creation
         let mut timestamp_period = 1.0f32;
         let required_features = if timestamp_supported {
@@ -1285,7 +1283,8 @@ impl RenderPipeline {
 
         // Delegate to animation controller
         self.animation.update_rotation(&mut self.camera, dt);
-        self.animation.update_film_time(&mut self.bubble_uniform, dt);
+        self.animation
+            .update_film_time(&mut self.bubble_uniform, dt);
         self.animation.update_forces(&mut self.bubble_uniform, dt);
 
         // Physics-based drainage simulation
@@ -1405,7 +1404,8 @@ impl RenderPipeline {
 
         // put id:'gpu_compute_dispatch', label:'Dispatch compute shaders', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
         if self.gpu_drainage_enabled {
-            self.gpu_drainage.step(&mut encoder, self.animation.last_dt());
+            self.gpu_drainage
+                .step(&mut encoder, self.animation.last_dt());
         }
 
         // Caustic compute pass (after drainage, before render)
@@ -1584,8 +1584,12 @@ impl RenderPipeline {
 
         // Delegate frame capture to FrameExporter
         if self.frame_exporter.should_capture() {
-            self.frame_exporter
-                .prepare_capture(&self.device, &self.config, &mut encoder, &output.texture);
+            self.frame_exporter.prepare_capture(
+                &self.device,
+                &self.config,
+                &mut encoder,
+                &output.texture,
+            );
         }
 
         // Resolve GPU timestamps before finishing the encoder
@@ -1597,8 +1601,11 @@ impl RenderPipeline {
         self.gpu_profiler.begin_readback();
 
         if self.frame_exporter.should_capture() {
-            self.frame_exporter
-                .process_capture(&self.device, self.config.width, self.config.height);
+            self.frame_exporter.process_capture(
+                &self.device,
+                self.config.width,
+                self.config.height,
+            );
         }
 
         output.present();
@@ -1653,7 +1660,11 @@ impl RenderPipeline {
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
             laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
             laser_elevation: entry[1].asin().to_degrees(),
-            beam_spread: self.branched_flow_simulator.params.spread_angle.to_degrees(),
+            beam_spread: self
+                .branched_flow_simulator
+                .params
+                .spread_angle
+                .to_degrees(),
             bend_strength: self.branched_flow_simulator.params.bend_strength,
             num_rays: self.branched_flow_simulator.params.num_rays,
             num_scatterers: self.branched_flow_simulator.params.num_scatterers,
@@ -1730,7 +1741,8 @@ impl RenderPipeline {
         self.bubble_uniform.pattern_scale = ui.pattern_scale;
 
         // Export state
-        self.frame_exporter.set_screenshot_requested(ui.screenshot_requested);
+        self.frame_exporter
+            .set_screenshot_requested(ui.screenshot_requested);
         self.frame_exporter.set_recording(ui.recording);
 
         // External forces
@@ -1808,7 +1820,8 @@ impl RenderPipeline {
             self.caustic_renderer.params.caustic_intensity = ui.caustic_intensity;
             self.caustic_renderer.params.caustic_sharpness = ui.caustic_sharpness;
             if (ui.ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001 {
-                self.caustic_renderer.set_ground_y(&self.device, ui.ground_y);
+                self.caustic_renderer
+                    .set_ground_y(&self.device, ui.ground_y);
             }
             self.caustic_renderer.update_params(&self.queue);
         }

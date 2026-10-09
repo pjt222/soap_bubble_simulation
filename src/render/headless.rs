@@ -49,7 +49,11 @@ impl HeadlessRenderPipeline {
     ///
     /// # Returns
     /// A new HeadlessRenderPipeline or None if GPU initialization fails
-    pub async fn new(width: u32, height: u32, sim_config: Option<&SimulationConfig>) -> Option<Self> {
+    pub async fn new(
+        width: u32,
+        height: u32,
+        sim_config: Option<&SimulationConfig>,
+    ) -> Option<Self> {
         let default_config = SimulationConfig::default();
         let sim_config = sim_config.unwrap_or(&default_config);
         // Create wgpu instance
@@ -197,8 +201,10 @@ impl HeadlessRenderPipeline {
         });
 
         // Create bind group layout (shared definition with main pipeline)
-        let bind_group_layout =
-            crate::render::pipeline::create_bubble_bind_group_layout(&device, "headless_bind_group_layout");
+        let bind_group_layout = crate::render::pipeline::create_bubble_bind_group_layout(
+            &device,
+            "headless_bind_group_layout",
+        );
 
         // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

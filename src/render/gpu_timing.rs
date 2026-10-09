@@ -4,8 +4,8 @@
 //! and render passes. Results are displayed in the egui overlay.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// Number of timestamp slots (2 per pass: begin + end)
@@ -163,13 +163,7 @@ impl GpuProfiler {
         let readback_buf = self.readback_buffer.as_ref().unwrap();
 
         encoder.resolve_query_set(query_set, 0..MAX_TIMESTAMPS, resolve_buf, 0);
-        encoder.copy_buffer_to_buffer(
-            resolve_buf,
-            0,
-            readback_buf,
-            0,
-            (MAX_TIMESTAMPS as u64) * 8,
-        );
+        encoder.copy_buffer_to_buffer(resolve_buf, 0, readback_buf, 0, (MAX_TIMESTAMPS as u64) * 8);
     }
 
     /// Initiate async readback of timing results.

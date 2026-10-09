@@ -631,10 +631,10 @@ impl BranchedFlowSimulator {
                 // Different frequencies per scatterer prevent correlated drift
                 let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
                 let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
-                s.pos_u = (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale)
-                    .clamp(min_u, max_u);
-                s.pos_v = (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale)
-                    .clamp(min_v, max_v);
+                s.pos_u =
+                    (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale).clamp(min_u, max_u);
+                s.pos_v =
+                    (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale).clamp(min_v, max_v);
             }
         } else {
             return; // No scatterers to update
