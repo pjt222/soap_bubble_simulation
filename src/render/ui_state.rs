@@ -69,6 +69,7 @@ pub struct UiState {
     pub branched_flow_sharpness: f32,
     pub laser_azimuth: f32,
     pub laser_elevation: f32,
+    pub beam_angle: f32,
     pub beam_spread: f32,
     pub bend_strength: f32,
     pub num_rays: u32,
@@ -430,6 +431,12 @@ impl UiState {
                         }
 
                         ui.label("Injection Point");
+                        if self.patch_view_enabled {
+                            ui.weak(
+                                "Patch view starts the rays at the patch centre: injection \
+                                 point and spread apply to the full-sphere view",
+                            );
+                        }
                         ui.add(
                             egui::Slider::new(&mut self.laser_azimuth, -180.0..=180.0)
                                 .text("Azimuth")
@@ -446,6 +453,14 @@ impl UiState {
 
                         ui.separator();
                         ui.label("Beam Properties");
+
+                        ui.add(
+                            egui::Slider::new(&mut self.beam_angle, 0.0..=360.0)
+                                .text("Direction")
+                                .suffix("\u{00b0}")
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text("Measured from east toward south at the injection point");
 
                         ui.add(
                             egui::Slider::new(&mut self.beam_spread, 1.0..=45.0)

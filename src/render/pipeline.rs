@@ -1611,6 +1611,7 @@ impl RenderPipeline {
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
             laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
             laser_elevation: entry[1].asin().to_degrees(),
+            beam_angle: self.branched_flow_simulator.beam_angle_deg(),
             beam_spread: self
                 .branched_flow_simulator
                 .params
@@ -1784,6 +1785,7 @@ impl RenderPipeline {
         self.bubble_uniform.branched_flow_sharpness = ui.branched_flow_sharpness;
         self.branched_flow_simulator
             .set_entry_point(ui.laser_azimuth, ui.laser_elevation);
+        self.branched_flow_simulator.set_beam_angle(ui.beam_angle);
         self.branched_flow_simulator.params.spread_angle = ui.beam_spread.to_radians();
         self.branched_flow_simulator.params.bend_strength = ui.bend_strength;
         self.branched_flow_simulator.params.num_rays = ui.num_rays;
