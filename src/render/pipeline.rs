@@ -487,49 +487,15 @@ impl RenderPipeline {
         });
 
         // Create render pipeline
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::buffer_layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Draw both sides of the bubble
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        let render_pipeline = Self::create_mesh_pipeline(
+            &device,
+            "Render Pipeline",
+            &pipeline_layout,
+            &shader,
+            &[Vertex::buffer_layout()],
+            config.format,
+            msaa_samples,
+        );
 
         // Load instanced shader for multi-bubble foam rendering
         let instanced_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -538,52 +504,18 @@ impl RenderPipeline {
         });
 
         // Create instanced render pipeline with vertex + instance buffers
-        let instanced_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Instanced Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &instanced_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    Vertex::buffer_layout(),
-                    crate::render::foam_renderer::BubbleInstance::buffer_layout(),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &instanced_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Draw both sides of the bubble
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        let instanced_pipeline = Self::create_mesh_pipeline(
+            &device,
+            "Instanced Render Pipeline",
+            &pipeline_layout,
+            &instanced_shader,
+            &[
+                Vertex::buffer_layout(),
+                crate::render::foam_renderer::BubbleInstance::buffer_layout(),
+            ],
+            config.format,
+            msaa_samples,
+        );
 
         // Load wall shader for Plateau border rendering
         let wall_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -592,49 +524,15 @@ impl RenderPipeline {
         });
 
         // Create wall render pipeline (double-sided, no culling)
-        let wall_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Wall Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &wall_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &wall_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Double-sided rendering for walls
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        let wall_pipeline = Self::create_mesh_pipeline(
+            &device,
+            "Wall Render Pipeline",
+            &pipeline_layout,
+            &wall_shader,
+            &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
+            config.format,
+            msaa_samples,
+        );
 
         // Initialize shared wall renderer
         let shared_wall_renderer = SharedWallRenderer::new(&device, 128);
@@ -1112,6 +1010,64 @@ impl RenderPipeline {
         );
     }
 
+    /// Create a scene pipeline that draws triangle meshes into the MSAA color +
+    /// depth pass: both faces, alpha blending, depth test and write.
+    /// Used for the bubble, instanced-bubble and wall pipelines so their
+    /// sample counts can never diverge.
+    fn create_mesh_pipeline(
+        device: &wgpu::Device,
+        label: &str,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        vertex_buffers: &[wgpu::VertexBufferLayout<'_>],
+        color_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                buffers: vertex_buffers,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Bubbles and walls are visible from both sides
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -1198,14 +1154,7 @@ impl RenderPipeline {
         self.depth_texture = Self::create_depth_texture(&self.device, &self.config, samples);
         self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, samples);
 
-        // Recreate render pipeline with new multisample state
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Bubble Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
-            });
-
+        // Every pipeline that draws into the MSAA pass must match its sample count
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1213,52 +1162,52 @@ impl RenderPipeline {
                 bind_group_layouts: &[&self.bind_group_layout],
                 push_constant_ranges: &[],
             });
-
-        self.render_pipeline =
+        let shader_module = |label: &str, source: &'static str| {
             self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Render Pipeline"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[Vertex::buffer_layout()],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: self.config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        unclipped_depth: false,
-                        conservative: false,
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Less,
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: samples,
-                        mask: !0,
-                        alpha_to_coverage_enabled: false,
-                    },
-                    multiview: None,
-                    cache: None,
-                });
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                })
+        };
+        let bubble_shader = shader_module("Bubble Shader", include_str!("shaders/bubble.wgsl"));
+        let instanced_shader = shader_module(
+            "Bubble Instanced Shader",
+            include_str!("shaders/bubble_instanced.wgsl"),
+        );
+        let wall_shader = shader_module("Wall Shader", include_str!("shaders/wall.wgsl"));
+
+        self.render_pipeline = Self::create_mesh_pipeline(
+            &self.device,
+            "Render Pipeline",
+            &pipeline_layout,
+            &bubble_shader,
+            &[Vertex::buffer_layout()],
+            self.config.format,
+            samples,
+        );
+        self.instanced_pipeline = Self::create_mesh_pipeline(
+            &self.device,
+            "Instanced Render Pipeline",
+            &pipeline_layout,
+            &instanced_shader,
+            &[
+                Vertex::buffer_layout(),
+                crate::render::foam_renderer::BubbleInstance::buffer_layout(),
+            ],
+            self.config.format,
+            samples,
+        );
+        self.wall_pipeline = Self::create_mesh_pipeline(
+            &self.device,
+            "Wall Render Pipeline",
+            &pipeline_layout,
+            &wall_shader,
+            &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
+            self.config.format,
+            samples,
+        );
+        self.caustic_renderer
+            .set_sample_count(&self.device, samples);
 
         log::info!("MSAA changed to {}x", samples);
     }
