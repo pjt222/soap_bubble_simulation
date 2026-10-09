@@ -100,18 +100,34 @@ export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0
 cargo run --release
 ```
 
-**GPU acceleration on WSL2:** by default wgpu renders on llvmpipe (CPU). With Mesa 26 or newer
-installed, its Dozen driver exposes the Windows GPUs as Vulkan adapters, but wgpu hides them because
-Dozen is not a conformant Vulkan implementation. Opt in with:
+**GPU acceleration on WSL2:** by default wgpu renders on llvmpipe (CPU). A Mesa build that ships the
+Dozen driver (`/usr/share/vulkan/icd.d/dzn_icd.json`; e.g. the kisak-mesa PPA, not Ubuntu's own
+packages) exposes the Windows GPUs as Vulkan adapters, but wgpu hides them because Dozen is not a
+conformant Vulkan implementation. Opt in with:
 
 ```bash
 WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 ./run.sh
 ```
 
-The log line `GPU adapter: ...` names the adapter in use. On an RTX 3070 Ti Laptop GPU the default scene
-ran at 28.5–34.6 FPS through Dozen versus 5.5–6.0 FPS on llvmpipe (2026-10-09, release build, vsync on).
-`scripts/gpu/probe-adapters.sh --app 30` reproduces the comparison. All standard `WGPU_*` overrides
-(`WGPU_BACKEND`, `WGPU_POWER_PREF`, ...) are honoured.
+Any value other than `0` enables it (including an empty one). The log line `GPU adapter: ...` names the
+adapter in use. Measured 2026-10-09 with `scripts/gpu/probe-adapters.sh --app 32 [--compute]` (release
+build, vsync on, window size as opened, Mesa 26.0.5; each figure is the mean frame rate over one
+≥5 s interval, five intervals per run):
+
+| Scene | llvmpipe | RTX 3070 Ti Laptop via Dozen |
+|---|---|---|
+| default (compute effects off) | 9.2 (start-up), 6.2, 6.0, 5.9, 6.0 FPS | 51.1, 50.6, 50.9, 51.6, 50.2 FPS |
+| `--compute` (GPU drainage, caustics, branched flow on) | 0.8, 1.1, 1.4, 1.4, 1.4 FPS | 37.1, 39.3, 39.5, 37.3, 38.1 FPS |
+
+The host was busy (load average 15–21 on 8 cores), so absolute numbers vary between runs. An earlier
+run with a cruder 60-frame-window measure read about 30 FPS for Dozen on the default scene. Dozen's
+visual parity with llvmpipe has not been checked.
+
+The instance honours wgpu's environment overrides `WGPU_BACKEND`,
+`WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER`, `WGPU_VALIDATION`, `WGPU_DEBUG`,
+`WGPU_GPU_BASED_VALIDATION`, `WGPU_DISCARD_HAL_LABELS`, `WGPU_GLES_MINOR_VERSION` and
+`WGPU_DX12_COMPILER`, plus `WGPU_POWER_PREF` (`low`/`high`/`none`; default high). `WGPU_ADAPTER_NAME`
+is not supported.
 
 ### Controls
 
