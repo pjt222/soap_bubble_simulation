@@ -779,8 +779,9 @@ impl RenderPipeline {
         // Update LOD cache with new aspect ratio (invalidates cached meshes)
         self.lod_cache.update(self.radius, new_ratio);
 
-        // Regenerate current mesh
+        // Regenerate current mesh, and the patch mesh, which also follows the aspect ratio
         self.regenerate_mesh();
+        self.regenerate_patch_mesh();
     }
 
     /// Initialize the foam simulator for multi-bubble mode.
