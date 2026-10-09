@@ -4,6 +4,8 @@
 //! `UiState` holds all mutable parameters that the UI can modify, while `UiDisplayInfo`
 //! holds read-only values displayed in the UI.
 
+use crate::physics::geometry::SpherePatch;
+
 /// Mutable UI parameters — modified by egui widgets, then applied back to the pipeline.
 pub struct UiState {
     // Film properties (synced to/from BubbleUniform)
@@ -69,6 +71,7 @@ pub struct UiState {
     pub branched_flow_sharpness: f32,
     pub laser_azimuth: f32,
     pub laser_elevation: f32,
+    pub beam_angle: f32,
     pub beam_spread: f32,
     pub bend_strength: f32,
     pub num_rays: u32,
@@ -430,6 +433,12 @@ impl UiState {
                         }
 
                         ui.label("Injection Point");
+                        if self.patch_view_enabled {
+                            ui.weak(
+                                "Patch view starts rays across the whole patch: injection \
+                                 point and spread apply to the full-sphere view",
+                            );
+                        }
                         ui.add(
                             egui::Slider::new(&mut self.laser_azimuth, -180.0..=180.0)
                                 .text("Azimuth")
@@ -446,6 +455,17 @@ impl UiState {
 
                         ui.separator();
                         ui.label("Beam Properties");
+
+                        ui.add(
+                            egui::Slider::new(&mut self.beam_angle, 0.0..=360.0)
+                                .text("Direction")
+                                .suffix("\u{00b0}")
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text(
+                            "Measured from east toward south at the injection point \
+                             (at the patch centre in patch view)",
+                        );
 
                         ui.add(
                             egui::Slider::new(&mut self.beam_spread, 1.0..=45.0)
@@ -538,8 +558,17 @@ impl UiState {
                                     .fixed_decimals(3),
                             );
 
-                            let area_percent = (self.patch_half_size * 2.0).powi(2) * 100.0;
-                            ui.label(format!("~{:.1}% of sphere", area_percent));
+                            ui.label(format!(
+                                "~{:.1}% of sphere",
+                                SpherePatch::new(
+                                    self.patch_center_u,
+                                    self.patch_center_v,
+                                    self.patch_half_size,
+                                    2,
+                                )
+                                .sphere_fraction()
+                                    * 100.0
+                            ));
                         }
                     }
                 });

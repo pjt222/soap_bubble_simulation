@@ -113,6 +113,14 @@ fn normal_to_uv(n: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u, v);
 }
 
+// Inverse of normal_to_uv: the unit direction at sphere UV (u = 0.5 at +x).
+// Must match uv_to_unit_sphere in src/physics/geometry.rs (#46).
+fn uv_to_sphere(uv: vec2<f32>) -> vec3<f32> {
+    let phi = (uv.x * 2.0 - 1.0) * PI;
+    let theta = uv.y * PI;
+    return vec3<f32>(sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi));
+}
+
 // ============================================================================
 // UV ↔ Tangent Frame Coordinate Transformation
 //
@@ -409,12 +417,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Entry point on sphere (laser injection point)
-    let entry_point = normalize(vec3<f32>(
+    // Laser injection point on the sphere
+    let laser_entry = normalize(vec3<f32>(
         params.entry_point_x,
         params.entry_point_y,
         params.entry_point_z
     ));
+
+    // Chart origin. Rays move in the gnomonic chart of this point: the loop below maps
+    // pos_2d to normalize(entry_point + tangent1 * x + tangent2 * y). Full-sphere mode
+    // uses the laser entry. Patch mode centres the chart on the patch and spawns around
+    // pos_2d = 0, because a chart at the laser entry put the default patch on its
+    // horizon (90 degrees away), so half the patch was unreachable (#46). The CPU sets
+    // beam_dir tangent at this origin (BranchedFlowSimulator::update_beam_direction).
+    let patch_center_3d = uv_to_sphere(vec2<f32>(params.patch_center_u, params.patch_center_v));
+    let entry_point = select(laser_entry, patch_center_3d, params.patch_enabled != 0u);
 
     // Initial beam direction (tangent to sphere)
     let beam_dir_raw = vec3<f32>(
@@ -455,24 +472,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Starting position: spread perpendicular to beam direction
     var pos_2d = perp_dir * pos_offset + vel_2d * along_offset;
 
-    // Patch mode: concentrate rays within visible patch for higher deposit density
+    // Patch mode: start every ray at a point of the patch UV rectangle, so the deposits
+    // cover the whole visible patch. pos_2d is that point's gnomonic chart coordinate
+    // (the inverse of the pos_3d mapping in the loop). Points 84 degrees or more from
+    // the patch centre have no usable chart coordinate, so those rays are not traced.
+    // Larger patches lose their outer columns: the loop also stops rays beyond chart
+    // radius 2.5 (68 degrees) after one deposit. Measured lit share, one frame, centre
+    // u = 0.5: half size 0.158 90%, 0.20 80%, 0.25 61%, 0.30 47%. Exponential-map
+    // propagation (#47) would remove both limits.
     if (params.patch_enabled != 0u) {
-        let patch_phi = (params.patch_center_u * 2.0 - 1.0) * PI;
-        let patch_theta = params.patch_center_v * PI;
-        let patch_center_3d = normalize(vec3<f32>(
-            sin(patch_theta) * cos(patch_phi),
-            cos(patch_theta),
-            sin(patch_theta) * sin(patch_phi)
-        ));
-        let to_patch = patch_center_3d - entry_point;
-        let patch_offset = vec2<f32>(
-            dot(to_patch, tangent1),
-            dot(to_patch, tangent2)
-        );
-        let patch_spread = params.patch_half_size * PI;
-        pos_2d = patch_offset
-            + perp_dir * (rand1 - 0.5) * patch_spread
-            + vel_2d * (rand2 - 0.5) * patch_spread * 0.5;
+        let start_3d = uv_to_sphere(map_to_patch(rand1, rand2));
+        let cos_from_origin = dot(start_3d, entry_point);
+        if (cos_from_origin < 0.1) {
+            return;
+        }
+        pos_2d = vec2<f32>(dot(start_3d, tangent1), dot(start_3d, tangent2)) / cos_from_origin;
     }
 
     var intensity = 1.0;

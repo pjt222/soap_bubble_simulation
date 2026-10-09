@@ -102,7 +102,7 @@ impl Default for BubbleUniform {
             light_dir_z: 0.577,
             // Patch view mode (enabled by default for focused visualization)
             patch_enabled: 1,
-            patch_center_u: 0.5,
+            patch_center_u: 0.75,
             patch_center_v: 0.5,
             patch_half_size: 0.158,
             _padding1: 0,
@@ -597,10 +597,11 @@ impl RenderPipeline {
         }
         let gpu_profiler = GpuProfiler::new(&device, timestamp_supported, timestamp_period);
 
-        // Create patch mesh for focused branched flow viewing
-        let patch_center_u = 0.5;
+        // Create patch mesh for focused branched flow viewing. u = 0.75 is +z, which faces
+        // the default camera and holds the default laser entry; u = 0.5 (+x) was seen edge-on.
+        let patch_center_u = 0.75;
         let patch_center_v = 0.5;
-        let patch_half_size = 0.158; // ~10% of sphere surface
+        let patch_half_size = 0.158; // ~15% of the sphere at the equator
         let patch = SpherePatch::new(patch_center_u, patch_center_v, patch_half_size, 32);
         let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(radius, 1.0);
 
@@ -779,8 +780,9 @@ impl RenderPipeline {
         // Update LOD cache with new aspect ratio (invalidates cached meshes)
         self.lod_cache.update(self.radius, new_ratio);
 
-        // Regenerate current mesh
+        // Regenerate current mesh, and the patch mesh, which also follows the aspect ratio
         self.regenerate_mesh();
+        self.regenerate_patch_mesh();
     }
 
     /// Initialize the foam simulator for multi-bubble mode.
@@ -1611,6 +1613,7 @@ impl RenderPipeline {
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
             laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
             laser_elevation: entry[1].asin().to_degrees(),
+            beam_angle: self.branched_flow_simulator.beam_angle_deg(),
             beam_spread: self
                 .branched_flow_simulator
                 .params
@@ -1784,6 +1787,7 @@ impl RenderPipeline {
         self.bubble_uniform.branched_flow_sharpness = ui.branched_flow_sharpness;
         self.branched_flow_simulator
             .set_entry_point(ui.laser_azimuth, ui.laser_elevation);
+        self.branched_flow_simulator.set_beam_angle(ui.beam_angle);
         self.branched_flow_simulator.params.spread_angle = ui.beam_spread.to_radians();
         self.branched_flow_simulator.params.bend_strength = ui.bend_strength;
         self.branched_flow_simulator.params.num_rays = ui.num_rays;

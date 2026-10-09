@@ -8,11 +8,35 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use std::f32::consts::PI;
 
+/// Map a unit direction to the sphere UV convention shared by every mesh and shader.
+///
+/// `u = (atan2(z, x) + PI) / (2 PI)`, `v = acos(y) / PI`: u = 0.5 at +x, u = 0.75 at +z,
+/// and the seam u = 0 / 1 lies at -x. This is a literal port of `normal_to_uv` in
+/// `branched_flow_compute.wgsl`, which deposits branched flow by this UV; `bubble.wgsl`
+/// samples it by the mesh UV. Meshes that place geometry from UV must therefore use the
+/// inverse, [`uv_to_unit_sphere`] (#46).
+pub fn unit_sphere_to_uv(direction: Vec3) -> [f32; 2] {
+    let azimuth = direction.z.atan2(direction.x); // -PI to PI
+    let polar = direction.y.clamp(-1.0, 1.0).acos(); // 0 to PI
+    [(azimuth + PI) / (2.0 * PI), polar / PI]
+}
+
+/// Inverse of [`unit_sphere_to_uv`]: the unit direction at sphere UV `(u, v)`.
+pub fn uv_to_unit_sphere(u: f32, v: f32) -> Vec3 {
+    let azimuth = (u * 2.0 - 1.0) * PI;
+    let polar = v * PI;
+    Vec3::new(
+        polar.sin() * azimuth.cos(),
+        polar.cos(),
+        polar.sin() * azimuth.sin(),
+    )
+}
+
 /// Vertex data for GPU rendering
 ///
 /// Contains position, normal, and UV coordinates for thin-film interference mapping.
-/// UV.x maps to theta (0 to 1 for 0 to 2*PI around the sphere)
-/// UV.y maps to phi (0 to 1 for 0 to PI from top to bottom)
+/// UV follows [`unit_sphere_to_uv`]: UV.x is longitude (0 to 1, u = 0.5 at +x),
+/// UV.y is the polar angle (0 to 1 for 0 to PI from top to bottom)
 // put id:'cpu_icosphere_gen', label:'Generate icosphere mesh', input:'final_config.internal', output:'vertex_buffer_gpu.internal'
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -22,7 +46,7 @@ pub struct Vertex {
     /// Surface normal (normalized, pointing outward)
     pub normal: [f32; 3],
     /// UV coordinates for film thickness texture mapping
-    /// u: longitude (theta), v: latitude (phi)
+    /// u: longitude, v: polar angle (see [`unit_sphere_to_uv`])
     pub uv: [f32; 2],
 }
 
@@ -42,20 +66,10 @@ impl Vertex {
         let position = normalized_point * radius;
         let normal = normalized_point;
 
-        // Compute spherical UV coordinates
-        // theta: angle around Y axis (longitude), 0 to 2*PI
-        // phi: angle from +Y axis (latitude), 0 to PI
-        let theta = normalized_point.z.atan2(normalized_point.x);
-        let phi = normalized_point.y.acos();
-
-        // Map to UV space [0, 1]
-        let u = (theta + PI) / (2.0 * PI);
-        let v = phi / PI;
-
         Self {
             position: position.to_array(),
             normal: normal.to_array(),
-            uv: [u, v],
+            uv: unit_sphere_to_uv(normalized_point),
         }
     }
 
@@ -188,7 +202,8 @@ impl SphereMesh {
             let cos_theta = theta.cos();
 
             for lon in 0..=lon_segments {
-                let phi = (lon as f32 / lon_segments as f32) * 2.0 * PI; // 0 to 2*PI
+                // Shared UV convention (unit_sphere_to_uv): u = 0.5 at +x
+                let phi = (lon as f32 / lon_segments as f32 * 2.0 - 1.0) * PI; // -PI to PI
                 let sin_phi = phi.sin();
                 let cos_phi = phi.cos();
 
@@ -344,11 +359,12 @@ impl LodMeshCache {
 /// providing a focused view of the effect.
 // put id:'cpu_patch_gen', label:'Generate sphere patch', input:'final_config.internal', output:'vertex_buffer_gpu.internal'
 pub struct SpherePatch {
-    /// UV center u-coordinate (0-1, corresponds to phi angle)
+    /// UV center u-coordinate (0-1, longitude in the [`unit_sphere_to_uv`] convention)
     pub center_u: f32,
     /// UV center v-coordinate (0-1, corresponds to theta angle)
     pub center_v: f32,
-    /// Half-width in UV space (0.158 ≈ 10% of surface area when squared)
+    /// Half-width in UV space (0.158: 10% of the UV square, ~15% of the sphere at the
+    /// equator; see [`SpherePatch::sphere_fraction`])
     pub half_size: f32,
     /// Grid subdivisions along each axis
     pub subdivisions: u32,
@@ -357,9 +373,9 @@ pub struct SpherePatch {
 impl Default for SpherePatch {
     fn default() -> Self {
         Self {
-            center_u: 0.5,
+            center_u: 0.75, // +z, facing the default camera
             center_v: 0.5,
-            half_size: 0.158, // ~10% of sphere surface area
+            half_size: 0.158, // ~15% of the sphere at the equator
             subdivisions: 32,
         }
     }
@@ -385,6 +401,15 @@ impl SpherePatch {
         (min_u, max_u, min_v, max_v)
     }
 
+    /// Share of the unit sphere's area the patch covers. A UV rectangle is not a square
+    /// on the sphere: longitude spans `(max_u - min_u) 2 PI` and the polar band contributes
+    /// `cos(min_v PI) - cos(max_v PI)`, so the default patch covers about 15%, not the
+    /// `(2 half_size)^2 = 10%` its UV area suggests.
+    pub fn sphere_fraction(&self) -> f32 {
+        let (min_u, max_u, min_v, max_v) = self.uv_bounds();
+        (max_u - min_u) * ((min_v * PI).cos() - (max_v * PI).cos()) / 2.0
+    }
+
     /// Generate indexed mesh for the patch
     pub fn generate_mesh_indexed(&self, radius: f32, aspect_ratio: f32) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
@@ -402,20 +427,18 @@ impl SpherePatch {
         // Generate vertices on a grid within the UV patch bounds
         for j in 0..=subs {
             let v = min_v + (max_v - min_v) * (j as f32 / subs as f32);
-            let theta = v * PI; // 0 to PI (top to bottom)
-            let sin_theta = theta.sin();
-            let cos_theta = theta.cos();
 
             for i in 0..=subs {
                 let u = min_u + (max_u - min_u) * (i as f32 / subs as f32);
-                let phi = u * 2.0 * PI; // 0 to 2*PI
-                let sin_phi = phi.sin();
-                let cos_phi = phi.cos();
+                // Shared UV convention, so the shaders, which derive UV from the normal, see
+                // this vertex at (u, v). The former phi = 2 PI u put the patch half a turn
+                // away from where they look (#46).
+                let direction = uv_to_unit_sphere(u, v);
 
                 // Position on ellipsoid
-                let x = r_eq * sin_theta * cos_phi;
-                let y = r_pol * cos_theta;
-                let z = r_eq * sin_theta * sin_phi;
+                let x = r_eq * direction.x;
+                let y = r_pol * direction.y;
+                let z = r_eq * direction.z;
                 let position = Vec3::new(x, y, z);
 
                 // Normal for ellipsoid
@@ -546,7 +569,7 @@ mod tests {
     #[test]
     fn test_sphere_patch_default() {
         let patch = SpherePatch::default();
-        assert_eq!(patch.center_u, 0.5);
+        assert_eq!(patch.center_u, 0.75);
         assert_eq!(patch.center_v, 0.5);
         assert!((patch.half_size - 0.158).abs() < 0.001);
         assert_eq!(patch.subdivisions, 32);
@@ -625,6 +648,126 @@ mod tests {
                 max_v
             );
         }
+    }
+
+    #[test]
+    fn test_uv_convention_matches_shaders() {
+        // The shaders' normal_to_uv: u = 0.5 at +x, 0.75 at +z, 0.25 at -z; v = 0 at +y
+        let cases = [
+            (Vec3::X, [0.5, 0.5]),
+            (Vec3::Z, [0.75, 0.5]),
+            (Vec3::NEG_Z, [0.25, 0.5]),
+            (Vec3::Y, [0.5, 0.0]),
+            (Vec3::NEG_Y, [0.5, 1.0]),
+        ];
+        for (direction, expected) in cases {
+            let [u, v] = unit_sphere_to_uv(direction);
+            assert!(
+                (u - expected[0]).abs() < 1e-6 && (v - expected[1]).abs() < 1e-6,
+                "{direction:?} -> ({u}, {v}), expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uv_to_unit_sphere_inverts_unit_sphere_to_uv() {
+        for i in 1..20 {
+            for j in 1..20 {
+                let (u, v) = (i as f32 / 20.0, j as f32 / 20.0);
+                let direction = uv_to_unit_sphere(u, v);
+                assert!((direction.length() - 1.0).abs() < 1e-6);
+                let [u_back, v_back] = unit_sphere_to_uv(direction);
+                assert!(
+                    (u_back - u).abs() < 1e-5 && (v_back - v).abs() < 1e-5,
+                    "({u}, {v}) -> {direction:?} -> ({u_back}, {v_back})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sphere_patch_normals_land_in_shader_patch_window() {
+        // The fragment shader derives UV from the interpolated normal and draws branched
+        // flow only where |u - center_u| and |v - center_v| are within half_size (#46).
+        let patches = [
+            (0.75, 0.5, 0.158), // default
+            (0.5, 0.5, 0.158),  // default before #46
+            (0.2, 0.5, 0.158),
+            (0.8, 0.3, 0.158),
+            (0.5, 0.5, 0.05),
+            (0.3, 0.7, 0.15),
+            (0.5, 0.5, 0.3), // slider maximum
+        ];
+        for (center_u, center_v, half_size) in patches {
+            let patch = SpherePatch::new(center_u, center_v, half_size, 16);
+            let (vertices, _) = patch.generate_mesh_indexed(1.0, 1.0);
+            for vertex in &vertices {
+                let [u, v] = unit_sphere_to_uv(Vec3::from_array(vertex.normal));
+                assert!(
+                    (u - center_u).abs() <= half_size + 1e-4
+                        && (v - center_v).abs() <= half_size + 1e-4,
+                    "patch ({center_u}, {center_v}, {half_size}): normal maps to ({u}, {v}), \
+                     outside the shader's patch window"
+                );
+                let [mesh_u, mesh_v] = vertex.uv;
+                assert!((mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ellipsoid_mesh_uv_matches_its_normals() {
+        // Same convention for the full mesh, so in.uv means the same thing everywhere
+        let mesh = SphereMesh::new(1.0, 1);
+        for vertex in &mesh.vertices {
+            let normal = Vec3::from_array(vertex.normal);
+            let [u, v] = unit_sphere_to_uv(normal);
+            let [mesh_u, mesh_v] = vertex.uv;
+            let on_pole = normal.y.abs() > 0.9999;
+            let on_seam = !(1e-6..=1.0 - 1e-6).contains(&mesh_u);
+            if !on_pole && !on_seam {
+                assert!(
+                    (mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4,
+                    "mesh uv ({mesh_u}, {mesh_v}) vs normal uv ({u}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_deformed_mesh_uv_is_the_unit_sphere_uv_of_its_parametric_direction() {
+        // On an oblate mesh the normal no longer gives the vertex's UV, so the fragment
+        // shader samples branched flow by in.uv. That UV must be the compute shader's UV of
+        // the point's parametric direction (x / r_eq, y / r_pol, z / r_eq) (#46).
+        let (radius, aspect_ratio) = (1.0, 0.7);
+        let full_mesh = SphereMesh::new_ellipsoid(radius, 1, aspect_ratio);
+        let (patch_vertices, _) =
+            SpherePatch::new(0.75, 0.5, 0.158, 16).generate_mesh_indexed(radius, aspect_ratio);
+        for vertex in full_mesh.vertices.iter().chain(&patch_vertices) {
+            let [x, y, z] = vertex.position;
+            let direction = Vec3::new(x / radius, y / (radius * aspect_ratio), z / radius);
+            let [u, v] = unit_sphere_to_uv(direction);
+            let [mesh_u, mesh_v] = vertex.uv;
+            let on_pole = direction.y.abs() > 0.9999;
+            let on_seam = !(1e-6..=1.0 - 1e-6).contains(&mesh_u);
+            if !on_pole && !on_seam {
+                assert!(
+                    (mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4,
+                    "mesh uv ({mesh_u}, {mesh_v}) vs parametric uv ({u}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sphere_patch_sphere_fraction() {
+        let whole_sphere = SpherePatch::new(0.5, 0.5, 0.5, 2);
+        assert!((whole_sphere.sphere_fraction() - 1.0).abs() < 1e-6);
+        let default_patch = SpherePatch::default();
+        assert!((default_patch.sphere_fraction() - 0.1505).abs() < 1e-3);
+        // The same UV size covers less area away from the equator
+        let high_patch = SpherePatch::new(0.75, 0.2, 0.158, 2);
+        assert!(high_patch.sphere_fraction() < default_patch.sphere_fraction());
     }
 
     #[test]

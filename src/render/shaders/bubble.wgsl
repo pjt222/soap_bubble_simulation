@@ -232,15 +232,6 @@ fn get_film_thickness(normal: vec3<f32>, time: f32) -> f32 {
 // Branched Flow / Caustic Computation
 // ============================================================================
 
-// Convert normal direction to UV coordinates for branched flow texture sampling
-fn normal_to_branched_uv(n: vec3<f32>) -> vec2<f32> {
-    let phi = atan2(n.z, n.x);  // -PI to PI
-    let theta = acos(clamp(n.y, -1.0, 1.0));  // 0 to PI
-    let u = (phi + 3.14159265) / (2.0 * 3.14159265);  // 0 to 1
-    let v = theta / 3.14159265;  // 0 to 1
-    return vec2<f32>(u, v);
-}
-
 // Sample branched flow texture with bilinear interpolation
 fn sample_branched_flow_texture(uv: vec2<f32>) -> f32 {
     let fx = uv.x * f32(BRANCHED_TEX_WIDTH - 1u);
@@ -303,14 +294,16 @@ fn uv_to_patch_local(uv: vec2<f32>) -> vec2<f32> {
 
 // Get branched flow intensity from ray-traced texture
 // The compute shader traces rays from a laser entry point through the film,
-// bending based on thickness gradients, and accumulates intensity in a texture
-fn compute_branched_flow(normal: vec3<f32>, time: f32) -> f32 {
+// bending based on thickness gradients, and accumulates intensity in a texture.
+//
+// `world_uv` is the mesh UV, which is in the convention the compute shader deposits in
+// (unit_sphere_to_uv in src/physics/geometry.rs). A UV derived from the normal would differ
+// on the deformed (oblate) mesh, where the normal's polar angle is not the vertex's
+// parametric one: lookups shifted and the patch's top and bottom fell outside its window (#46).
+fn compute_branched_flow(world_uv: vec2<f32>, time: f32) -> f32 {
     if (bubble.branched_flow_enabled == 0u) {
         return 0.0;
     }
-
-    // Get world UV from normal
-    let world_uv = normal_to_branched_uv(normal);
 
     // In patch mode, remap UV to patch-local coordinates
     var sample_uv = world_uv;
@@ -402,7 +395,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_color = base_color * 0.1 + interference_color;
 
     // Add branched flow effect - bright light filaments within the film
-    let branched_flow = compute_branched_flow(normal, bubble.film_time);
+    let branched_flow = compute_branched_flow(in.uv, bubble.film_time);
     if (branched_flow > 0.0) {
         // Branched flow appears as bright white/gold filaments
         // Color shifts slightly based on thickness (chromatic caustics)

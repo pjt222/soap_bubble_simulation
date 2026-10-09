@@ -103,19 +103,49 @@ and WGSL structs must match exactly — verified by size alignment tests.
 
 ## Patch View Mode
 
-The patch view mode renders a small curved rectangular patch (~10% of sphere surface)
+The patch view mode renders a small curved rectangular patch (~15% of the sphere at the
+default size; `SpherePatch::sphere_fraction`)
 instead of the full bubble. This provides a focused view of branched flow effects.
+
+**One UV convention everywhere:** `u = (atan2(z, x) + π) / 2π` (u = 0.5 at +x),
+`v = acos(y) / π`. In Rust it is `unit_sphere_to_uv` / `uv_to_unit_sphere` in
+`physics/geometry.rs`, used by `SpherePatch` and the sphere mesh; in WGSL it is `normal_to_uv`
+/ `uv_to_sphere` (`branched_flow_compute.wgsl`), which deposits branched flow by UV. The
+fragment shader samples that texture by the mesh UV (`in.uv`), so a mesh built with another
+convention is drawn where the deposits are not: the patch mesh used `φ = 2πu` and rendered
+half a turn away (#46). It does not re-derive UV from the normal, which on the deformed
+(oblate) mesh is not the vertex's UV. The geometry tests tie mesh UV to the convention (CI);
+`tests/wgsl_uv_convention.rs` runs the compute shader's functions on the GPU against the Rust
+helpers (`#[ignore]`, lavapipe via `scripts/test-local.sh`; CI does not run it).
 
 **Key insight — rays are spawned within the patch region:**
 - The `SpherePatch` struct generates a curved mesh from UV bounds on the sphere
-- In patch mode, rays start at positions within the patch UV bounds (converted to
-  tangent-space offsets from the entry point), giving ~5-10x more effective deposits
+- Rays move in the gnomonic chart of a chart origin: the laser entry in full-sphere view, the
+  patch centre in patch view (`BranchedFlowParams::chart_origin`, mirrored in the shader)
+- In patch mode every ray starts at a point of the patch UV rectangle (`map_to_patch`),
+  converted to its gnomonic chart coordinate. The injection point and beam spread apply only
+  to the full-sphere view; the beam angle (`set_beam_angle`, from east toward south at the
+  chart origin) applies to both. Measured on lavapipe, one frame, patch at u = 0.5: 90% of
+  the patch texture lit, against 4.8% (and none of the left half) before #46. The GPU tests
+  keep the patch at u = 0.5 on purpose: at the default u = 0.75 the patch centre is the
+  laser entry, so a wrong chart origin would not show. The test checks that rays reach the
+  whole patch, not that branching is visible (straight, unscattered rays score 94.5%)
+- Larger patches lose their outer columns: rays starting 84° or more from the patch centre
+  are not traced, and the loop stops rays beyond chart radius 2.5 (68°). Lit share, one frame:
+  half size 0.158 → 90%, 0.20 → 80%, 0.25 → 61%, 0.30 → 47% (the slider goes to 0.3).
+  Exponential-map propagation (#47) would remove both limits
+- The default patch centre is u = 0.75, v = 0.5 (+z): it faces the default camera and holds
+  the default laser entry. Visual check on Dozen (`probe-adapters.sh --app 45 --compute
+  --screenshot-after 15`): filaments show on the upstream part of the patch, the downstream
+  part renders white. Whether that white is thick drained film or clipped deposits is not
+  settled yet (#47 owns the deposit scale and intensity mapping)
 - Deposits only occur when ray UV position is within patch bounds
 - The fragment shader remaps patch-local UVs when sampling the branched flow texture
 
 **Attempted optimizations that caused GPU freezes (DO NOT RETRY):**
 - Modifying the propagation loop body (early break, entry point change mid-loop)
-- The patch ray spawning is safe because it only changes initial conditions
+- The patch ray spawning is safe because it only changes initial conditions (#46 changed only
+  code before the loop; the loop body stayed byte-identical)
 
 **Scatterers:** When patch mode is active, scatterers are confined within the patch
 bounds for higher density coverage.

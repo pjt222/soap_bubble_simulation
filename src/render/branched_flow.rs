@@ -9,7 +9,10 @@
 //! rather than parallel bands from smooth GRIN alone.
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
 use wgpu::util::DeviceExt;
+
+use crate::physics::geometry::uv_to_unit_sphere;
 
 /// Maximum number of scatterers supported
 pub const MAX_SCATTERERS: u32 = 2048;
@@ -104,11 +107,11 @@ pub struct BranchedFlowParams {
 
 impl Default for BranchedFlowParams {
     fn default() -> Self {
-        Self {
+        let mut params = Self {
             // Entry point: front of bubble
             entry_point: [0.0, 0.0, 1.0],
-            // Beam direction: going down-left across the surface
-            beam_dir: [-0.5, -0.866, 0.0],
+            // Set from DEFAULT_BEAM_ANGLE_DEG at the chart origin below
+            beam_dir: [0.0; 3],
             // Rays per frame. With 200 steps this is 8x fewer ray-steps than the earlier
             // 32768 x 400, chosen for the WSL CPU rasteriser (llvmpipe); the frame-time gain was
             // not measured. Ray seeds depend only on ray_idx, so every frame restarts from the
@@ -140,13 +143,58 @@ impl Default for BranchedFlowParams {
             scatterer_strength: 0.5,
             scatterer_radius: 0.03,
             particle_weight: 0.1,
-            // Patch view mode defaults (enabled, centered at 0.5, ~10% of surface)
+            // Patch view mode defaults (enabled, centred at +z facing the default camera)
             patch_enabled: 1,
-            patch_center_u: 0.5,
+            patch_center_u: 0.75,
             patch_center_v: 0.5,
             patch_half_size: 0.158,
+        };
+        params.beam_dir = beam_direction(params.chart_origin(), DEFAULT_BEAM_ANGLE_DEG).into();
+        params
+    }
+}
+
+impl BranchedFlowParams {
+    /// The point whose gnomonic chart the rays move in: the patch centre in patch mode,
+    /// the laser entry point otherwise. Mirrors `entry_point` in the `main` kernel of
+    /// `branched_flow_compute.wgsl` (#46).
+    pub fn chart_origin(&self) -> Vec3 {
+        if self.patch_enabled != 0 {
+            uv_to_unit_sphere(self.patch_center_u, self.patch_center_v)
+        } else {
+            Vec3::from(self.entry_point).normalize()
         }
     }
+}
+
+/// Default beam angle. At the default laser entry (0, 0, 1) it reproduces the beam
+/// direction (-0.5, -0.866, 0) that was hard-coded before #46.
+pub const DEFAULT_BEAM_ANGLE_DEG: f32 = 60.0;
+
+/// Tangent basis at a chart origin, built exactly as `branched_flow_compute.wgsl` builds
+/// it: `tangent1 = normalize(origin x up)`, `tangent2 = normalize(origin x tangent1)`,
+/// with `up = +Y` unless the origin is within about 8 degrees of a pole, then `+X`.
+/// Away from the poles `tangent1` points east (increasing u) and `tangent2` south
+/// (increasing v).
+pub fn chart_tangents(origin: Vec3) -> (Vec3, Vec3) {
+    let up = if origin.y.abs() > 0.99 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
+    let tangent1 = origin.cross(up).normalize();
+    let tangent2 = origin.cross(tangent1).normalize();
+    (tangent1, tangent2)
+}
+
+/// Beam direction at `origin`, `angle_deg` measured from `tangent1` (east) toward
+/// `tangent2` (south). Tangent to the sphere and of unit length at every origin, unlike
+/// the fixed world vector it replaces, whose tangent projection vanished at two entry
+/// points (#46).
+pub fn beam_direction(origin: Vec3, angle_deg: f32) -> Vec3 {
+    let (tangent1, tangent2) = chart_tangents(origin);
+    let angle = angle_deg.to_radians();
+    tangent1 * angle.cos() + tangent2 * angle.sin()
 }
 
 /// Optional patch bounds for confining scatterers
@@ -289,6 +337,9 @@ pub struct BranchedFlowSimulator {
     last_patch_half_size: f32,
     /// Stored scatterers for temporal coherence (Brownian perturbation between regenerations)
     current_scatterers: Vec<ScattererGPU>,
+    /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
+    /// at the current chart origin before every upload
+    beam_angle_deg: f32,
 }
 
 /// Create a branched flow texture buffer (called early in pipeline init)
@@ -511,12 +562,20 @@ impl BranchedFlowSimulator {
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
             current_scatterers: Vec::new(),
+            beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
         }
     }
 
-    /// Update parameters buffer
-    pub fn update_params(&self, queue: &wgpu::Queue) {
+    /// Update parameters buffer. Recomputes `beam_dir` first, because the chart origin it
+    /// is tangent to moves with the laser entry and the patch.
+    pub fn update_params(&mut self, queue: &wgpu::Queue) {
+        self.update_beam_direction();
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    fn update_beam_direction(&mut self) {
+        self.params.beam_dir =
+            beam_direction(self.params.chart_origin(), self.beam_angle_deg).into();
     }
 
     /// Rebuild bind group with the current thickness buffer.
@@ -691,24 +750,16 @@ impl BranchedFlowSimulator {
         ];
     }
 
-    /// Set beam direction (angle relative to "down" on the sphere, in degrees)
+    /// Set the beam angle in degrees, measured from east toward south at the chart origin
+    /// (see [`beam_direction`])
     pub fn set_beam_angle(&mut self, angle_deg: f32) {
-        let angle = angle_deg.to_radians();
-        // Get entry point
-        let entry = glam::Vec3::from(self.params.entry_point);
+        self.beam_angle_deg = angle_deg;
+        self.update_beam_direction();
+    }
 
-        // Create tangent basis at entry point
-        let up = if entry.y.abs() > 0.99 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent1 = entry.cross(up).normalize();
-        let tangent2 = entry.cross(tangent1).normalize();
-
-        // Beam direction is a combination of tangents based on angle
-        let beam_dir = tangent1 * angle.cos() + tangent2 * angle.sin();
-        self.params.beam_dir = beam_dir.into();
+    /// Current beam angle in degrees
+    pub fn beam_angle_deg(&self) -> f32 {
+        self.beam_angle_deg
     }
 
     /// Run simulation step with optional GPU timestamp profiling.
@@ -815,36 +866,239 @@ mod tests {
         }
     }
 
+    /// Laser entry point for azimuth/elevation in degrees, as set_entry_point computes it
+    fn entry_from_angles(azimuth_deg: f32, elevation_deg: f32) -> Vec3 {
+        let mut params = BranchedFlowParams::default();
+        let (azimuth, elevation) = (azimuth_deg.to_radians(), elevation_deg.to_radians());
+        params.entry_point = [
+            elevation.cos() * azimuth.cos(),
+            elevation.sin(),
+            elevation.cos() * azimuth.sin(),
+        ];
+        params.patch_enabled = 0;
+        params.chart_origin()
+    }
+
     #[test]
-    fn set_beam_angle_produces_tangent_vectors() {
-        let sim = BranchedFlowParams::default();
-        // Entry point is [0, 0, 1] by default
-        let entry = glam::Vec3::from(sim.entry_point);
+    fn beam_direction_is_a_unit_tangent_at_every_origin() {
+        let origins = [
+            // The two entries where the former fixed beam (-0.5, -0.866, 0) had no
+            // tangent component (#46)
+            entry_from_angles(0.0, 60.0),
+            entry_from_angles(180.0, -60.0),
+            entry_from_angles(90.0, 0.0),
+            entry_from_angles(-135.0, 89.0),
+            Vec3::Y,
+            Vec3::NEG_Y,
+            uv_to_unit_sphere(0.5, 0.5),
+            uv_to_unit_sphere(0.1, 0.2),
+        ];
+        for origin in origins {
+            for angle_deg in [0.0f32, 45.0, 60.0, 90.0, 180.0, 270.0] {
+                let beam = beam_direction(origin, angle_deg);
+                assert!(
+                    beam.dot(origin).abs() < 1e-5 && (beam.length() - 1.0).abs() < 1e-5,
+                    "beam {beam:?} at origin {origin:?}, angle {angle_deg}"
+                );
+            }
+        }
+    }
 
-        // Create tangent basis (same logic as set_beam_angle)
-        let up = if entry.y.abs() > 0.99 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent1 = entry.cross(up).normalize();
-        let tangent2 = entry.cross(tangent1).normalize();
+    #[test]
+    fn default_beam_angle_reproduces_the_former_beam_at_the_default_entry() {
+        let beam = beam_direction(Vec3::Z, DEFAULT_BEAM_ANGLE_DEG);
+        assert!(
+            (beam - Vec3::new(-0.5, -0.866_025_4, 0.0)).length() < 1e-5,
+            "{beam:?}"
+        );
+    }
 
-        // For any angle, beam_dir should be tangent to sphere at entry point
-        for angle_deg in [0.0f32, 45.0, 90.0, 180.0, 270.0] {
-            let angle = angle_deg.to_radians();
-            let beam_dir = tangent1 * angle.cos() + tangent2 * angle.sin();
-            let dot_with_entry = beam_dir.dot(entry);
+    #[test]
+    fn chart_tangents_point_east_and_south() {
+        use crate::physics::geometry::unit_sphere_to_uv;
+        for (u, v) in [(0.5, 0.5), (0.3, 0.3), (0.8, 0.7)] {
+            let origin = uv_to_unit_sphere(u, v);
+            let (tangent1, tangent2) = chart_tangents(origin);
+            let [u_east, v_east] = unit_sphere_to_uv((origin + tangent1 * 1e-3).normalize());
+            let [u_south, v_south] = unit_sphere_to_uv((origin + tangent2 * 1e-3).normalize());
             assert!(
-                dot_with_entry.abs() < 1e-5,
-                "Beam dir not tangent for angle={angle_deg}: dot={dot_with_entry}"
+                u_east > u && (v_east - v).abs() < 1e-4,
+                "tangent1 not east at ({u}, {v})"
             );
-            let beam_length = beam_dir.length();
             assert!(
-                (beam_length - 1.0).abs() < 1e-5,
-                "Beam dir not normalized for angle={angle_deg}: length={beam_length}"
+                v_south > v && (u_south - u).abs() < 1e-4,
+                "tangent2 not south at ({u}, {v})"
             );
         }
+    }
+
+    #[test]
+    fn chart_origin_is_the_patch_centre_in_patch_mode() {
+        let mut params = BranchedFlowParams {
+            patch_center_u: 0.3,
+            patch_center_v: 0.6,
+            ..BranchedFlowParams::default()
+        };
+        assert!((params.chart_origin() - uv_to_unit_sphere(0.3, 0.6)).length() < 1e-6);
+        params.patch_enabled = 0;
+        assert!((params.chart_origin() - Vec3::from(params.entry_point)).length() < 1e-6);
+    }
+
+    #[test]
+    fn default_beam_is_tangent_at_the_default_chart_origin() {
+        let params = BranchedFlowParams::default();
+        let beam = Vec3::from(params.beam_dir);
+        assert!(beam.dot(params.chart_origin()).abs() < 1e-6);
+        assert!((beam.length() - 1.0).abs() < 1e-6);
+    }
+
+    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+    }
+
+    /// Share of lit texels in the deposit texture, overall and per half
+    #[derive(Debug)]
+    struct DepositCoverage {
+        lit: f64,
+        left_half: f64,
+        right_half: f64,
+        top_half: f64,
+        bottom_half: f64,
+    }
+
+    impl DepositCoverage {
+        fn of(texels: &[u32], width: usize, height: usize) -> Self {
+            let lit_share = |columns: std::ops::Range<usize>, rows: std::ops::Range<usize>| {
+                let total = columns.len() * rows.len();
+                let lit = rows
+                    .flat_map(|row| columns.clone().map(move |column| row * width + column))
+                    .filter(|&index| texels[index] > 0)
+                    .count();
+                lit as f64 / total as f64
+            };
+            Self {
+                lit: lit_share(0..width, 0..height),
+                left_half: lit_share(0..width / 2, 0..height),
+                right_half: lit_share(width / 2..width, 0..height),
+                top_half: lit_share(0..width, 0..height / 2),
+                bottom_half: lit_share(0..width, height / 2..height),
+            }
+        }
+    }
+
+    /// Deposit texture after one compute frame of a simulator set up by `configure`.
+    /// The drainage thickness is uniform, so only the scatterers bend the rays.
+    fn one_frame_deposits(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        configure: impl FnOnce(&mut BranchedFlowSimulator),
+    ) -> Vec<u32> {
+        let thickness = vec![500e-9f32; 256 * 128];
+        let thickness_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&thickness),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let texture_bytes = 512 * 256 * 4;
+        let deposit_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: texture_bytes,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: texture_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut simulator = BranchedFlowSimulator::new(device, &thickness_buffer, &deposit_buffer);
+        simulator.enabled = true;
+        configure(&mut simulator);
+        simulator.update_params(queue);
+        simulator.update_scatterers(queue, 0.0);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        simulator.step(&mut encoder, 0.0, None, None);
+        encoder.copy_buffer_to_buffer(&deposit_buffer, 0, &readback_buffer, 0, texture_bytes);
+        queue.submit(Some(encoder.finish()));
+        if let Some(error) = pollster::block_on(device.pop_error_scope()) {
+            panic!("branched flow frame failed validation: {error}");
+        }
+
+        readback_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| result.expect("map deposits"));
+        device.poll(wgpu::Maintain::Wait);
+        bytemuck::cast_slice::<u8, u32>(&readback_buffer.slice(..).get_mapped_range()).to_vec()
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn patch_mode_rays_cover_the_patch() {
+        // In patch mode the whole deposit texture maps onto the visible patch. The patch sits
+        // at u = 0.5 (the pre-#46 default), 90 degrees from the default laser entry: at the
+        // current default (u = 0.75) the patch centre IS the laser entry, so a chart at the
+        // wrong origin would go unnoticed. Measured on lavapipe, one frame: before #46 4.8%
+        // of texels lit and none in the left half; chart centred on the patch but the old
+        // beam-line spawn, 14%; rays starting over the whole patch, 90% (halves 87-93%).
+        // This checks that rays REACH the whole patch, not that branching is visible:
+        // straight, unscattered rays of the same length score 94.5%.
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let texels = one_frame_deposits(&device, &queue, |simulator| {
+            simulator.params.patch_center_u = 0.5;
+        });
+        let coverage = DepositCoverage::of(&texels, 512, 256);
+        println!("patch at u = 0.5, one frame: {coverage:?}");
+        assert!(coverage.lit > 0.6, "{coverage:?}");
+        for half in [
+            coverage.left_half,
+            coverage.right_half,
+            coverage.top_half,
+            coverage.bottom_half,
+        ] {
+            assert!(
+                half > 0.5,
+                "a half of the patch is mostly dark: {coverage:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn full_sphere_mode_deposits_around_the_laser_entry() {
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        // Default laser entry (0, 0, 1) is at u = 0.75, v = 0.5
+        // The patch centre (u = 0.5) differs from the laser entry, so this fails if the
+        // full-sphere chart is centred on the patch instead
+        let texels = one_frame_deposits(&device, &queue, |simulator| {
+            simulator.params.patch_enabled = 0;
+            simulator.params.patch_center_u = 0.5;
+        });
+        let (mut weight, mut weighted_u, mut weighted_v) = (0.0f64, 0.0f64, 0.0f64);
+        for (index, &texel) in texels.iter().enumerate() {
+            let (column, row) = (index % 512, index / 512);
+            weight += texel as f64;
+            weighted_u += texel as f64 * column as f64 / 511.0;
+            weighted_v += texel as f64 * row as f64 / 255.0;
+        }
+        assert!(weight > 0.0, "no deposits in full-sphere mode");
+        let (centroid_u, centroid_v) = (weighted_u / weight, weighted_v / weight);
+        println!("full-sphere deposit centroid: ({centroid_u:.3}, {centroid_v:.3})");
+        assert!(
+            (centroid_u - 0.75).abs() < 0.05 && (centroid_v - 0.5).abs() < 0.1,
+            "deposits centred at ({centroid_u}, {centroid_v}), not near the entry (0.75, 0.5)"
+        );
     }
 
     #[test]
