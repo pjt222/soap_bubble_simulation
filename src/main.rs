@@ -176,6 +176,7 @@ impl ApplicationHandler for App {
                     use winit::keyboard::{Key, NamedKey};
                     match event.logical_key {
                         Key::Named(NamedKey::Escape) => {
+                            log::info!("Escape pressed, exiting");
                             event_loop.exit();
                         }
                         Key::Named(NamedKey::F12) => {
