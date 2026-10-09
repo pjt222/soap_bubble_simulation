@@ -145,18 +145,24 @@ This gives:
 
 ### Interference Intensity
 
-For each color channel:
+The renderer evaluates the Airy (multi-beam) reflectance of a free-standing film at each
+sampled wavelength:
 
 ```
-I = (1 + cos(φ)) / 2
+R = F sin²(φ/2) / (1 + F sin²(φ/2)),   F = 4 R₀ / (1 − R₀)²
+φ = 2π · 2 n d cos(θ_t) / λ
 ```
 
-Where phase:
-```
-φ = 2π * 2nd*cos(θ_t) / λ + π
-```
+`R₀` is the single-surface Fresnel reflectance. The phase is the **geometric** round-trip phase
+only: the half-wave flip at the outer (air→film) reflection is already contained in the Airy
+derivation through `r₂₁ = −r₁₂`, so adding π would invert every fringe (issue #42). As `d → 0`
+the film turns black.
 
-The `+π` accounts for phase shift at the first (outer) interface.
+The two-beam approximation `I ∝ (1 + cos(φ + π)) / 2 = (1 − cos φ) / 2` is the low-reflectance
+limit of the same expression; there the `+π` is written explicitly because no `r₂₁ = −r₁₂` term
+carries it. `scripts/physics/thin_film_reference.py` tabulates the exact slab reflectance next to
+Airy per polarisation, the shipped convention (s/p averaged before Airy, exact only at normal
+incidence; issue #51) and the inverted `+π` form.
 
 ### Color Mapping
 

@@ -14,6 +14,13 @@ use wgpu::util::DeviceExt;
 /// Maximum number of scatterers supported
 pub const MAX_SCATTERERS: u32 = 2048;
 
+/// Spatial hash grid dimensions (must match WGSL constants)
+const GRID_SIZE_U: u32 = 10;
+const GRID_SIZE_V: u32 = 10;
+const GRID_CELL_SIZE: f32 = 0.1;
+/// Total cells + 1 for prefix-sum array
+const CELL_OFFSETS_LEN: usize = (GRID_SIZE_U * GRID_SIZE_V + 1) as usize;
+
 /// GPU-compatible scatterer data for particle-based ray deflection
 /// Represents micelle clusters that scatter light within the soap film
 #[repr(C)]
@@ -23,7 +30,7 @@ pub struct ScattererGPU {
     pub pos_u: f32,
     /// V position in UV space (0-1)
     pub pos_v: f32,
-    /// Scattering strength (signed: positive attracts, negative repels)
+    /// Scattering strength (signed: positive repels, negative attracts)
     pub strength: f32,
     /// Precomputed 1/(2σ²) for efficient Gaussian evaluation
     pub inv_sigma_sq: f32,
@@ -247,12 +254,16 @@ pub struct BranchedFlowSimulator {
     trace_pipeline: wgpu::ComputePipeline,
     /// Compute pipeline for clearing/fading
     clear_pipeline: wgpu::ComputePipeline,
+    /// Bind group layout (stored for rebinding when thickness buffer swaps)
+    bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group
     bind_group: wgpu::BindGroup,
     /// Parameters buffer
     params_buffer: wgpu::Buffer,
-    /// Scatterer buffer (storage buffer for particle positions/strengths)
+    /// Scatterer buffer (storage buffer for particle positions/strengths, sorted by grid cell)
     scatterer_buffer: wgpu::Buffer,
+    /// Cell offsets prefix-sum buffer for spatial hash (GRID_SIZE_U * GRID_SIZE_V + 1 entries)
+    cell_offsets_buffer: wgpu::Buffer,
     /// Current parameters
     pub params: BranchedFlowParams,
     /// Whether simulation is enabled
@@ -260,8 +271,8 @@ pub struct BranchedFlowSimulator {
     /// Texture dimensions
     tex_width: u32,
     tex_height: u32,
-    /// Dirty flag: whether scatterers need regeneration
-    /// Set when parameters change, cleared after upload
+    /// Dirty flag: whether scatterers need full regeneration
+    /// Set when structural parameters change (count, radius, patch), cleared after upload
     scatterers_dirty: bool,
     /// Cached scatterer parameters for dirty check
     last_num_scatterers: u32,
@@ -271,6 +282,8 @@ pub struct BranchedFlowSimulator {
     last_patch_center_u: f32,
     last_patch_center_v: f32,
     last_patch_half_size: f32,
+    /// Stored scatterers for temporal coherence (Brownian perturbation between regenerations)
+    current_scatterers: Vec<ScattererGPU>,
 }
 
 /// Create a branched flow texture buffer (called early in pipeline init)
@@ -320,7 +333,7 @@ impl BranchedFlowSimulator {
             ),
         });
 
-        // Create bind group layout
+        // Create bind group layout (stored for rebinding when thickness buffer swaps)
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Branched Flow Bind Group Layout"),
             entries: &[
@@ -357,9 +370,20 @@ impl BranchedFlowSimulator {
                     },
                     count: None,
                 },
-                // Scatterers array (read-only)
+                // Scatterers array (read-only, sorted by grid cell)
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Cell offsets prefix-sum array for spatial hash (read-only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -424,6 +448,14 @@ impl BranchedFlowSimulator {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create cell offsets prefix-sum buffer for spatial hash
+        let initial_offsets = vec![0u32; CELL_OFFSETS_LEN];
+        let cell_offsets_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Branched Flow Cell Offsets Buffer"),
+            contents: bytemuck::cast_slice(&initial_offsets),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Create bind group using the external caustic buffer
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Branched Flow Bind Group"),
@@ -445,15 +477,21 @@ impl BranchedFlowSimulator {
                     binding: 3,
                     resource: scatterer_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: cell_offsets_buffer.as_entire_binding(),
+                },
             ],
         });
 
         Self {
             trace_pipeline,
             clear_pipeline,
+            bind_group_layout,
             bind_group,
             params_buffer,
             scatterer_buffer,
+            cell_offsets_buffer,
             params,
             enabled: false,
             tex_width,
@@ -467,12 +505,50 @@ impl BranchedFlowSimulator {
             last_patch_center_u: params.patch_center_u,
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
+            current_scatterers: Vec::new(),
         }
     }
 
     /// Update parameters buffer
     pub fn update_params(&self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    /// Rebuild bind group with the current thickness buffer.
+    /// Must be called each frame when GPU drainage is active, because the drainage
+    /// simulator double-buffers and the "current" buffer alternates after each step.
+    pub fn rebuild_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        thickness_buffer: &wgpu::Buffer,
+        caustic_buffer: &wgpu::Buffer,
+    ) {
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Branched Flow Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: thickness_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: caustic_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.scatterer_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.cell_offsets_buffer.as_entire_binding(),
+                },
+            ],
+        });
     }
 
     /// Check if scatterer parameters have changed and mark dirty if so
@@ -497,40 +573,101 @@ impl BranchedFlowSimulator {
         }
     }
 
-    /// Update scatterer positions only if parameters have changed (dirty flag optimization)
-    /// Called each frame but only regenerates when necessary
+    /// Update scatterer positions with temporal coherence.
+    ///
+    /// When structural parameters change (count, radius, patch bounds), scatterers are
+    /// fully regenerated. Otherwise, small Brownian perturbations are applied each frame
+    /// so the branching pattern evolves smoothly like real micelle clusters drifting in
+    /// the film, rather than jumping discontinuously.
+    ///
+    /// Sorts scatterers by grid cell and builds prefix-sum cell_offsets for O(k) GPU lookup.
     pub fn update_scatterers(&mut self, queue: &wgpu::Queue, time: f32) {
         // Check if parameters changed since last upload
         self.check_scatterer_params_changed();
 
-        // Skip regeneration if scatterers are not dirty
-        if !self.scatterers_dirty {
-            return;
+        if self.scatterers_dirty {
+            // Full regeneration: structural parameters changed
+            let patch_bounds = if self.params.patch_enabled != 0 {
+                Some(PatchBounds {
+                    center_u: self.params.patch_center_u,
+                    center_v: self.params.patch_center_v,
+                    half_size: self.params.patch_half_size,
+                })
+            } else {
+                None
+            };
+
+            self.current_scatterers = generate_scatterers(
+                self.params.num_scatterers.min(MAX_SCATTERERS),
+                time,
+                self.params.scatterer_strength,
+                self.params.scatterer_radius,
+                patch_bounds,
+            );
+            self.scatterers_dirty = false;
+        } else if !self.current_scatterers.is_empty() {
+            // Brownian perturbation: smooth temporal evolution
+            // Each scatterer drifts ~0.001 UV units per frame (~3% of σ per frame).
+            // Over ~30 frames the pattern shifts noticeably but continuously.
+            let perturbation_scale = 0.001f32;
+
+            let (min_u, max_u, min_v, max_v) = if self.params.patch_enabled != 0 {
+                let hs = self.params.patch_half_size;
+                (
+                    (self.params.patch_center_u - hs).max(0.0),
+                    (self.params.patch_center_u + hs).min(1.0),
+                    (self.params.patch_center_v - hs).max(0.0),
+                    (self.params.patch_center_v + hs).min(1.0),
+                )
+            } else {
+                (0.0, 1.0, 0.0, 1.0)
+            };
+
+            for (i, s) in self.current_scatterers.iter_mut().enumerate() {
+                // Pseudo-random perturbation using time × frequency mixing
+                // Different frequencies per scatterer prevent correlated drift
+                let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
+                let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
+                s.pos_u = (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale)
+                    .clamp(min_u, max_u);
+                s.pos_v = (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale)
+                    .clamp(min_v, max_v);
+            }
+        } else {
+            return; // No scatterers to update
         }
 
-        // If patch mode is enabled, confine scatterers within the patch
-        let patch_bounds = if self.params.patch_enabled != 0 {
-            Some(PatchBounds {
-                center_u: self.params.patch_center_u,
-                center_v: self.params.patch_center_v,
-                half_size: self.params.patch_half_size,
-            })
-        } else {
-            None
-        };
+        // Sort scatterers by grid cell for true spatial hash
+        self.current_scatterers.sort_by_key(|s| {
+            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
+            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
+            v_cell * GRID_SIZE_U + u_cell
+        });
 
-        let scatterers = generate_scatterers(
-            self.params.num_scatterers.min(MAX_SCATTERERS),
-            time,
-            self.params.scatterer_strength,
-            self.params.scatterer_radius,
-            patch_bounds,
+        // Build prefix-sum cell_offsets: offsets[i] = start index of cell i in sorted array
+        let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
+        let mut cell_offsets = vec![0u32; total_cells + 1];
+        for s in &self.current_scatterers {
+            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
+            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
+            let cell_idx = (v_cell * GRID_SIZE_U + u_cell) as usize;
+            cell_offsets[cell_idx + 1] += 1;
+        }
+        for i in 1..=total_cells {
+            cell_offsets[i] += cell_offsets[i - 1];
+        }
+
+        // Upload sorted scatterers and cell offsets
+        queue.write_buffer(
+            &self.scatterer_buffer,
+            0,
+            bytemuck::cast_slice(&self.current_scatterers),
         );
-        // Only write the active scatterers (not the full buffer)
-        queue.write_buffer(&self.scatterer_buffer, 0, bytemuck::cast_slice(&scatterers));
-
-        // Clear dirty flag after upload
-        self.scatterers_dirty = false;
+        queue.write_buffer(
+            &self.cell_offsets_buffer,
+            0,
+            bytemuck::cast_slice(&cell_offsets),
+        );
     }
 
     /// Force scatterer regeneration on next update (e.g., for animation)
@@ -569,9 +706,15 @@ impl BranchedFlowSimulator {
         self.params.beam_dir = beam_dir.into();
     }
 
-    /// Run simulation step
+    /// Run simulation step with optional GPU timestamp profiling.
     // put id:'gpu_compute_branched_step', label:'Dispatch branched flow rays', input:'uniform_buffers_gpu.internal', output:'branched_flow_texture_gpu.internal'
-    pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, time: f32) {
+    pub fn step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        time: f32,
+        clear_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        trace_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         if !self.enabled {
             return;
         }
@@ -582,7 +725,7 @@ impl BranchedFlowSimulator {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Branched Flow Clear Pass"),
-                timestamp_writes: None,
+                timestamp_writes: clear_timestamps,
             });
             pass.set_pipeline(&self.clear_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -595,7 +738,7 @@ impl BranchedFlowSimulator {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Branched Flow Trace Pass"),
-                timestamp_writes: None,
+                timestamp_writes: trace_timestamps,
             });
             pass.set_pipeline(&self.trace_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);

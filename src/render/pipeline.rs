@@ -16,6 +16,7 @@ use crate::render::gpu_drainage::GPUDrainageSimulator;
 use crate::render::interference_lut::{
     LUT_ANGLE_SAMPLES, LUT_THICKNESS_SAMPLES, generate_interference_lut,
 };
+use crate::render::gpu_timing::{GpuPass, GpuProfiler};
 use crate::render::ui_state::{UiDisplayInfo, UiState};
 
 /// Bubble-specific uniform data
@@ -246,7 +247,7 @@ pub struct RenderPipeline {
     caustic_renderer: crate::render::caustics::CausticRenderer,
     // Ray-traced branched flow simulation
     branched_flow_simulator: BranchedFlowSimulator,
-    _branched_flow_buffer: wgpu::Buffer,
+    branched_flow_buffer: wgpu::Buffer,
     // Interference color lookup table texture (pre-computed thin-film colors)
     interference_lut_texture: wgpu::Texture,
     _interference_lut_sampler: wgpu::Sampler,
@@ -261,6 +262,8 @@ pub struct RenderPipeline {
     patch_vertex_buffer: wgpu::Buffer,
     patch_index_buffer: wgpu::Buffer,
     patch_num_indices: u32,
+    // GPU profiling
+    gpu_profiler: GpuProfiler,
 }
 
 impl RenderPipeline {
@@ -301,11 +304,23 @@ impl RenderPipeline {
                     .to_string()
             })?;
 
+        // Check if timestamp queries are supported (for GPU profiling)
+        let timestamp_supported = adapter
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY);
+        // timestamp_period will be obtained from queue after device creation
+        let mut timestamp_period = 1.0f32;
+        let required_features = if timestamp_supported {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
+
         // Request device and queue
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     label: None,
                     memory_hints: wgpu::MemoryHints::default(),
@@ -689,11 +704,11 @@ impl RenderPipeline {
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
 
-        // Initialize GPU drainage simulator
+        // Initialize GPU drainage simulator (256×128 grid for accurate GRIN gradients)
         let gpu_drainage = GPUDrainageSimulator::new(
             &device, 500e-9, // Initial thickness: 500nm
-            128,    // Grid width (phi)
-            64,     // Grid height (theta)
+            256,    // Grid width (phi)
+            128,    // Grid height (theta)
         );
 
         // Initialize foam renderer
@@ -716,6 +731,12 @@ impl RenderPipeline {
             gpu_drainage.current_thickness_buffer(),
             &branched_flow_buffer,
         );
+
+        // Initialize GPU profiler (no-op if TIMESTAMP_QUERY not supported)
+        if timestamp_supported {
+            timestamp_period = queue.get_timestamp_period();
+        }
+        let gpu_profiler = GpuProfiler::new(&device, timestamp_supported, timestamp_period);
 
         // Create patch mesh for focused branched flow viewing
         let patch_center_u = 0.5;
@@ -802,7 +823,7 @@ impl RenderPipeline {
             shared_wall_renderer,
             caustic_renderer,
             branched_flow_simulator,
-            _branched_flow_buffer: branched_flow_buffer,
+            branched_flow_buffer,
             interference_lut_texture,
             _interference_lut_sampler: interference_lut_sampler,
             last_refractive_index: bubble_uniform.refractive_index,
@@ -814,6 +835,7 @@ impl RenderPipeline {
             patch_vertex_buffer,
             patch_index_buffer,
             patch_num_indices,
+            gpu_profiler,
         })
     }
 
@@ -1378,6 +1400,9 @@ impl RenderPipeline {
                 label: Some("Render Encoder"),
             });
 
+        // Poll GPU profiler for previous frame's results (non-blocking)
+        self.gpu_profiler.poll_results(&self.device);
+
         // put id:'gpu_compute_dispatch', label:'Dispatch compute shaders', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
         if self.gpu_drainage_enabled {
             self.gpu_drainage.step(&mut encoder, self.animation.last_dt());
@@ -1390,12 +1415,30 @@ impl RenderPipeline {
 
         // Branched flow compute pass (ray tracing through film)
         if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
-            // Update scatterer positions (creates animated particle distribution)
+            // 1. Update params first (stages write for next submission)
+            self.branched_flow_simulator.update_params(&self.queue);
+            // 2. Update scatterers (sorted by grid cell with prefix-sum offsets)
             self.branched_flow_simulator
                 .update_scatterers(&self.queue, self.bubble_uniform.film_time);
-            self.branched_flow_simulator
-                .step(&mut encoder, self.bubble_uniform.film_time);
-            self.branched_flow_simulator.update_params(&self.queue);
+            // 3. Rebuild bind group with current thickness buffer (drainage double-buffers)
+            self.branched_flow_simulator.rebuild_bind_group(
+                &self.device,
+                self.gpu_drainage.current_thickness_buffer(),
+                &self.branched_flow_buffer,
+            );
+            // 4. Dispatch compute passes with GPU timing
+            let clear_ts = self
+                .gpu_profiler
+                .compute_pass_timestamps(GpuPass::BranchedFlowClear);
+            let trace_ts = self
+                .gpu_profiler
+                .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
+            self.branched_flow_simulator.step(
+                &mut encoder,
+                self.bubble_uniform.film_time,
+                clear_ts,
+                trace_ts,
+            );
         }
 
         // Update egui buffers
@@ -1545,7 +1588,13 @@ impl RenderPipeline {
                 .prepare_capture(&self.device, &self.config, &mut encoder, &output.texture);
         }
 
+        // Resolve GPU timestamps before finishing the encoder
+        self.gpu_profiler.resolve(&mut encoder);
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Begin async readback of GPU timing data
+        self.gpu_profiler.begin_readback();
 
         if self.frame_exporter.should_capture() {
             self.frame_exporter
@@ -1647,6 +1696,11 @@ impl RenderPipeline {
             ],
             has_drainage_sim: self.drainage_simulator.is_some(),
             foam_stats: self.foam_stats(),
+            gpu_timing: if self.gpu_profiler.results.total_ms() > 0.0 {
+                Some(self.gpu_profiler.results.clone())
+            } else {
+                None
+            },
         }
     }
 

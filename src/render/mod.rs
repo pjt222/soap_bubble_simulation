@@ -21,6 +21,7 @@ pub mod caustics;
 pub mod foam_renderer;
 pub mod frame_exporter;
 pub mod gpu_drainage;
+pub mod gpu_timing;
 pub mod headless;
 pub mod interference_lut;
 pub mod pipeline;

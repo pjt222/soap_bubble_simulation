@@ -51,24 +51,11 @@ fn thin_film_interference(
     // 7-point spectral sampling
     const WAVELENGTHS: [f32; 7] = [400.0, 450.0, 500.0, 550.0, 600.0, 650.0, 700.0];
 
-    // Transmission angle from Snell's law
-    let cos_theta_t = snells_law(cos_theta, n_film);
-
-    // Fresnel reflectance
-    let fresnel = fresnel_unpolarized(cos_theta, cos_theta_t, 1.0, n_film);
-
-    // Optical path
-    let optical_path = 2.0 * n_film * thickness_nm * cos_theta_t;
-
     // Accumulate XYZ tristimulus
     let mut xyz = [0.0f32; 3];
 
     for wavelength in WAVELENGTHS {
-        // Phase with π shift
-        let phase = 2.0 * PI * optical_path / wavelength + PI;
-
-        // Airy formula
-        let airy_intensity = airy_interference(phase, fresnel);
+        let airy_intensity = film_reflectance(thickness_nm, cos_theta, n_film, wavelength);
 
         // CIE color matching
         let cie = cie_color_matching(wavelength);
@@ -117,6 +104,23 @@ fn fresnel_unpolarized(cos_theta_i: f32, cos_theta_t: f32, n1: f32, n2: f32) -> 
 
     // Average
     (r_s * r_s + r_p * r_p) * 0.5
+}
+
+/// Reflectance of a free-standing film (air | film | air) at one wavelength,
+/// for light arriving from air at incidence `cos_theta_i`.
+///
+/// The Airy phase is the geometric round-trip phase only,
+/// `delta = 4 pi n d cos(theta_t) / lambda`, with `theta_t` the refracted angle
+/// inside the film. The half-wave flip at the air->film reflection is already
+/// contained in the Airy derivation through `r21 = -r12`; adding pi here would
+/// invert every fringe (issue #42). The s/p Fresnel reflectances are averaged
+/// before the Airy formula, which is exact at normal incidence and an
+/// approximation at oblique incidence (optics-07, issue #51).
+fn film_reflectance(thickness_nm: f32, cos_theta_i: f32, n_film: f32, wavelength_nm: f32) -> f32 {
+    let cos_theta_t = snells_law(cos_theta_i, n_film);
+    let surface_reflectance = fresnel_unpolarized(cos_theta_i, cos_theta_t, 1.0, n_film);
+    let phase = 4.0 * PI * n_film * thickness_nm * cos_theta_t / wavelength_nm;
+    airy_interference(phase, surface_reflectance)
 }
 
 /// Airy formula for interference intensity
@@ -172,13 +176,132 @@ mod tests {
 
     #[test]
     fn test_thin_film_produces_colors() {
-        // At 500nm thickness, should produce some color
+        // At 500 nm and cos(theta_i) = 0.9 the reflectance maxima sit where
+        // 2 n d cos(theta_t) = (m + 1/2) lambda, i.e. m = 2 at ~502 nm, so the
+        // colour is green-dominant. Saturated interference colours can fall
+        // slightly outside the sRGB gamut (a small negative channel); the LUT
+        // packing in generate_interference_lut clamps them.
         let rgb = thin_film_interference(500.0, 0.9, 1.33, 1.0);
-        assert!(rgb[0] >= 0.0 && rgb[0] <= 1.0);
-        assert!(rgb[1] >= 0.0 && rgb[1] <= 1.0);
-        assert!(rgb[2] >= 0.0 && rgb[2] <= 1.0);
-        // Should have some intensity
-        assert!(rgb[0] + rgb[1] + rgb[2] > 0.01);
+        assert!(
+            rgb.iter()
+                .all(|channel| channel.is_finite() && *channel <= 1.0),
+            "{rgb:?}"
+        );
+        assert!(
+            rgb[1] > rgb[0] && rgb[1] > rgb[2],
+            "expected green-dominant colour: {rgb:?}"
+        );
+        let in_gamut_sum: f32 = rgb.iter().map(|channel| channel.clamp(0.0, 1.0)).sum();
+        assert!(in_gamut_sum > 0.01, "{rgb:?}");
+    }
+
+    /// Exact free-standing slab reflectance at normal incidence,
+    /// |(r12 + r23 e^{i delta}) / (1 + r12 r23 e^{i delta})|^2 with r23 = -r12,
+    /// evaluated with explicit complex arithmetic so it does not share the
+    /// Airy closed form under test.
+    fn exact_slab_reflectance_normal_incidence(
+        thickness_nm: f64,
+        n_film: f64,
+        wavelength_nm: f64,
+    ) -> f64 {
+        let r12 = (1.0 - n_film) / (1.0 + n_film);
+        let r23 = -r12;
+        let delta = 4.0 * std::f64::consts::PI * n_film * thickness_nm / wavelength_nm;
+        let numerator_re = r12 + r23 * delta.cos();
+        let numerator_im = r23 * delta.sin();
+        let denominator_re = 1.0 + r12 * r23 * delta.cos();
+        let denominator_im = r12 * r23 * delta.sin();
+        (numerator_re * numerator_re + numerator_im * numerator_im)
+            / (denominator_re * denominator_re + denominator_im * denominator_im)
+    }
+
+    #[test]
+    fn test_film_reflectance_matches_exact_slab_at_normal_incidence() {
+        let n_film = 1.33_f32;
+        for wavelength_nm in [400.0_f32, 450.0, 532.0, 650.0, 700.0] {
+            for thickness_step in 0..=400 {
+                let thickness_nm = thickness_step as f32 * 5.0;
+                let computed = film_reflectance(thickness_nm, 1.0, n_film, wavelength_nm);
+                let exact = exact_slab_reflectance_normal_incidence(
+                    thickness_nm as f64,
+                    n_film as f64,
+                    wavelength_nm as f64,
+                );
+                assert!(
+                    (computed as f64 - exact).abs() < 2e-5,
+                    "d={thickness_nm} nm, lambda={wavelength_nm} nm: airy={computed}, exact={exact}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_film_reflectance_vanishes_for_zero_thickness() {
+        // A film much thinner than the wavelength reflects almost nothing (black film).
+        for cos_theta_i in [1.0_f32, 0.5] {
+            for wavelength_nm in [400.0_f32, 550.0, 700.0] {
+                assert!(film_reflectance(0.0, cos_theta_i, 1.33, wavelength_nm) < 1e-7);
+            }
+        }
+        let rgb = thin_film_interference(0.0, 1.0, 1.33, 1.0);
+        assert!(
+            rgb.iter().all(|channel| channel.abs() < 1e-6),
+            "zero-thickness film should be black: {rgb:?}"
+        );
+    }
+
+    #[test]
+    fn test_film_reflectance_extremes_at_quarter_and_half_wave() {
+        let n_film = 1.33_f32;
+        let wavelength_nm = 532.0_f32;
+        let surface_reflectance = fresnel_unpolarized(1.0, 1.0, 1.0, n_film);
+        let peak = 4.0 * surface_reflectance / (1.0 + surface_reflectance).powi(2);
+
+        let quarter_wave_nm = wavelength_nm / (4.0 * n_film);
+        let at_quarter_wave = film_reflectance(quarter_wave_nm, 1.0, n_film, wavelength_nm);
+        assert!(
+            (at_quarter_wave - peak).abs() < 1e-5,
+            "quarter wave: {at_quarter_wave} vs peak {peak}"
+        );
+
+        let at_half_wave = film_reflectance(2.0 * quarter_wave_nm, 1.0, n_film, wavelength_nm);
+        assert!(
+            at_half_wave < 1e-5,
+            "half wave should be dark: {at_half_wave}"
+        );
+    }
+
+    #[test]
+    fn test_film_reflectance_peaks_at_oblique_quarter_wave() {
+        // At oblique incidence the first maximum sits at d = lambda / (4 n cos(theta_t)),
+        // with theta_t the refracted angle from Snell's law. This is fixed by the phase
+        // alone, so it holds whichever way the s/p reflectances are averaged.
+        let n_film = 1.33_f32;
+        let wavelength_nm = 532.0_f32;
+        for cos_theta_i in [0.8_f32, 0.5, 0.3] {
+            let sin_theta_t = (1.0 - cos_theta_i * cos_theta_i).sqrt() / n_film;
+            let cos_theta_t = (1.0 - sin_theta_t * sin_theta_t).sqrt();
+            let quarter_wave_nm = wavelength_nm / (4.0 * n_film * cos_theta_t);
+            let at_peak = film_reflectance(quarter_wave_nm, cos_theta_i, n_film, wavelength_nm);
+            for offset_nm in [-8.0_f32, 8.0] {
+                let beside = film_reflectance(
+                    quarter_wave_nm + offset_nm,
+                    cos_theta_i,
+                    n_film,
+                    wavelength_nm,
+                );
+                assert!(
+                    at_peak > beside,
+                    "cos_i={cos_theta_i}: R({quarter_wave_nm} nm)={at_peak} not above R(+{offset_nm})={beside}"
+                );
+            }
+            let surface_reflectance = fresnel_unpolarized(cos_theta_i, cos_theta_t, 1.0, n_film);
+            let peak = 4.0 * surface_reflectance / (1.0 + surface_reflectance).powi(2);
+            assert!(
+                (at_peak - peak).abs() < 1e-5,
+                "cos_i={cos_theta_i}: {at_peak} vs {peak}"
+            );
+        }
     }
 
     #[test]

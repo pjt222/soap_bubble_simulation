@@ -1,0 +1,232 @@
+{
+ "context": "Generated from the 2026-10-09 workflow audit: `docs/audit-2026-10-09.md` and `docs/audit-2026-10-09-findings.json` (branch `audit/2026-10-09`). Verdicts: `confirmed` / `partially-confirmed` = re-checked by a read-only adversarial verifier (code reading and hand re-derivation, no execution); `unverified` = not selected for verification. Numeric replica results were run by the finding auditor. Performance figures are estimates unless marked measured; no hardware GPU timings exist yet (#38). Bodies rendered with `scripts/audit/findings.py`.",
+ "groups": [
+  {
+   "key": "airy-phase",
+   "kind": "issue",
+   "title": "[CRITICAL] Optics: pi phase counted twice in Airy reflectance inverts every interference fringe",
+   "labels": ["bug", "physics", "rendering", "critical"],
+   "summary": "The interference LUT generator, both bubble shaders and the CPU reference add pi (lambda/2) to the phase before evaluating the Airy reflectance `F sin^2(phi/2) / (1 + F sin^2(phi/2))`. For a free-standing film (air|film|air) the Airy form already contains the reflection phase flip through `r21 = -r12`, so the extra pi turns `sin^2` into `cos^2`: every fringe is inverted. A zero-thickness film is maximally bright instead of black, and a quarter-wave film is black instead of brightest. This affects the default render on every frame.\n\nLead re-check (exact complex-amplitude slab reflectance vs the code's formula, n = 1.33, lambda = 532 nm):\n\n| d (nm) | exact | code (+pi) | without +pi |\n|---|---|---|---|\n| 0 | 0.00000 | 0.07711 | 0.00000 |\n| 100 | 0.07711 | 0.00000 | 0.07711 |\n| 200 | 0.00000 | 0.07711 | 0.00000 |\n\n`git log -S` shows the shader's `wavelength + pi` arriving in 4fef328 (2026-01-21); it was carried into the LUT in 21747d7. A hard 30 nm black-film cutoff in the shaders hides the d -> 0 symptom, and existing tests check only value ranges.",
+   "acceptance": [
+    "`+ PI` removed at `src/render/interference_lut.rs:68`, `+ pi` removed at `src/render/shaders/bubble.wgsl:464` and `src/render/shaders/bubble_instanced.wgsl:208`, and the `+ lambda/2` removed from the path difference fed to the Airy formula in `src/physics/interference.rs`",
+    "Unit tests assert Airy reflectance is 0 at d = 0 and maximal at d = lambda / (4 n cos(theta_t)), and that the implementation matches an exact complex-amplitude slab reference",
+    "Golden images in `tests/golden` regenerated and visually reviewed",
+    "All tests pass"
+   ],
+   "findings": ["optics-01", "geomfoam-03", "sota-02"]
+  },
+  {
+   "key": "gpu-drainage",
+   "kind": "issue",
+   "title": "[HIGH] Drainage: GPU solver never advances (dt not uploaded, f32 underflow, stale accessor)",
+   "labels": ["bug", "physics"],
+   "summary": "`GPUDrainageSimulator::step` computes `step_dt` but only adds it to `current_time`; `set_dt` has no callers, so the shader integrates with the default `dt = 0.001` s forever. At h = 500 nm the per-step change is about 0.007 ulp in f32 and a uniform initial field has zero Laplacian, so the thickness buffer stays exactly uniform. The time-scale slider changes only the displayed clock (about 167x off at 60 fps). Branched-flow GRIN bending and the caustics pass therefore read a flat field. Related defects: the GPU pole rows are frozen at their initial value while the comment says they are averaged, and `current_thickness_buffer()` returns the input of the last sub-step (one sub-step stale). Lead-confirmed: `rg 'set_dt\\('` finds only the definition at `src/render/gpu_drainage.rs:391`.",
+   "acceptance": [
+    "`params.dt` written every frame (`queue.write_buffer`) with a CFL-limited sub-step count; `current_time` advances by the time actually integrated",
+    "Per-step thickness increments are representable in f32 (store the deviation from h0 or a nondimensional thickness), or the initial field is non-uniform",
+    "Pole rows handled by a zero-flux finite-volume form or ring averaging, with comments matching the code",
+    "The thickness accessor returns the buffer written last; the caustic bind group uses the same current buffer",
+    "A headless GPU test (may be `#[ignore]`) asserts the thickness field changes after N steps and stays finite and non-negative"
+   ],
+   "findings": ["drainage-02", "gpuperf-03", "cpuperf-05", "sota-04", "drainage-06", "drainage-08", "cpuperf-07", "branched-12"]
+  },
+  {
+   "key": "cpu-drainage",
+   "kind": "issue",
+   "title": "[HIGH] Drainage: CPU solver instability, non-conservative PDE, unbounded TFE decay, config not propagated",
+   "labels": ["bug", "physics"],
+   "summary": "Enabling CPU drainage (off by default) runs one forward-Euler step per frame with dt = frame_dt x 100, about 1.67 s at 60 fps, roughly 14x over the explicit phi-diffusion limit at the first ring off the pole (0.115 s); numpy and Rust replicas blow up near both poles within about 25 frames. The gravity term `-rho g h^3 / (3 eta) * sin(theta)` is a flux used as a rate: wrong units, a mass sink everywhere, and symmetric about the equator, so the bottom never thickens. The 'TFE ratio 0.85 (Monier 2025)' is applied as unbounded exponential decay that goes negative for dt > 13.3 s. The Marangoni coupling is one-signed with inconsistent units. `SimulationConfig` and CLI parameters never reach either drainage solver. At 500 nm the physical terms barely act, so the visible dynamics come from the ad-hoc TFE sink. The GPU solver shares the PDE form, so fixes should land in both (see {#gpu-drainage}).",
+   "acceptance": [
+    "Frame dt clamped and integrated with CFL-limited sub-steps, or the phi-diffusion treated implicitly (periodic tridiagonal solve per latitude ring)",
+    "Gravity drainage in conservative finite-volume flux form on sin-weighted theta faces with zero flux through the poles; a test asserts mass conservation",
+    "Thin-film elements implemented as a bounded relaxation towards ratio x adjacent thickness, stable for any dt",
+    "Marangoni term in consistent SI units, or explicitly documented as a stylised effect",
+    "`SimulationConfig` (radius, thickness, fluid parameters) reaches both drainage solvers",
+    "A test runs the CPU solver for 1000 frames at default settings at 60 fps and 10 fps and asserts finite, non-negative thickness"
+   ],
+   "findings": ["drainage-01", "cpuperf-06", "drainage-03", "drainage-04", "drainage-07", "sota-05", "drainage-05", "cpuperf-10", "drainage-12"]
+  },
+  {
+   "key": "grin-units",
+   "kind": "issue",
+   "title": "[HIGH] Branched flow: GRIN bending is dead (thickness_scale unused) and caustics output a constant",
+   "labels": ["bug", "physics"],
+   "summary": "`thickness_scale` (1e6) is declared at `src/render/shaders/branched_flow_compute.wgsl:38` and set at `src/render/branched_flow.rs:128` but never read in the shader. Gradients are taken on metre-valued thickness (about 5e-7), so a full ray deflects by about 2e-4 degrees: all visible branching comes from the scatterers, and the 'GRIN bending' slider effectively scales the particle force. `caustics_compute.wgsl` has the same unit bug and outputs 2.0 everywhere. Physically the GRIN coefficient is grad ln n_eff(d) for the slab waveguide, which varies about 40x with thickness. Further sampling defects: u and v differences weighted 1:1 although u spans 2 pi and v spans pi, the phi wrap is ignored, the sampler's phi grid convention differs from the drainage grid, and the seam texels are double-counted. Lead-confirmed: `thickness_scale` appears in the shader only in the struct declaration. Without {#gpu-drainage} fixed, the field is flat anyway.",
+   "acceptance": [
+    "Thickness sampled in consistent units (apply `thickness_scale` or store nm) and `bend_strength` retuned",
+    "Ray force uses grad ln n_eff(d) from a CPU-built lookup table, or a documented scaling at the base thickness",
+    "Gradient uses the sphere metric: d/du divided by (2 pi sin theta), d/dv divided by pi",
+    "Thickness sampling wraps phi periodically with the drainage grid's convention (delta phi = 2 pi / W); seam texels are not double-counted",
+    "`caustics_compute.wgsl` uses the same units and its output varies with the thickness field",
+    "A CPU replica or headless test shows non-zero GRIN deflection for a known gradient"
+   ],
+   "findings": ["branched-01", "branched-02", "sota-06", "branched-14", "branched-08", "branched-11", "drainage-11", "geomfoam-12"]
+  },
+  {
+   "key": "patch-view",
+   "kind": "issue",
+   "title": "[HIGH] Branched flow: patch view renders 180 degrees away from the simulated patch",
+   "labels": ["bug", "rendering"],
+   "summary": "`SpherePatch::generate_mesh_indexed` maps u to azimuth with phi = 2 pi u (u = 0.5 at -x), while both shaders use u = (atan2(z, x) + pi) / (2 pi) (u = 0.5 at +x). The two conventions are half a turn apart, so the default-on patch view never shows branched flow; full-sphere mode is unaffected. Lead-confirmed: `src/physics/geometry.rs:411` vs `src/render/shaders/bubble.wgsl:236-240`. Hidden behind it: the patch-mode spawn offset uses a chord projection instead of the gnomonic inverse and the default patch centre lies on the entry point's gnomonic horizon, so only a thin strip would light up once the 180-degree bug is fixed. The gnomonic chart also distorts deposit density off-centre, the beam direction degenerates at some entry points, and the deformation slider does not regenerate the patch mesh.",
+   "acceptance": [
+    "One longitude convention shared by mesh generation and shaders; a unit test pushes patch-mesh normals through the shader UV mapping and asserts they land inside the patch window",
+    "Patch-mode spawning uses the gnomonic inverse or a chart centred on the patch, and the default entry point and patch are consistent so the patch is substantially lit",
+    "(Optional) exponential-map propagation on the sphere; this changes the propagation loop body, so test with small ray counts on a hardware adapter first",
+    "Beam direction defined in the local tangent frame, with no degenerate entry points",
+    "`set_deformation` regenerates the patch mesh"
+   ],
+   "findings": ["geomfoam-01", "branched-03", "gpuperf-07", "branched-04", "branched-13", "cpuperf-12"]
+  },
+  {
+   "key": "ray-sampling",
+   "kind": "issue",
+   "title": "[HIGH] Branched flow: sampling quality (biased scatterer drift, frame-invariant seeds, pinned step, deposit truncation)",
+   "labels": ["bug", "physics", "performance"],
+   "summary": "The scatterer 'Brownian' perturbation is a sign-preserving `fract()` hash of `film_time` with a mean of -0.0005 UV per frame, so scatterers pile into the patch corner within about 10 s (or the pole and seam in full-sphere mode), emptying the region the beam crosses; with the film paused they drift ballistically. Ray seeds depend only on `ray_idx`, so the 0.85 fade re-traces identical paths (6.7x brightness, no new samples), and `hash21` yields about 26% duplicate seeds at 65,536 rays. The adaptive step is pinned at its 0.3 floor in 97-99% of steps, which cuts range 3.3x. The x64 fixed-point deposits lose 53-62% of their energy to truncation. The spatial hash truncates forces when the radius slider exceeds about 0.033. These directly undercut the uncommitted 32K -> 8K ray default change, whose comments claim accumulation fills in density and adaptive stepping extends range.",
+   "acceptance": [
+    "Scatterer perturbation is zero-mean (seeded RNG or frame counter), does not drift while paused, and wraps u in full-sphere mode",
+    "Ray seeds vary per frame through an integer hash (e.g. PCG of `ray_idx ^ frame * 0x9E3779B9`); a test shows no duplicate seeds at 64K rays",
+    "Step size controlled by turning angle (or step/range retuned) and falloff applied per unit length; this touches the loop body, so test small first on a hardware adapter",
+    "Deposit fixed-point scale raised (>= 1024) or stochastic rounding used; a test ties the encode and decode constants together",
+    "Spatial-hash search radius covers 3 sigma_max, or the radius slider is clamped",
+    "Default ray count and its code comments reflect the corrected behaviour"
+   ],
+   "findings": ["branched-09", "branched-06", "cpuperf-03", "branched-05", "gpuperf-05", "branched-07", "gpuperf-02", "branched-10"]
+  },
+  {
+   "key": "stability",
+   "kind": "issue",
+   "title": "[HIGH] Stability: wgpu validation panics, local lib-suite segfault, red CI",
+   "labels": ["bug", "testing"],
+   "summary": "Two wgpu validation panics are reachable from the UI or on real GPUs, and the test and CI infrastructure currently cannot signal regressions: locally a driver crash aborts the whole lib test binary, and CI has been red on Clippy and Format since March.",
+   "lead_findings": [
+    "[HIGH] Local `cargo test` aborts with SIGSEGV in `render::headless::tests::test_headless_pipeline_creation` (`src/render/headless.rs:516`, not `#[ignore]`d) whenever the Mesa Dozen Vulkan ICD is visible. Measured by ICD bisection: Dozen only -> exit 139; lavapipe only or no Vulkan ICD -> pass; GL forced to llvmpipe -> still exit 139, so the crash is in the wgpu-24 Vulkan path over Dozen (debug build). One crash kills all 136 lib tests. Workaround: `scripts/test-local.sh` (forces the lavapipe ICD). Probe: `scripts/gpu/probe-adapters.sh`.",
+    "[MEDIUM] CI red since 2026-03-10: on the last `main` push (run 22917111076) and on PR #40 (run 32022056203), Check and Test pass but Clippy and Format fail. Local `cargo clippy --all-targets` reports 7 warnings."
+   ],
+   "acceptance": [
+    "`set_msaa_samples` rebuilds every pipeline (bubble, instanced, wall, caustic) for the new sample count",
+    "`GpuProfiler` skips resolve and copy while a readback is pending (or rotates 2-3 readback buffers) and resolves only queries written this frame, or is replaced by the `wgpu-profiler` crate",
+    "(Optional) an `on_uncaptured_error` handler logs instead of panicking in release builds",
+    "The headless GPU test is gated (`#[ignore]` or an adapter allow-list) so a driver crash cannot abort the lib suite",
+    "CI green: `cargo fmt` applied and clippy warnings fixed"
+   ],
+   "findings": ["cpuperf-01", "cpuperf-02", "gpuperf-04"]
+  },
+  {
+   "key": "foam",
+   "kind": "issue",
+   "title": "[HIGH] Foam: integrator stability and physics model (inertia, buoyancy, Plateau, wall curvature, sampling)",
+   "labels": ["bug", "physics"],
+   "summary": "`FoamSimulator::step` treats drag, contact springs and adhesion explicitly with film-only mass (19-37x too little inertia) and water viscosity. At frame dt it is unstable, so bubbles jitter 1.67 mm per frame at the 0.1 m/s velocity clamp indefinitely. Buoyancy omits the enclosed gas, so net gravity clamps to zero for R > 1.25 mm. Plateau's laws are claimed but not enforced (contact equilibrium gives about 36/162 degree angles). The shared-wall curvature radius is half the physical value and bulges into the smaller bubble. Size distributions are clamped rather than truncated (up to 64% of radii pile up on the bounds), the 'HCP' generator has coordination 6, and gravity deformation is not volume-conserving, with dead Bond-number helpers.",
+   "acceptance": [
+    "Physical effective mass (film + enclosed gas + added mass), air viscosity, implicit drag, `exp(-c dt)` damping and smooth adhesion; a test shows a perturbed cluster relaxes to rest without hitting the velocity clamp",
+    "Net weight `m_film * g` acts downward; test",
+    "Wall radius `1 / |1/Ra - 1/Rb|` with the apex toward the larger bubble; test",
+    "Plateau geometry enforced, or the stylised contact model documented (ties into #16)",
+    "Size sampling truncates by rejection or inverse CDF; random positions use uniform sphere sampling",
+    "HCP lattice has coordination 12 (test) and `spacing` means nearest-neighbour distance for every lattice",
+    "Deformation is volume-conserving or documented as stylised; dead Bond-number code is removed or used"
+   ],
+   "findings": ["geomfoam-02", "geomfoam-04", "geomfoam-05", "geomfoam-06", "geomfoam-08", "geomfoam-09", "geomfoam-11"]
+  },
+  {
+   "key": "spectral-lut",
+   "kind": "issue",
+   "title": "[MEDIUM] Optics: interference LUT precision, CIE fit and spectral sampling",
+   "labels": ["enhancement", "physics", "rendering"],
+   "summary": "Once the phase is fixed ({#airy-phase}), colour accuracy is limited by how the LUT is built. 8-bit linear storage of values <= 0.04 leaves about 9-10 code values on the normal-incidence row (contouring). The CIE Gaussian fit drops Wyman 2013's asymmetric sigmas and no illuminant is applied, so a flat spectrum renders orange (1, 0.76, 0.43). Seven samples at 50 nm alias (Delta E 6.5 at 500 nm, 19-31 above about 1.1 um). The foam shader evaluates its own 7-sample spectrum per fragment instead of sampling the LUT. Belcour & Barla 2017 is the state-of-the-art reference for antialiased iridescence.",
+   "acceptance": [
+    "LUT stored as `Rgba16Float` (or normalised / sRGB-encoded 8-bit with rounding)",
+    "LUT built from tabulated CIE 1931 2-degree CMFs weighted by D65 at <= 5 nm steps (or the restored asymmetric Wyman fit plus D65); a white reflector renders neutral (test)",
+    "LUT lookups address texel centres",
+    "`bubble_instanced.wgsl` samples the shared LUT instead of the inline 7-sample loop"
+   ],
+   "findings": ["optics-02", "optics-03", "optics-04", "sota-03", "optics-11", "optics-12", "gpuperf-12"]
+  },
+  {
+   "key": "shading",
+   "kind": "issue",
+   "title": "[MEDIUM] Rendering: shading-model defects (drainage gradient, wall optics, compositing, export colours)",
+   "labels": ["bug", "rendering"],
+   "summary": "Independent of the phase bug ({#airy-phase}). The procedural drainage gradient is upside down: the film is thinnest at the bottom with +Y up, while the code comment and README say the top drains faster. `wall.wgsl` renders the Airy transmission term as reflected colour, so walls come out near-white. Polarisation is averaged before the Airy formula instead of after (up to 7.7% error at oblique angles). A hard 30 nm black-film cutoff creates a brightness step and becomes redundant once the phase is fixed. Compositing is opacity-style alpha instead of reflection plus transmission. Screenshots swap R and B unconditionally. The instanced-bubble normal correction cancels itself.",
+   "acceptance": [
+    "Drainage gradient uses `(1 + normal.y)` (or samples the drainage buffer) in both bubble shaders; code comment and README agree",
+    "`wall.wgsl` uses the reflectance form, ideally via the shared LUT",
+    "The LUT generator evaluates Airy separately for Rs and Rp, then averages",
+    "The 30 nm cutoff is removed or turned into an explicit rupture/opacity effect",
+    "Compositing choice (physical premultiplied R/T vs artistic alpha) made and documented",
+    "Screenshot R/B swap applied only for BGRA surface formats",
+    "Instanced-bubble normal transform correct for non-uniform scale, or simplified with a comment"
+   ],
+   "findings": ["optics-05", "geomfoam-07", "optics-07", "optics-08", "optics-09", "optics-06", "geomfoam-10"]
+  },
+  {
+   "key": "perf",
+   "kind": "issue",
+   "title": "[MEDIUM] Performance: branched-flow force field, recording stalls, bind-group caching, build profiles",
+   "labels": ["performance", "enhancement"],
+   "summary": "All figures are estimates; there are no hardware timings yet (#38). Ray-step cost is dominated by the scatterer loop: about 163-170 scatterers are visited per step in patch mode (the docs say 10-30). Precomputing a per-frame force-field grid (GRIN gradient plus scatterer forces) is expected to cut per-step work about 10-25x. Recording mode calls `poll(Wait)` and joins the previous PNG encode every captured frame. The per-frame bind-group rebuild can be replaced by two cached groups, and drainage's 10 passes can share one compute pass. Dev builds leave dependencies unoptimised. CPU-side per-frame work was measured at 17 us (scatterer perturb + sort + prefix-sum, n = 400), so no rayon work is justified yet. Measurement is blocked on {#stability} (GpuProfiler race) and on a hardware adapter (#38).",
+   "acceptance": [
+    "A force-field compute pass runs before the trace and the trace samples it; this changes the loop body, so test with small ray counts on a hardware adapter first; before/after measured with GpuProfiler",
+    "Recording uses 2-3 staging buffers and a persistent encoder thread with fast PNG compression",
+    "Two cached bind groups replace the per-frame rebuild; drainage sub-steps share one compute pass",
+    "`[profile.dev.package.\"*\"] opt-level = 3` added; release-profile choice (fat vs thin LTO) measured"
+   ],
+   "findings": ["gpuperf-01", "cpuperf-04", "cpuperf-08", "cpuperf-09"]
+  },
+  {
+   "key": "docs",
+   "kind": "issue",
+   "title": "[MEDIUM] Docs: documentation drift across CLAUDE.md, physics docs and roadmap",
+   "labels": ["documentation"],
+   "summary": "Stale documentation causes real wasted work. `CLAUDE.md` describes GRIN bending, adaptive dt and patch deposit gains the code does not deliver, and states O(k) lookup with k about 10-30 where patch mode visits about 170. The 'GPU freeze - DO NOT RETRY' note is most likely an llvmpipe workload artefact (unverified). `docs/physics-reference.md` gives a dimensionally wrong drainage equation; `docs/potential-improvements.md` lists shipped subsystems as missing; the Bond-number docstring is off by about 160x; the reference summaries describe the obsolete Schlick / 3-wavelength / two-beam model; the GpuProfiler doc claims timings that are not instrumented. Update these alongside the code fixes in {#grin-units}, {#ray-sampling} and {#cpu-drainage}.",
+   "lead_findings": [
+    "[LOW] The uncommitted `CLAUDE.md` 'Team Activation' section mandates `TeamCreate` and forbids the Agent-tool fallback; the workspace-level `CLAUDE.md` documents `TeamCreate` as deprecated and gated out of interactive sessions and prescribes exactly that fallback. The two instructions contradict each other."
+   ],
+   "acceptance": [
+    "`CLAUDE.md` branched-flow section matches the code after the fixes (GRIN, adaptive step, spatial-hash k, patch deposits)",
+    "'GPU freeze' note reworded with the probable cause and guidance to retest on a hardware adapter starting small",
+    "`docs/physics-reference.md` drainage equation dimensionally correct and matching the implementation",
+    "`docs/potential-improvements.md` and `references/REFERENCES.md` status updated and new references added",
+    "Bond-number and GpuProfiler docstrings corrected",
+    "Team-activation instructions reconciled"
+   ],
+   "findings": ["branched-15", "gpuperf-08", "drainage-09", "optics-10", "geomfoam-13", "sota-10", "drainage-10", "cpuperf-11"]
+  },
+  {
+   "key": "status-35",
+   "kind": "comment",
+   "target": 35,
+   "summary": "**Audit 2026-10-09 status update.** The 0.85 fade in `branched_flow_compute.wgsl:556-569` already implements the recurrence S <- 0.85 S + D, an exponential moving average with a 6.7-frame window; the double buffer proposed here computes the same recurrence. However, ray seeds depend only on `ray_idx`, so every frame re-traces identical paths and the accumulation adds brightness, not samples. That defect is tracked in {#ray-sampling}. Suggest re-scoping this issue to 'per-frame seeds + expose the fade factor + clear on laser/patch parameter change', or closing it in favour of {#ray-sampling}.",
+   "findings": ["gpuperf-11"]
+  },
+  {
+   "key": "status-36",
+   "kind": "comment",
+   "target": 36,
+   "summary": "**Audit 2026-10-09 status update.** Per-workgroup shared-memory privatisation is not viable as written: deposits scatter randomly across the 512x256 texture, so a workgroup tile would catch few of its own rays' deposits, and atomics are estimated at about 0.15 ms on a discrete GPU. The viable variant is subgroup-aggregated deposits (`Features::SUBGROUP` already exists in wgpu 24), attempted only after profiling on hardware shows atomics on the profile. Suggest closing, or re-scoping after the force-field work in {#perf}.",
+   "findings": ["gpuperf-10", "sota-09"]
+  },
+  {
+   "key": "status-37",
+   "kind": "comment",
+   "target": 37,
+   "summary": "**Audit 2026-10-09 status update.** Workgroup size is the wrong lever: 8192 rays is 128 workgroups of 64, about 12% occupancy on the RTX 3070 Ti Laptop GPU (46 SMs); 128- or 256-wide groups would leave SMs idle at this ray count. Suggest keeping `@workgroup_size(64)` and re-scoping to 'ray-count scaling per adapter type' (e.g. 8K on CPU rasterisers, 32K+ on discrete GPUs). See also the subgroup note on #36 and {#perf}.",
+   "findings": ["gpuperf-06"]
+  },
+  {
+   "key": "status-38",
+   "kind": "comment",
+   "target": 38,
+   "summary": "**Audit 2026-10-09 status update: premise partly stale (measured).** With Mesa 26.0.5 (kisak PPA) installed, `vulkaninfo --summary` lists Dozen (Vulkan 1.2 over D3D12) adapters for the NVIDIA GeForce RTX 3070 Ti Laptop GPU and the AMD iGPU, plus llvmpipe. wgpu hides the Dozen adapters (`Adapter is not Vulkan compliant, hiding adapter: Microsoft Direct3D12 (NVIDIA GeForce RTX 3070 Ti Laptop GPU)`), and the app now runs on the Vulkan backend over lavapipe (CPU), not GLES. `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER` has no effect because neither `pipeline.rs:284` nor `headless.rs:56` builds its instance flags with `.with_env()`. Cheapest route to hardware: `flags: wgpu::InstanceFlags::from_build_config().with_env()` plus `PowerPreference::HighPerformance`, and log `adapter.get_info()`. Caveats: Dozen is non-conformant, and a debug-build headless test segfaults when Dozen is visible (tracked in {#stability}); a native Windows build is the robust fallback. `scripts/gpu/probe-adapters.sh` reproduces the probe. Upgrading wgpu 24 -> 30 does not change the non-compliant-adapter gate, and moving compute to CUDA is not recommended (no graphics interop on WSL).",
+   "findings": ["sota-01", "gpuperf-09", "sota-07", "gpuperf-13", "sota-08"]
+  },
+  {
+   "key": "status-39",
+   "kind": "comment",
+   "target": 39,
+   "summary": "**Audit 2026-10-09 status update.** Blocked: the compute shader's GRIN term is currently scaled to about zero because `thickness_scale` is never applied, and the GPU drainage field never changes, so noise modulations would perturb a gradient that does not act on the rays. Fix {#grin-units} and {#gpu-drainage} first.",
+   "findings": []
+  }
+ ]
+}

@@ -10,3 +10,7 @@ CONTINUE_HERE.md
 /references/*.pdf
 /references/chunks_*/
 /references/summaries_*/
+
+# Screenshot comparison artifacts written next to the goldens on failure
+/tests/golden/*_diff.png
+/tests/golden/*_actual.png

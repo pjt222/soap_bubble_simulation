@@ -205,7 +205,8 @@ fn thin_film_interference(thickness_nm: f32, cos_theta: f32, n_film: f32) -> vec
 
     for (var i = 0u; i < 7u; i = i + 1u) {
         let wavelength = wavelengths[i];
-        let phase = 2.0 * PI * optical_path / wavelength + PI;
+        // Geometric phase only; Airy already contains the reflection flip (issue #42)
+        let phase = 2.0 * PI * optical_path / wavelength;
         let intensity = airy_interference(phase, fresnel);
         let cie = cie_color_matching(wavelength);
         xyz = xyz + cie * intensity;
