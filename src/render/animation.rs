@@ -25,7 +25,11 @@ pub(crate) struct AnimationController {
     frame_times_count: usize,
     fps: f32,
     last_dt: f32,
+    seconds_since_fps_report: f32,
 }
+
+/// How often `update_fps` reports the frame rate for logging.
+const FPS_REPORT_INTERVAL_SECONDS: f32 = 5.0;
 
 impl AnimationController {
     pub fn new() -> Self {
@@ -44,6 +48,7 @@ impl AnimationController {
             frame_times_count: 0,
             fps: 0.0,
             last_dt: 0.0,
+            seconds_since_fps_report: 0.0,
         }
     }
 
@@ -130,7 +135,10 @@ impl AnimationController {
     }
 
     /// Update FPS tracking using circular buffer.
-    pub fn update_fps(&mut self, dt: f32) {
+    /// Record a frame time. Every `FPS_REPORT_INTERVAL_SECONDS` of frame time,
+    /// returns the current 60-frame average FPS so the caller can log it
+    /// (`scripts/gpu/probe-adapters.sh --app` compares adapters with it).
+    pub fn update_fps(&mut self, dt: f32) -> Option<f32> {
         self.last_dt = dt;
         self.frame_times[self.frame_times_head] = dt;
         self.frame_times_head = (self.frame_times_head + 1) % 60;
@@ -142,5 +150,41 @@ impl AnimationController {
             let avg_dt = sum / self.frame_times_count as f32;
             self.fps = 1.0 / avg_dt;
         }
+        self.seconds_since_fps_report += dt;
+        if self.seconds_since_fps_report >= FPS_REPORT_INTERVAL_SECONDS {
+            self.seconds_since_fps_report = 0.0;
+            Some(self.fps)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // dt = 0.125 s is exact in binary floating point, so 40 frames sum to exactly 5 s.
+    const DT: f32 = 0.125;
+
+    #[test]
+    fn test_update_fps_reports_once_per_interval() {
+        let mut animation = AnimationController::new();
+        let reports: Vec<f32> = (0..120).filter_map(|_| animation.update_fps(DT)).collect();
+        assert_eq!(reports.len(), 3, "120 frames x 0.125 s = 15 s -> 3 reports");
+        for fps in reports {
+            assert!((fps - 8.0).abs() < 1e-3, "reported {fps}");
+        }
+    }
+
+    #[test]
+    fn test_update_fps_does_not_report_before_interval() {
+        let mut animation = AnimationController::new();
+        let silent = (0..39).filter_map(|_| animation.update_fps(DT)).count();
+        assert_eq!(silent, 0);
+        assert!(
+            animation.update_fps(DT).is_some(),
+            "40th frame completes 5 s"
+        );
     }
 }

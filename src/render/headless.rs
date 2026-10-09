@@ -57,19 +57,17 @@ impl HeadlessRenderPipeline {
         let default_config = SimulationConfig::default();
         let sim_config = sim_config.unwrap_or(&default_config);
         // Create wgpu instance
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let instance = crate::render::gpu_setup::create_instance();
 
         // Request adapter without surface requirement (headless)
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: crate::render::gpu_setup::power_preference(),
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await?;
+        crate::render::gpu_setup::log_adapter(&adapter);
 
         // Request device and queue
         let (device, queue) = adapter

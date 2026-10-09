@@ -12,6 +12,7 @@
 //! - Interference LUT: Pre-computed interference color lookup table
 //! - Animation: Camera orbit, film dynamics, force simulation
 //! - Frame Exporter: Screenshot and recording frame capture
+//! - GPU Setup: Shared instance/adapter selection (honours WGPU_* env overrides)
 //! - UI State: egui control panel state management
 
 pub mod animation;
@@ -21,6 +22,7 @@ pub mod caustics;
 pub mod foam_renderer;
 pub mod frame_exporter;
 pub mod gpu_drainage;
+pub mod gpu_setup;
 pub mod gpu_timing;
 pub mod headless;
 pub mod interference_lut;

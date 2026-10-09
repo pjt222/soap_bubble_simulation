@@ -66,5 +66,7 @@ if (( app_seconds > 0 )); then
         timeout "$app_seconds" target/release/soap-bubble-sim >"$log_file" 2>&1
     exit_code=$?
     echo "  exit $exit_code (124 = stopped by timeout, i.e. ran fine)  log: $log_file"
-    sed -n '/wgpu_hal::vulkan::adapter\|wgpu_hal::gles\|naga::back::spv\|panicked\|Adapter/p' "$log_file" | head -12 | sed 's/^/  /'
+    sed -n '/GPU adapter:\|hiding adapter\|not Vulkan compliant\|panicked/p' "$log_file" | head -8 | sed 's/^/  /'
+    echo "  frame rate (logged every 5 s of frame time):"
+    sed -n 's/.*\(FPS [0-9.]* (.*\)$/    \1/p' "$log_file" | tail -3
 fi
