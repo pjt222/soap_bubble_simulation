@@ -197,12 +197,10 @@ impl UiState {
                     egui::ComboBox::from_id_salt("msaa")
                         .selected_text(match self.msaa_samples {
                             1 => "Off",
-                            2 => "2x MSAA",
                             _ => "4x MSAA",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.msaa_samples, 1, "Off");
-                            ui.selectable_value(&mut self.msaa_samples, 2, "2x MSAA");
                             ui.selectable_value(&mut self.msaa_samples, 4, "4x MSAA");
                         });
                 });
