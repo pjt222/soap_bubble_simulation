@@ -49,7 +49,11 @@ impl HeadlessRenderPipeline {
     ///
     /// # Returns
     /// A new HeadlessRenderPipeline or None if GPU initialization fails
-    pub async fn new(width: u32, height: u32, sim_config: Option<&SimulationConfig>) -> Option<Self> {
+    pub async fn new(
+        width: u32,
+        height: u32,
+        sim_config: Option<&SimulationConfig>,
+    ) -> Option<Self> {
         let default_config = SimulationConfig::default();
         let sim_config = sim_config.unwrap_or(&default_config);
         // Create wgpu instance
@@ -197,8 +201,10 @@ impl HeadlessRenderPipeline {
         });
 
         // Create bind group layout (shared definition with main pipeline)
-        let bind_group_layout =
-            crate::render::pipeline::create_bubble_bind_group_layout(&device, "headless_bind_group_layout");
+        let bind_group_layout = crate::render::pipeline::create_bubble_bind_group_layout(
+            &device,
+            "headless_bind_group_layout",
+        );
 
         // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -513,12 +519,15 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Requires GPU. With the Mesa Dozen ICD visible, creating any wgpu 24 Vulkan
+    // device in a debug build segfaults (this and the other GPU tests alike) and takes the
+    // whole test binary down (#48); scripts/test-local.sh forces lavapipe, `-- --ignored`
+    // runs them.
     fn test_headless_pipeline_creation() {
         // Use pollster to run async test
         let result = pollster::block_on(HeadlessRenderPipeline::new(256, 256, None));
         // May fail on systems without GPU, which is acceptable for unit tests
-        if result.is_some() {
-            let pipeline = result.unwrap();
+        if let Some(pipeline) = result {
             assert_eq!(pipeline.size(), (256, 256));
         }
     }

@@ -145,7 +145,7 @@ pub fn average_color(pixels: &[u8]) -> (f64, f64, f64, f64) {
     let mut b_sum = 0u64;
     let mut a_sum = 0u64;
 
-    for chunk in pixels.chunks_exact(4) {
+    for chunk in pixels.as_chunks::<4>().0 {
         r_sum += chunk[0] as u64;
         g_sum += chunk[1] as u64;
         b_sum += chunk[2] as u64;

@@ -611,7 +611,7 @@ mod tests {
             let generator = FoamGenerator::new(params);
             let cluster = generator.generate(0.025);
             assert!(cluster.len() <= 10);
-            assert!(cluster.len() > 0);
+            assert!(!cluster.is_empty());
         }
     }
 

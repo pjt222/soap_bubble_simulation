@@ -148,12 +148,7 @@ impl FrameExporter {
 
     /// Read back the staging buffer, convert BGRA to RGBA, and export as PNG.
     /// Must be called after `queue.submit()`.
-    pub fn process_capture(
-        &mut self,
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-    ) {
+    pub fn process_capture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         // Wait for any previous PNG encoding thread to finish before reading the buffer
         if let Some(handle) = self.png_thread.take() {
             let _ = handle.join();
@@ -183,7 +178,7 @@ impl FrameExporter {
             drop(data);
             staging.unmap();
 
-            for chunk in pixels.chunks_exact_mut(4) {
+            for chunk in pixels.as_chunks_mut::<4>().0 {
                 chunk.swap(0, 2);
             }
 
@@ -242,10 +237,9 @@ impl FrameExporter {
             .get_current_texture()
             .map_err(|e| format!("Failed to get surface texture: {}", e))?;
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Screenshot Encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Screenshot Encoder"),
+        });
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -294,7 +288,7 @@ impl FrameExporter {
         drop(data);
         staging_buffer.unmap();
 
-        for chunk in pixels.chunks_exact_mut(4) {
+        for chunk in pixels.as_chunks_mut::<4>().0 {
             chunk.swap(0, 2);
         }
 

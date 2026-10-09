@@ -587,8 +587,10 @@ mod tests {
 
     #[test]
     fn test_zero_resolution_rejected() {
-        let mut config = SimulationConfig::default();
-        config.resolution = 0;
+        let config = SimulationConfig {
+            resolution: 0,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 

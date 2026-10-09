@@ -582,7 +582,7 @@ mod tests {
 
         // The default cluster should have at least one connection
         assert!(
-            cluster.connections().len() > 0,
+            !cluster.connections().is_empty(),
             "Default cluster should have overlapping bubbles that form connections"
         );
     }

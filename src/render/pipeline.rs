@@ -13,10 +13,10 @@ use crate::render::camera::Camera;
 use crate::render::foam_renderer::{FoamRenderer, SharedWallRenderer, WallInstance, WallVertex};
 use crate::render::frame_exporter::FrameExporter;
 use crate::render::gpu_drainage::GPUDrainageSimulator;
+use crate::render::gpu_timing::{GpuPass, GpuProfiler};
 use crate::render::interference_lut::{
     LUT_ANGLE_SAMPLES, LUT_THICKNESS_SAMPLES, generate_interference_lut,
 };
-use crate::render::gpu_timing::{GpuPass, GpuProfiler};
 use crate::render::ui_state::{UiDisplayInfo, UiState};
 
 /// Bubble-specific uniform data
@@ -266,6 +266,24 @@ pub struct RenderPipeline {
     gpu_profiler: GpuProfiler,
 }
 
+/// The pipelines that draw into the multisampled scene pass.
+struct ScenePipelines {
+    bubble: wgpu::RenderPipeline,
+    instanced: wgpu::RenderPipeline,
+    wall: wgpu::RenderPipeline,
+}
+
+/// MSAA sample counts the renderer offers. WebGPU guarantees only 1 and 4 for
+/// every format without `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` (not
+/// requested), and `Depth32Float` x2 is rejected on lavapipe, so any other
+/// request falls back to 4.
+fn supported_msaa_sample_count(requested: u32) -> u32 {
+    match requested {
+        1 | 4 => requested,
+        _ => 4,
+    }
+}
+
 impl RenderPipeline {
     /// Create a new render pipeline.
     ///
@@ -305,9 +323,7 @@ impl RenderPipeline {
             })?;
 
         // Check if timestamp queries are supported (for GPU profiling)
-        let timestamp_supported = adapter
-            .features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY);
+        let timestamp_supported = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         // timestamp_period will be obtained from queue after device creation
         let mut timestamp_period = 1.0f32;
         let required_features = if timestamp_supported {
@@ -475,168 +491,12 @@ impl RenderPipeline {
             label: Some("bind_group"),
         });
 
-        // Load shader
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Bubble Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
-        });
-
-        // Create pipeline layout
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        // Create render pipeline
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::buffer_layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Draw both sides of the bubble
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-
-        // Load instanced shader for multi-bubble foam rendering
-        let instanced_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Bubble Instanced Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble_instanced.wgsl").into()),
-        });
-
-        // Create instanced render pipeline with vertex + instance buffers
-        let instanced_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Instanced Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &instanced_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    Vertex::buffer_layout(),
-                    crate::render::foam_renderer::BubbleInstance::buffer_layout(),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &instanced_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Draw both sides of the bubble
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-
-        // Load wall shader for Plateau border rendering
-        let wall_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Wall Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wall.wgsl").into()),
-        });
-
-        // Create wall render pipeline (double-sided, no culling)
-        let wall_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Wall Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &wall_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &wall_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Double-sided rendering for walls
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: msaa_samples,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
+        // Scene pipelines (bubble, instanced foam, walls) draw into the MSAA pass
+        let ScenePipelines {
+            bubble: render_pipeline,
+            instanced: instanced_pipeline,
+            wall: wall_pipeline,
+        } = Self::create_scene_pipelines(&device, &bind_group_layout, config.format, msaa_samples);
 
         // Initialize shared wall renderer
         let shared_wall_renderer = SharedWallRenderer::new(&device, 128);
@@ -1114,6 +974,127 @@ impl RenderPipeline {
         );
     }
 
+    /// Build every pipeline that draws into the MSAA scene pass. `new` and
+    /// `set_msaa_samples` both go through here, so they cannot disagree on
+    /// which pipelines exist or on their sample count (#48).
+    fn create_scene_pipelines(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        color_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> ScenePipelines {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let shader_module = |label: &str, source: &'static str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let bubble_shader = shader_module("Bubble Shader", include_str!("shaders/bubble.wgsl"));
+        // Instanced shader for multi-bubble foam rendering
+        let instanced_shader = shader_module(
+            "Bubble Instanced Shader",
+            include_str!("shaders/bubble_instanced.wgsl"),
+        );
+        // Wall shader for Plateau border rendering
+        let wall_shader = shader_module("Wall Shader", include_str!("shaders/wall.wgsl"));
+
+        ScenePipelines {
+            bubble: Self::create_mesh_pipeline(
+                device,
+                "Render Pipeline",
+                &pipeline_layout,
+                &bubble_shader,
+                &[Vertex::buffer_layout()],
+                color_format,
+                sample_count,
+            ),
+            instanced: Self::create_mesh_pipeline(
+                device,
+                "Instanced Render Pipeline",
+                &pipeline_layout,
+                &instanced_shader,
+                &[
+                    Vertex::buffer_layout(),
+                    crate::render::foam_renderer::BubbleInstance::buffer_layout(),
+                ],
+                color_format,
+                sample_count,
+            ),
+            wall: Self::create_mesh_pipeline(
+                device,
+                "Wall Render Pipeline",
+                &pipeline_layout,
+                &wall_shader,
+                &[WallVertex::buffer_layout(), WallInstance::buffer_layout()],
+                color_format,
+                sample_count,
+            ),
+        }
+    }
+
+    /// Create a scene pipeline that draws triangle meshes into the MSAA color +
+    /// depth pass: both faces, alpha blending, depth test and write.
+    /// Used for the bubble, instanced-bubble and wall pipelines so their
+    /// sample counts can never diverge.
+    fn create_mesh_pipeline(
+        device: &wgpu::Device,
+        label: &str,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        vertex_buffers: &[wgpu::VertexBufferLayout<'_>],
+        color_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                buffers: vertex_buffers,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Bubbles and walls are visible from both sides
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+
     fn create_depth_texture(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
@@ -1185,10 +1166,7 @@ impl RenderPipeline {
     /// Set MSAA sample count (1, 2, or 4)
     /// Recreates render pipeline and textures as needed
     pub fn set_msaa_samples(&mut self, samples: u32) {
-        let samples = match samples {
-            1 | 2 | 4 => samples,
-            _ => 4, // Default to 4 for invalid values
-        };
+        let samples = supported_msaa_sample_count(samples);
 
         if samples == self.msaa_samples {
             return; // No change needed
@@ -1200,67 +1178,18 @@ impl RenderPipeline {
         self.depth_texture = Self::create_depth_texture(&self.device, &self.config, samples);
         self.msaa_texture = Self::create_msaa_texture(&self.device, &self.config, samples);
 
-        // Recreate render pipeline with new multisample state
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Bubble Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bubble.wgsl").into()),
-            });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&self.bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        self.render_pipeline =
-            self.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Render Pipeline"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[Vertex::buffer_layout()],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: self.config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        unclipped_depth: false,
-                        conservative: false,
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Less,
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: samples,
-                        mask: !0,
-                        alpha_to_coverage_enabled: false,
-                    },
-                    multiview: None,
-                    cache: None,
-                });
+        // Every pipeline that draws into the MSAA pass must match its sample count
+        let scene = Self::create_scene_pipelines(
+            &self.device,
+            &self.bind_group_layout,
+            self.config.format,
+            samples,
+        );
+        self.render_pipeline = scene.bubble;
+        self.instanced_pipeline = scene.instanced;
+        self.wall_pipeline = scene.wall;
+        self.caustic_renderer
+            .set_sample_count(&self.device, samples);
 
         log::info!("MSAA changed to {}x", samples);
     }
@@ -1285,7 +1214,8 @@ impl RenderPipeline {
 
         // Delegate to animation controller
         self.animation.update_rotation(&mut self.camera, dt);
-        self.animation.update_film_time(&mut self.bubble_uniform, dt);
+        self.animation
+            .update_film_time(&mut self.bubble_uniform, dt);
         self.animation.update_forces(&mut self.bubble_uniform, dt);
 
         // Physics-based drainage simulation
@@ -1405,7 +1335,8 @@ impl RenderPipeline {
 
         // put id:'gpu_compute_dispatch', label:'Dispatch compute shaders', input:'uniform_buffers_gpu.internal', output:'compute_results_gpu.internal'
         if self.gpu_drainage_enabled {
-            self.gpu_drainage.step(&mut encoder, self.animation.last_dt());
+            self.gpu_drainage
+                .step(&mut encoder, self.animation.last_dt());
         }
 
         // Caustic compute pass (after drainage, before render)
@@ -1426,7 +1357,9 @@ impl RenderPipeline {
                 self.gpu_drainage.current_thickness_buffer(),
                 &self.branched_flow_buffer,
             );
-            // 4. Dispatch compute passes with GPU timing
+            // 4. Dispatch compute passes with GPU timing. Requesting timestamps marks
+            //    the passes as written, so request them only when step() will record
+            //    both passes: it returns early only when disabled, which this `if` excludes.
             let clear_ts = self
                 .gpu_profiler
                 .compute_pass_timestamps(GpuPass::BranchedFlowClear);
@@ -1584,8 +1517,12 @@ impl RenderPipeline {
 
         // Delegate frame capture to FrameExporter
         if self.frame_exporter.should_capture() {
-            self.frame_exporter
-                .prepare_capture(&self.device, &self.config, &mut encoder, &output.texture);
+            self.frame_exporter.prepare_capture(
+                &self.device,
+                &self.config,
+                &mut encoder,
+                &output.texture,
+            );
         }
 
         // Resolve GPU timestamps before finishing the encoder
@@ -1597,8 +1534,11 @@ impl RenderPipeline {
         self.gpu_profiler.begin_readback();
 
         if self.frame_exporter.should_capture() {
-            self.frame_exporter
-                .process_capture(&self.device, self.config.width, self.config.height);
+            self.frame_exporter.process_capture(
+                &self.device,
+                self.config.width,
+                self.config.height,
+            );
         }
 
         output.present();
@@ -1653,7 +1593,11 @@ impl RenderPipeline {
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
             laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
             laser_elevation: entry[1].asin().to_degrees(),
-            beam_spread: self.branched_flow_simulator.params.spread_angle.to_degrees(),
+            beam_spread: self
+                .branched_flow_simulator
+                .params
+                .spread_angle
+                .to_degrees(),
             bend_strength: self.branched_flow_simulator.params.bend_strength,
             num_rays: self.branched_flow_simulator.params.num_rays,
             num_scatterers: self.branched_flow_simulator.params.num_scatterers,
@@ -1730,7 +1674,8 @@ impl RenderPipeline {
         self.bubble_uniform.pattern_scale = ui.pattern_scale;
 
         // Export state
-        self.frame_exporter.set_screenshot_requested(ui.screenshot_requested);
+        self.frame_exporter
+            .set_screenshot_requested(ui.screenshot_requested);
         self.frame_exporter.set_recording(ui.recording);
 
         // External forces
@@ -1808,7 +1753,8 @@ impl RenderPipeline {
             self.caustic_renderer.params.caustic_intensity = ui.caustic_intensity;
             self.caustic_renderer.params.caustic_sharpness = ui.caustic_sharpness;
             if (ui.ground_y - self.caustic_renderer.params.ground_y).abs() > 0.001 {
-                self.caustic_renderer.set_ground_y(&self.device, ui.ground_y);
+                self.caustic_renderer
+                    .set_ground_y(&self.device, ui.ground_y);
             }
             self.caustic_renderer.update_params(&self.queue);
         }
@@ -1951,13 +1897,13 @@ mod tests {
     #[test]
     fn test_bubble_uniform_film_dynamics_present() {
         // Verify all film dynamics fields exist and are accessible
-        let mut uniform = BubbleUniform::default();
-
-        // These should compile and be modifiable
-        uniform.film_time = 10.0;
-        uniform.swirl_intensity = 2.0;
-        uniform.drainage_speed = 0.5;
-        uniform.pattern_scale = 3.0;
+        let uniform = BubbleUniform {
+            film_time: 10.0,
+            swirl_intensity: 2.0,
+            drainage_speed: 0.5,
+            pattern_scale: 3.0,
+            ..Default::default()
+        };
 
         assert!((uniform.film_time - 10.0).abs() < 1e-6);
         assert!((uniform.swirl_intensity - 2.0).abs() < 1e-6);
@@ -2012,5 +1958,109 @@ mod tests {
         assert_eq!(offset_of!(BubbleUniform, branched_flow_enabled), 68);
         assert_eq!(offset_of!(BubbleUniform, branched_flow_intensity), 72);
         assert_eq!(offset_of!(BubbleUniform, branched_flow_scale), 76);
+    }
+
+    #[test]
+    fn test_supported_msaa_sample_count_offers_only_webgpu_guaranteed_counts() {
+        assert_eq!(supported_msaa_sample_count(1), 1);
+        assert_eq!(supported_msaa_sample_count(4), 4);
+        // 2x is not guaranteed by WebGPU (lavapipe rejects Depth32Float x2)
+        for unsupported in [0, 2, 3, 8, 16] {
+            assert_eq!(supported_msaa_sample_count(unsupported), 4);
+        }
+    }
+
+    /// Whether binding `pipeline` in a pass with `pass_samples` attachments
+    /// passes wgpu validation.
+    fn pipeline_fits_pass(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &wgpu::RenderPipeline,
+        color_format: wgpu::TextureFormat,
+        pass_samples: u32,
+    ) -> bool {
+        let attachment = |format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: 16,
+                        height: 16,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: pass_samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let color_view = attachment(color_format);
+        let depth_view = attachment(wgpu::TextureFormat::Depth32Float);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations::default(),
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations::default()),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_pipeline(pipeline);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+        pollster::block_on(device.pop_error_scope()).is_none()
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn test_scene_pipelines_match_the_requested_sample_count() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Some(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+                .expect("device");
+        let color_format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let bind_group_layout = create_bubble_bind_group_layout(&device, "test layout");
+
+        for samples in [1, 4] {
+            let scene = RenderPipeline::create_scene_pipelines(
+                &device,
+                &bind_group_layout,
+                color_format,
+                samples,
+            );
+            for pipeline in [&scene.bubble, &scene.instanced, &scene.wall] {
+                assert!(
+                    pipeline_fits_pass(&device, &queue, pipeline, color_format, samples),
+                    "scene pipeline built for {samples}x rejected by a {samples}x pass"
+                );
+            }
+        }
+        // The check discriminates: a 4x pipeline in a 1x pass is the #48 failure.
+        let scene_4x =
+            RenderPipeline::create_scene_pipelines(&device, &bind_group_layout, color_format, 4);
+        assert!(!pipeline_fits_pass(
+            &device,
+            &queue,
+            &scene_4x.wall,
+            color_format,
+            1
+        ));
     }
 }

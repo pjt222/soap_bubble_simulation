@@ -106,6 +106,11 @@ pub struct CausticRenderer {
     compute_pipeline: wgpu::ComputePipeline,
     /// Render pipeline for ground plane caustics
     render_pipeline: wgpu::RenderPipeline,
+    /// Inputs kept to rebuild `render_pipeline` when the MSAA sample count changes
+    render_pipeline_layout: wgpu::PipelineLayout,
+    render_shader: wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
     /// Caustic parameters buffer
     params_buffer: wgpu::Buffer,
     /// Caustic map storage buffer
@@ -314,17 +319,71 @@ impl CausticRenderer {
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render_pipeline = Self::create_render_pipeline(
+            device,
+            &render_pipeline_layout,
+            &render_shader,
+            surface_format,
+            depth_format,
+            msaa_samples,
+        );
+
+        // Create ground plane geometry
+        let (ground_vertices, ground_indices, num_ground_indices) =
+            Self::create_ground_plane(device, params.bubble_radius * 3.0, params.ground_y);
+
+        Self {
+            compute_pipeline,
+            render_pipeline,
+            render_pipeline_layout,
+            render_shader,
+            surface_format,
+            depth_format,
+            params_buffer,
+            _caustic_buffer: caustic_buffer,
+            compute_bind_group,
+            render_bind_group,
+            ground_vertices,
+            ground_indices,
+            num_ground_indices,
+            params,
+            enabled: false,
+        }
+    }
+
+    /// Rebuild the ground-plane render pipeline for a new MSAA sample count.
+    /// It draws into the same multisampled pass as the bubbles, so its count
+    /// must match the pass.
+    pub fn set_sample_count(&mut self, device: &wgpu::Device, sample_count: u32) {
+        self.render_pipeline = Self::create_render_pipeline(
+            device,
+            &self.render_pipeline_layout,
+            &self.render_shader,
+            self.surface_format,
+            self.depth_format,
+            sample_count,
+        );
+    }
+
+    fn create_render_pipeline(
+        device: &wgpu::Device,
+        render_pipeline_layout: &wgpu::PipelineLayout,
+        render_shader: &wgpu::ShaderModule,
+        surface_format: wgpu::TextureFormat,
+        depth_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Caustic Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &render_shader,
+                module: render_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[GroundVertex::buffer_layout()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &render_shader,
+                module: render_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
@@ -361,31 +420,13 @@ impl CausticRenderer {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState {
-                count: msaa_samples,
+                count: sample_count,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
             multiview: None,
             cache: None,
-        });
-
-        // Create ground plane geometry
-        let (ground_vertices, ground_indices, num_ground_indices) =
-            Self::create_ground_plane(device, params.bubble_radius * 3.0, params.ground_y);
-
-        Self {
-            compute_pipeline,
-            render_pipeline,
-            params_buffer,
-            _caustic_buffer: caustic_buffer,
-            compute_bind_group,
-            render_bind_group,
-            ground_vertices,
-            ground_indices,
-            num_ground_indices,
-            params,
-            enabled: false,
-        }
+        })
     }
 
     /// Create ground plane mesh
@@ -477,5 +518,111 @@ impl CausticRenderer {
         self.ground_vertices = vertices;
         self.ground_indices = indices;
         self.num_ground_indices = count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+    }
+
+    fn attachment(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn test_set_sample_count_rebuilds_render_pipeline() {
+        let Some((device, queue)) = test_device() else {
+            return;
+        };
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<crate::render::camera::CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let thickness_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 128 * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let unused_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[],
+        });
+
+        // Built for the default 4x MSAA pass, then switched to 1x as set_msaa_samples does.
+        let mut renderer = CausticRenderer::new(
+            &device,
+            &camera_buffer,
+            &unused_layout,
+            &thickness_buffer,
+            COLOR_FORMAT,
+            DEPTH_FORMAT,
+            4,
+        );
+        renderer.enabled = true;
+        renderer.set_sample_count(&device, 1);
+
+        let color_view = attachment(&device, COLOR_FORMAT);
+        let depth_view = attachment(&device, DEPTH_FORMAT);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("1x pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            renderer.render(&mut render_pass);
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+        let error = pollster::block_on(device.pop_error_scope());
+        assert!(
+            error.is_none(),
+            "caustic pipeline does not match a 1x pass: {error:?}"
+        );
     }
 }

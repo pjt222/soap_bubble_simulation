@@ -197,12 +197,10 @@ impl UiState {
                     egui::ComboBox::from_id_salt("msaa")
                         .selected_text(match self.msaa_samples {
                             1 => "Off",
-                            2 => "2x MSAA",
                             _ => "4x MSAA",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.msaa_samples, 1, "Off");
-                            ui.selectable_value(&mut self.msaa_samples, 2, "2x MSAA");
                             ui.selectable_value(&mut self.msaa_samples, 4, "4x MSAA");
                         });
                 });
@@ -604,9 +602,7 @@ impl UiState {
                         // Bubble count
                         let mut bubble_count = self.foam_gen_params.bubble_count as i32;
                         if ui
-                            .add(
-                                egui::Slider::new(&mut bubble_count, 2..=30).text("Bubble count"),
-                            )
+                            .add(egui::Slider::new(&mut bubble_count, 2..=30).text("Bubble count"))
                             .changed()
                         {
                             self.foam_gen_params.bubble_count = bubble_count as u32;
@@ -676,23 +672,17 @@ impl UiState {
 
                         // Radius range (always shown)
                         ui.add(
-                            egui::Slider::new(
-                                &mut self.foam_gen_params.min_radius,
-                                0.005..=0.03,
-                            )
-                            .text("Min radius")
-                            .suffix(" m")
-                            .fixed_decimals(3),
+                            egui::Slider::new(&mut self.foam_gen_params.min_radius, 0.005..=0.03)
+                                .text("Min radius")
+                                .suffix(" m")
+                                .fixed_decimals(3),
                         );
 
                         ui.add(
-                            egui::Slider::new(
-                                &mut self.foam_gen_params.max_radius,
-                                0.02..=0.06,
-                            )
-                            .text("Max radius")
-                            .suffix(" m")
-                            .fixed_decimals(3),
+                            egui::Slider::new(&mut self.foam_gen_params.max_radius, 0.02..=0.06)
+                                .text("Max radius")
+                                .suffix(" m")
+                                .fixed_decimals(3),
                         );
 
                         // Context-sensitive sliders based on distribution type

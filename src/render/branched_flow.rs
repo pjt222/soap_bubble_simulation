@@ -109,10 +109,15 @@ impl Default for BranchedFlowParams {
             entry_point: [0.0, 0.0, 1.0],
             // Beam direction: going down-left across the surface
             beam_dir: [-0.5, -0.866, 0.0],
-            // Many rays needed - branches visible where rays converge
-            num_rays: 32768,
-            // More steps for longer propagation
-            ray_steps: 400,
+            // Rays per frame. With 200 steps this is 8x fewer ray-steps than the earlier
+            // 32768 x 400, chosen for the WSL CPU rasteriser (llvmpipe); the frame-time gain was
+            // not measured. Ray seeds depend only on ray_idx, so every frame restarts from the
+            // same positions (only scatterer drift varies the paths) and the 0.85 fade adds few
+            // new samples. Per-frame seeds: #47; ray count per adapter type: #37.
+            num_rays: 8192,
+            // Steps per ray. The adaptive step factor sits at its 0.3 floor for almost every step
+            // with the default scatterer field, so range is about ray_steps * step_size * 0.3 (#47).
+            ray_steps: 200,
             // Small steps for smooth ray paths
             step_size: 0.005,
             // Moderate GRIN bending (particle scattering now creates branching)
@@ -131,7 +136,7 @@ impl Default for BranchedFlowParams {
             drainage_speed: 1.0,
             pattern_scale: 1.0,
             // Particle scattering defaults
-            num_scatterers: 800,
+            num_scatterers: 400,
             scatterer_strength: 0.5,
             scatterer_radius: 0.03,
             particle_weight: 0.1,
@@ -628,10 +633,10 @@ impl BranchedFlowSimulator {
                 // Different frequencies per scatterer prevent correlated drift
                 let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
                 let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
-                s.pos_u = (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale)
-                    .clamp(min_u, max_u);
-                s.pos_v = (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale)
-                    .clamp(min_v, max_v);
+                s.pos_u =
+                    (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale).clamp(min_u, max_u);
+                s.pos_v =
+                    (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale).clamp(min_v, max_v);
             }
         } else {
             return; // No scatterers to update
@@ -907,8 +912,8 @@ mod tests {
         for i in 1..100u32 {
             let u = halton(i, 2);
             let v = halton(i, 3);
-            assert!(u >= 0.0 && u < 1.0, "Halton base 2 out of range: {u}");
-            assert!(v >= 0.0 && v < 1.0, "Halton base 3 out of range: {v}");
+            assert!((0.0..1.0).contains(&u), "Halton base 2 out of range: {u}");
+            assert!((0.0..1.0).contains(&v), "Halton base 3 out of range: {v}");
         }
     }
 
