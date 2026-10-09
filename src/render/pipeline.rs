@@ -299,10 +299,7 @@ impl RenderPipeline {
         let size = window.inner_size();
 
         // Create wgpu instance
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        let instance = crate::render::gpu_setup::create_instance();
 
         // Create surface
         let surface = instance
@@ -312,7 +309,7 @@ impl RenderPipeline {
         // Request adapter
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: crate::render::gpu_setup::power_preference(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
@@ -321,6 +318,8 @@ impl RenderPipeline {
                 "No compatible GPU adapter found. Ensure your GPU drivers are up to date."
                     .to_string()
             })?;
+
+        crate::render::gpu_setup::log_adapter(&adapter);
 
         // Check if timestamp queries are supported (for GPU profiling)
         let timestamp_supported = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
@@ -802,6 +801,17 @@ impl RenderPipeline {
     }
 
     /// Enable or disable foam mode.
+    /// Turn on the GPU compute effects (GPU drainage, caustics, branched flow),
+    /// as if their UI checkboxes were ticked. The UI state is snapshotted from
+    /// these fields every frame, so the setting persists.
+    pub fn enable_compute_effects(&mut self) {
+        self.gpu_drainage_enabled = true;
+        self.gpu_drainage.enabled = true;
+        self.caustic_renderer.enabled = true;
+        self.branched_flow_simulator.enabled = true;
+        self.bubble_uniform.branched_flow_enabled = 1;
+    }
+
     pub fn set_foam_enabled(&mut self, enabled: bool) {
         log::info!("set_foam_enabled({})", enabled);
         self.foam_enabled = enabled;
@@ -1206,7 +1216,15 @@ impl RenderPipeline {
 
     /// Update time for animation
     pub fn update(&mut self, dt: f32) {
-        self.animation.update_fps(dt);
+        if let Some(report) = self.animation.update_fps(dt) {
+            log::info!(
+                "FPS {:.1} ({:.2} ms/frame, mean over {} frames in {:.1} s)",
+                report.fps,
+                1000.0 / report.fps,
+                report.frames,
+                report.seconds
+            );
+        }
         self.bubble_uniform.time += dt;
 
         // LOD update based on camera distance

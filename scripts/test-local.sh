@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run `cargo test` with the lavapipe (CPU) Vulkan ICD forced.
 #
-# On WSL with Mesa >= 26 the Dozen (Vulkan-on-D3D12) ICD is installed, and
-# wgpu 24's debug-build Vulkan path segfaults in
-# render::headless::tests::test_headless_pipeline_creation whenever Dozen is
-# visible, which aborts the whole lib test binary. Restricting the loader to
-# lavapipe makes local runs deterministic. All arguments go to `cargo test`,
-# e.g.  scripts/test-local.sh -- --include-ignored
+# On WSL with a Mesa build that ships the Dozen (Vulkan-on-D3D12) ICD
+# (dzn_icd.json; e.g. the kisak-mesa PPA, not Ubuntu's own packages), creating
+# any wgpu 24 Vulkan device on Dozen in a debug build segfaults, which aborts
+# the whole test binary (the GPU tests are #[ignore]d for that reason).
+# Restricting the loader to lavapipe makes local runs deterministic. All
+# arguments go to `cargo test`, e.g.  scripts/test-local.sh -- --include-ignored
 #
 # Diagnose the driver situation with scripts/gpu/probe-adapters.sh.
 set -euo pipefail

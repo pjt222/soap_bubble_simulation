@@ -16,7 +16,7 @@ Python tools use only the standard library.
 
 | Tool | What it does |
 |---|---|
-| `scripts/gpu/probe-adapters.sh [--app SECONDS]` | Lists the Vulkan devices the loader sees (`vulkaninfo --summary`), then runs the headless pipeline test once per ICD (Dozen only, lavapipe only, none) so a driver crash is attributed to one ICD (exit 139 = SIGSEGV). With `--app`, it also runs the release app under X11 and prints the wgpu adapter log lines, because the app does not log which adapter it chose. Logs go to `target/probe-adapters/`. See #38. |
+| `scripts/gpu/probe-adapters.sh [--app SECONDS [APP ARGS...]]` | Lists the Vulkan devices the loader sees (`vulkaninfo --summary`), then runs the (normally ignored) headless pipeline test once per ICD (Dozen only, lavapipe only, none) so a driver crash is attributed to one ICD (exit 139 = SIGSEGV; "pass" requires the test to have run). With `--app SECONDS`, it also runs the release app under X11, passes any further arguments to it (e.g. `--compute` to start with the GPU compute effects on), and prints the chosen adapter (`GPU adapter: ...`) and the frame-rate reports the app logs every ≥5 s. Set `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1` to use the Dozen GPU instead of llvmpipe. The release binary is built only if missing, so rebuild after code changes. Logs go to `target/probe-adapters/`. See #38. |
 
 ## Physics checks
 
