@@ -363,7 +363,8 @@ pub struct SpherePatch {
     pub center_u: f32,
     /// UV center v-coordinate (0-1, corresponds to theta angle)
     pub center_v: f32,
-    /// Half-width in UV space (0.158 ≈ 10% of surface area when squared)
+    /// Half-width in UV space (0.158: 10% of the UV square, ~15% of the sphere at the
+    /// equator; see [`SpherePatch::sphere_fraction`])
     pub half_size: f32,
     /// Grid subdivisions along each axis
     pub subdivisions: u32,
@@ -374,7 +375,7 @@ impl Default for SpherePatch {
         Self {
             center_u: 0.75, // +z, facing the default camera
             center_v: 0.5,
-            half_size: 0.158, // ~10% of sphere surface area
+            half_size: 0.158, // ~15% of the sphere at the equator
             subdivisions: 32,
         }
     }
@@ -398,6 +399,15 @@ impl SpherePatch {
         let min_v = (self.center_v - self.half_size).max(0.0);
         let max_v = (self.center_v + self.half_size).min(1.0);
         (min_u, max_u, min_v, max_v)
+    }
+
+    /// Share of the unit sphere's area the patch covers. A UV rectangle is not a square
+    /// on the sphere: longitude spans `(max_u - min_u) 2 PI` and the polar band contributes
+    /// `cos(min_v PI) - cos(max_v PI)`, so the default patch covers about 15%, not the
+    /// `(2 half_size)^2 = 10%` its UV area suggests.
+    pub fn sphere_fraction(&self) -> f32 {
+        let (min_u, max_u, min_v, max_v) = self.uv_bounds();
+        (max_u - min_u) * ((min_v * PI).cos() - (max_v * PI).cos()) / 2.0
     }
 
     /// Generate indexed mesh for the patch
@@ -747,6 +757,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_sphere_patch_sphere_fraction() {
+        let whole_sphere = SpherePatch::new(0.5, 0.5, 0.5, 2);
+        assert!((whole_sphere.sphere_fraction() - 1.0).abs() < 1e-6);
+        let default_patch = SpherePatch::default();
+        assert!((default_patch.sphere_fraction() - 0.1505).abs() < 1e-3);
+        // The same UV size covers less area away from the equator
+        let high_patch = SpherePatch::new(0.75, 0.2, 0.158, 2);
+        assert!(high_patch.sphere_fraction() < default_patch.sphere_fraction());
     }
 
     #[test]

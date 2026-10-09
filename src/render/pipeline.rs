@@ -601,7 +601,7 @@ impl RenderPipeline {
         // the default camera and holds the default laser entry; u = 0.5 (+x) was seen edge-on.
         let patch_center_u = 0.75;
         let patch_center_v = 0.5;
-        let patch_half_size = 0.158; // ~10% of sphere surface
+        let patch_half_size = 0.158; // ~15% of the sphere at the equator
         let patch = SpherePatch::new(patch_center_u, patch_center_v, patch_half_size, 32);
         let (patch_vertices, patch_indices) = patch.generate_mesh_indexed(radius, 1.0);
 
