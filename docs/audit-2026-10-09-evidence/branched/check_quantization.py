@@ -1,5 +1,4 @@
 import sys
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 
 rng = np.random.default_rng(1)

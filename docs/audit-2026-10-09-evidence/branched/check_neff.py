@@ -1,7 +1,6 @@
 """TE0 / TM0 effective index of a free-standing soap film (air | n=1.33 | air) vs thickness, lambda=532nm.
 Gives the physically-motivated GRIN coefficient (1/n_eff) dn_eff/dd for the ray eq. dT/ds = grad_perp ln n_eff."""
 import sys
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 n1, n0, lam = 1.33, 1.0, 532e-9
 k0 = 2*np.pi/lam

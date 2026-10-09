@@ -1,4 +1,4 @@
-import sys; sys.path.append("/home/phtho/.local/lib/python3.12/site-packages")
+import sys
 import numpy as np
 rho,g,eta,R,h=1000.,9.81,1e-3,0.025,500e-9
 th=np.linspace(0,np.pi,2001)

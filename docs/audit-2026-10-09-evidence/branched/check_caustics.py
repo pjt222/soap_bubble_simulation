@@ -1,6 +1,5 @@
 """caustics_compute.wgsl replica on metre-scale thickness (drainage buffer units)."""
 import sys
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 W, H = 256, 128
 rng = np.random.default_rng(0)

@@ -1,4 +1,4 @@
-import sys; sys.path.append("/home/phtho/.local/lib/python3.12/site-packages")
+import sys
 import numpy as np
 f=np.float32
 # GPU DrainageParams::default (gpu_drainage.rs:46-67)

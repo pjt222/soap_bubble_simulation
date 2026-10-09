@@ -5,7 +5,6 @@ Usage: python3 -I color_check.py <ciexyz31_1.csv> <Illuminantd65.csv>
 """
 import sys
 import csv
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 
 N_FILM = 1.33

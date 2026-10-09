@@ -4,7 +4,6 @@ Run: python3 -I airy_check.py
 Pure math; no external data.
 """
 import sys
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 
 N_FILM = 1.33

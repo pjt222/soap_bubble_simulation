@@ -28,4 +28,8 @@ directory: `scratchpad/<dimension>/<file>` is `docs/audit-2026-10-09-evidence/<d
 - Third-party inputs were not committed: the CIE 1931 2° colour-matching functions and the D65
   illuminant (from http://www.cvrl.org), papers (Patsyk 2020/2022, Wyman 2013), and the wgpu
   changelog. Their URLs are listed in the `sources` field of the findings JSON.
-- Compiled binaries and caches were not committed either.
+- Compiled binaries and caches were not committed either, nor were the upstream library
+  sources the research agent fetched for reading (wgpu-hal / wgpu-types v30, CubeCL); the
+  findings cite them by URL.
+- `sys.path.append(...)` lines that pointed at the auditor's per-user site-packages directory
+  were removed; otherwise the scripts are unchanged.

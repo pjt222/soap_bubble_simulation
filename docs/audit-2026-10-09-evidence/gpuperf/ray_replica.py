@@ -1,4 +1,4 @@
-import sys; sys.path.append("/home/phtho/.local/lib/python3.12/site-packages")
+import sys
 import numpy as np
 # Faithful numpy replica of branched_flow_compute.wgsl main() (lines 405-553) with defaults
 # from branched_flow.rs:105-145 (uncommitted: 8192 rays, 200 steps, 400 scatterers).

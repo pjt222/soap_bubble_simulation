@@ -4,7 +4,6 @@ Mirrors the WGSL line-by-line where it matters for geometry/math checks.
 Float64 for geometry, float32 emulation where quantization matters.
 """
 import sys
-sys.path.append('/home/phtho/.local/lib/python3.12/site-packages')
 import numpy as np
 
 PI = 3.14159265359

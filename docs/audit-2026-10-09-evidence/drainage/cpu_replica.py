@@ -1,4 +1,4 @@
-import sys; sys.path.append("/home/phtho/.local/lib/python3.12/site-packages")
+import sys
 import numpy as np, math
 # SimulationConfig::default (config.rs) -> DrainageSimulator::new (drainage.rs:256-281)
 NT, NP = 128, 256
