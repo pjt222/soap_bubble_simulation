@@ -44,7 +44,10 @@ soap-bubble-sim/
 ## Core Physics
 
 **Thin-film interference**: Colors from light interfering at film surfaces.
-- Optical path: `δ = 2 n_film d cos(θ_t) + λ/2`
+- Optical path (two-beam convention): `δ = 2 n_film d cos(θ_t) + λ/2`. The code uses the Airy
+  form `R = F sin²(φ/2) / (1 + F sin²(φ/2))` with the **geometric** phase `φ = 4π n_film d cos(θ_t) / λ`
+  and no extra π, because `r21 = −r12` already carries the half-wave flip; adding π inverts every
+  fringe (issue #42). Check with `scripts/physics/thin_film_reference.py --check`
 - Wavelengths: R=650nm, G=532nm, B=450nm
 - Fresnel reflection via Schlick approximation
 

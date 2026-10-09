@@ -460,8 +460,9 @@ fn thin_film_interference_spectral(thickness_nm: f32, cos_theta: f32, n_film: f3
     for (var i = 0u; i < 7u; i = i + 1u) {
         let wavelength = wavelengths[i];
 
-        // Phase difference (including π phase shift from reflection at denser medium)
-        let phase = 2.0 * pi * optical_path / wavelength + pi;
+        // Geometric round-trip phase only: the Airy formula already contains the
+        // half-wave reflection flip (r21 = -r12), so no extra pi (issue #42)
+        let phase = 2.0 * pi * optical_path / wavelength;
 
         // Use Airy formula for accurate multi-bounce interference
         let intensity = airy_interference(phase, fresnel);

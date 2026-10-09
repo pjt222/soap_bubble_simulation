@@ -226,6 +226,11 @@ impl InterferenceCalculator {
     /// - Path through the film: 2 * n_film * d * cos(theta_t)
     /// - Phase shift of lambda/2 from reflection at air-film interface
     ///
+    /// This is the two-beam convention (bright where the difference is a whole
+    /// number of wavelengths). The Airy expression in
+    /// [`Self::calculate_reflected_intensity`] uses only the geometric part,
+    /// because the reflection phase flip is already encoded there.
+    ///
     /// # Arguments
     /// * `film_thickness_nm` - Film thickness in nanometers
     /// * `cos_theta_transmitted` - Cosine of the angle inside the film
@@ -334,16 +339,13 @@ impl InterferenceCalculator {
 
         let cos_theta_transmitted = self.calculate_transmission_angle_cos(cos_theta_incident);
 
-        // Calculate optical path difference
-        let optical_path_difference = self.calculate_optical_path_difference(
-            film_thickness_nm,
-            cos_theta_transmitted,
-            wavelength_nm,
-        );
-
-        // Calculate phase difference
-        let phase_difference =
-            self.calculate_phase_difference(optical_path_difference, wavelength_nm);
+        // Airy takes the geometric round-trip phase only. The half-wave flip at
+        // the air->film reflection is already inside the Airy derivation
+        // (r21 = -r12), so the lambda/2 of the two-beam optical path difference
+        // must not be added here (issue #42).
+        let geometric_path =
+            2.0 * self.refractive_index_film * film_thickness_nm * cos_theta_transmitted;
+        let phase_difference = self.calculate_phase_difference(geometric_path, wavelength_nm);
 
         // Get Fresnel reflectance
         let fresnel = self.calculate_fresnel_reflection(cos_theta_incident);
@@ -626,6 +628,58 @@ mod tests {
         let calculator = InterferenceCalculator::default();
         let intensity = calculator.calculate_reflected_intensity(0.0, 1.0, 550.0);
         assert!((intensity - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_very_thin_film_is_dark() {
+        // 1 nm is far below a quarter wave: the film must look black, not
+        // maximally bright (the inverted-fringe symptom of issue #42).
+        let calculator = InterferenceCalculator::default();
+        let intensity = calculator.calculate_reflected_intensity(1.0, 1.0, 550.0);
+        assert!(intensity < 1e-3, "1 nm film reflected {intensity}");
+    }
+
+    #[test]
+    fn test_reflected_intensity_matches_exact_slab_at_normal_incidence() {
+        let calculator = InterferenceCalculator::default();
+        let n_film = calculator.refractive_index_film();
+        let r12 = (1.0 - n_film) / (1.0 + n_film);
+        let r23 = -r12;
+        for wavelength_nm in [450.0, 532.0, 650.0] {
+            for thickness_step in 1..=200 {
+                let thickness_nm = thickness_step as f64 * 5.0;
+                // Exact amplitude (r12 + r23 e^{i delta}) / (1 + r12 r23 e^{i delta}).
+                let delta = 4.0 * PI * n_film * thickness_nm / wavelength_nm;
+                let numerator_re = r12 + r23 * delta.cos();
+                let numerator_im = r23 * delta.sin();
+                let denominator_re = 1.0 + r12 * r23 * delta.cos();
+                let denominator_im = r12 * r23 * delta.sin();
+                let exact = (numerator_re.powi(2) + numerator_im.powi(2))
+                    / (denominator_re.powi(2) + denominator_im.powi(2));
+                let computed =
+                    calculator.calculate_reflected_intensity(thickness_nm, 1.0, wavelength_nm);
+                assert!(
+                    (computed - exact).abs() < 1e-9,
+                    "d={thickness_nm} nm, lambda={wavelength_nm} nm: {computed} vs exact {exact}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_reflected_intensity_peaks_at_quarter_wave() {
+        let calculator = InterferenceCalculator::default();
+        let n_film = calculator.refractive_index_film();
+        let wavelength_nm = 532.0;
+        let surface_reflectance = ((1.0 - n_film) / (1.0 + n_film)).powi(2);
+        let peak = 4.0 * surface_reflectance / (1.0 + surface_reflectance).powi(2);
+        let quarter_wave_nm = wavelength_nm / (4.0 * n_film);
+        let intensity =
+            calculator.calculate_reflected_intensity(quarter_wave_nm, 1.0, wavelength_nm);
+        assert!(
+            (intensity - peak).abs() < 1e-9,
+            "quarter wave {intensity} vs peak {peak}"
+        );
     }
 
     #[test]
