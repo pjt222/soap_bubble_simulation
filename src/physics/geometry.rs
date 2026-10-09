@@ -12,8 +12,9 @@ use std::f32::consts::PI;
 ///
 /// `u = (atan2(z, x) + PI) / (2 PI)`, `v = acos(y) / PI`: u = 0.5 at +x, u = 0.75 at +z,
 /// and the seam u = 0 / 1 lies at -x. This is a literal port of `normal_to_uv` in
-/// `branched_flow_compute.wgsl` and `normal_to_branched_uv` in `bubble.wgsl`; meshes that
-/// place geometry from UV must use the inverse, [`uv_to_unit_sphere`] (#46).
+/// `branched_flow_compute.wgsl`, which deposits branched flow by this UV; `bubble.wgsl`
+/// samples it by the mesh UV. Meshes that place geometry from UV must therefore use the
+/// inverse, [`uv_to_unit_sphere`] (#46).
 pub fn unit_sphere_to_uv(direction: Vec3) -> [f32; 2] {
     let azimuth = direction.z.atan2(direction.x); // -PI to PI
     let polar = direction.y.clamp(-1.0, 1.0).acos(); // 0 to PI
@@ -718,6 +719,31 @@ mod tests {
                 assert!(
                     (mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4,
                     "mesh uv ({mesh_u}, {mesh_v}) vs normal uv ({u}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_deformed_mesh_uv_is_the_unit_sphere_uv_of_its_parametric_direction() {
+        // On an oblate mesh the normal no longer gives the vertex's UV, so the fragment
+        // shader samples branched flow by in.uv. That UV must be the compute shader's UV of
+        // the point's parametric direction (x / r_eq, y / r_pol, z / r_eq) (#46).
+        let (radius, aspect_ratio) = (1.0, 0.7);
+        let full_mesh = SphereMesh::new_ellipsoid(radius, 1, aspect_ratio);
+        let (patch_vertices, _) =
+            SpherePatch::new(0.75, 0.5, 0.158, 16).generate_mesh_indexed(radius, aspect_ratio);
+        for vertex in full_mesh.vertices.iter().chain(&patch_vertices) {
+            let [x, y, z] = vertex.position;
+            let direction = Vec3::new(x / radius, y / (radius * aspect_ratio), z / radius);
+            let [u, v] = unit_sphere_to_uv(direction);
+            let [mesh_u, mesh_v] = vertex.uv;
+            let on_pole = direction.y.abs() > 0.9999;
+            let on_seam = !(1e-6..=1.0 - 1e-6).contains(&mesh_u);
+            if !on_pole && !on_seam {
+                assert!(
+                    (mesh_u - u).abs() < 1e-4 && (mesh_v - v).abs() < 1e-4,
+                    "mesh uv ({mesh_u}, {mesh_v}) vs parametric uv ({u}, {v})"
                 );
             }
         }

@@ -1,10 +1,12 @@
-//! Runs the shaders' own sphere-UV functions on the GPU and compares them with the
-//! Rust helpers the meshes use (`unit_sphere_to_uv` / `uv_to_unit_sphere`).
+//! Runs the compute shader's own sphere-UV functions on the GPU and compares them with
+//! the Rust helpers the meshes use (`unit_sphere_to_uv` / `uv_to_unit_sphere`).
 //!
 //! The patch view broke because the patch mesh and the shaders used longitude
-//! conventions half a turn apart (#46). A Rust port of the WGSL formula would not catch
-//! the WGSL changing, so this test extracts each function's source text from its shader
-//! file, wraps it in a one-line compute kernel and evaluates it on the device.
+//! conventions half a turn apart (#46). The fragment shader now samples branched flow by
+//! the mesh UV, so the remaining WGSL-side convention lives in `branched_flow_compute.wgsl`,
+//! which deposits by UV. A Rust port of its formulas would not catch the WGSL changing, so
+//! this test extracts each function's source text from the shader file, wraps it in a
+//! one-line compute kernel and evaluates it on the device.
 //!
 //! GPU tests are `#[ignore]`d; run them with `scripts/test-local.sh -- --ignored`
 //! (lavapipe works).
@@ -180,12 +182,6 @@ fn assert_uv_matches_rust(shader_file: &str, function: &str) {
             gpu_uv[1]
         );
     }
-}
-
-#[test]
-#[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
-fn bubble_fragment_uv_matches_the_mesh_convention() {
-    assert_uv_matches_rust("bubble.wgsl", "normal_to_branched_uv");
 }
 
 #[test]

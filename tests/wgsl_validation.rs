@@ -122,3 +122,28 @@ fn known_extra_pi_phase_entries_are_still_needed() {
         );
     }
 }
+
+#[test]
+fn bubble_samples_branched_flow_by_mesh_uv() {
+    // Source-level guard for issue #46: the compute shader deposits branched flow by the
+    // shared sphere UV, and the mesh UV is in that convention (tested in
+    // physics::geometry). A UV re-derived from the normal differs on the deformed mesh.
+    let source = std::fs::read_to_string(Path::new(SHADER_DIR).join("bubble.wgsl"))
+        .expect("bubble.wgsl exists");
+    let calls: Vec<&str> = source
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .filter(|code| code.contains("compute_branched_flow(") && !code.contains("fn "))
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "bubble.wgsl no longer calls compute_branched_flow"
+    );
+    for call in calls {
+        assert!(
+            call.contains("compute_branched_flow(in.uv"),
+            "branched flow must be sampled by the mesh UV (issue #46): {}",
+            call.trim()
+        );
+    }
+}
