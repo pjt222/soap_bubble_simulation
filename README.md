@@ -92,15 +92,26 @@ WSLg (Windows Subsystem for Linux GUI) is recommended for running the simulation
 # Recommended: Run with WSLg (Wayland) - requires XDG_RUNTIME_DIR
 XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir cargo run --release
 
-# Alternative: Force X11 backend (if Wayland fails)
-WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 cargo run --release
+# Alternative: Force X11 (if Wayland fails); winit 0.30 ignores WINIT_UNIX_BACKEND
+WAYLAND_DISPLAY= cargo run --release      # or ./run.sh
 
 # If WSLg isn't available, use an X server (VcXsrv, X410):
 export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0
 cargo run --release
 ```
 
-**Note:** WSLg uses software rendering (llvmpipe) which may cause occasional connection drops. If the app crashes unexpectedly, simply restart it.
+**GPU acceleration on WSL2:** by default wgpu renders on llvmpipe (CPU). With Mesa 26 or newer
+installed, its Dozen driver exposes the Windows GPUs as Vulkan adapters, but wgpu hides them because
+Dozen is not a conformant Vulkan implementation. Opt in with:
+
+```bash
+WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 ./run.sh
+```
+
+The log line `GPU adapter: ...` names the adapter in use. On an RTX 3070 Ti Laptop GPU the default scene
+ran at 28.5–34.6 FPS through Dozen versus 5.5–6.0 FPS on llvmpipe (2026-10-09, release build, vsync on).
+`scripts/gpu/probe-adapters.sh --app 30` reproduces the comparison. All standard `WGPU_*` overrides
+(`WGPU_BACKEND`, `WGPU_POWER_PREF`, ...) are honoured.
 
 ### Controls
 
