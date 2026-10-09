@@ -160,7 +160,9 @@ the film turns black.
 
 The two-beam approximation `I ∝ (1 + cos(φ + π)) / 2 = (1 − cos φ) / 2` is the low-reflectance
 limit of the same expression; there the `+π` is written explicitly because no `r₂₁ = −r₁₂` term
-carries it. `scripts/physics/thin_film_reference.py` compares both against the exact slab formula.
+carries it. `scripts/physics/thin_film_reference.py` tabulates the exact slab reflectance next to
+Airy per polarisation, the shipped convention (s/p averaged before Airy, exact only at normal
+incidence; issue #51) and the inverted `+π` form.
 
 ### Color Mapping
 
