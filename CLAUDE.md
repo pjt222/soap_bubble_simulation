@@ -103,16 +103,20 @@ and WGSL structs must match exactly — verified by size alignment tests.
 
 ## Patch View Mode
 
-The patch view mode renders a small curved rectangular patch (~10% of sphere surface)
+The patch view mode renders a small curved rectangular patch (~15% of the sphere at the
+default size; `SpherePatch::sphere_fraction`)
 instead of the full bubble. This provides a focused view of branched flow effects.
 
 **One UV convention everywhere:** `u = (atan2(z, x) + π) / 2π` (u = 0.5 at +x),
 `v = acos(y) / π`. In Rust it is `unit_sphere_to_uv` / `uv_to_unit_sphere` in
 `physics/geometry.rs`, used by `SpherePatch` and the sphere mesh; in WGSL it is `normal_to_uv`
-/ `uv_to_sphere` (`branched_flow_compute.wgsl`) and `normal_to_branched_uv` (`bubble.wgsl`).
-The shaders derive UV from the normal, so a mesh built with another convention is drawn where
-the shaders do not look: the patch mesh used `φ = 2πu` and rendered half a turn away (#46).
-`tests/wgsl_uv_convention.rs` runs the WGSL functions on the GPU against the Rust helpers.
+/ `uv_to_sphere` (`branched_flow_compute.wgsl`), which deposits branched flow by UV. The
+fragment shader samples that texture by the mesh UV (`in.uv`), so a mesh built with another
+convention is drawn where the deposits are not: the patch mesh used `φ = 2πu` and rendered
+half a turn away (#46). It does not re-derive UV from the normal, which on the deformed
+(oblate) mesh is not the vertex's UV. The geometry tests tie mesh UV to the convention (CI);
+`tests/wgsl_uv_convention.rs` runs the compute shader's functions on the GPU against the Rust
+helpers (`#[ignore]`, lavapipe via `scripts/test-local.sh`; CI does not run it).
 
 **Key insight — rays are spawned within the patch region:**
 - The `SpherePatch` struct generates a curved mesh from UV bounds on the sphere
@@ -124,7 +128,12 @@ the shaders do not look: the patch mesh used `φ = 2πu` and rendered half a tur
   chart origin) applies to both. Measured on lavapipe, one frame, patch at u = 0.5: 90% of
   the patch texture lit, against 4.8% (and none of the left half) before #46. The GPU tests
   keep the patch at u = 0.5 on purpose: at the default u = 0.75 the patch centre is the
-  laser entry, so a wrong chart origin would not show
+  laser entry, so a wrong chart origin would not show. The test checks that rays reach the
+  whole patch, not that branching is visible (straight, unscattered rays score 94.5%)
+- Larger patches lose their outer columns: rays starting 84° or more from the patch centre
+  are not traced, and the loop stops rays beyond chart radius 2.5 (68°). Lit share, one frame:
+  half size 0.158 → 90%, 0.20 → 80%, 0.25 → 61%, 0.30 → 47% (the slider goes to 0.3).
+  Exponential-map propagation (#47) would remove both limits
 - The default patch centre is u = 0.75, v = 0.5 (+z): it faces the default camera and holds
   the default laser entry. Visual check on Dozen (`probe-adapters.sh --app 45 --compute
   --screenshot-after 15`): filaments show on the upstream part of the patch, the downstream

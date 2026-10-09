@@ -1048,6 +1048,8 @@ mod tests {
         // wrong origin would go unnoticed. Measured on lavapipe, one frame: before #46 4.8%
         // of texels lit and none in the left half; chart centred on the patch but the old
         // beam-line spawn, 14%; rays starting over the whole patch, 90% (halves 87-93%).
+        // This checks that rays REACH the whole patch, not that branching is visible:
+        // straight, unscattered rays of the same length score 94.5%.
         let Some((device, queue)) = test_device() else {
             panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
         };

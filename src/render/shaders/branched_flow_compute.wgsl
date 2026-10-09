@@ -475,8 +475,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Patch mode: start every ray at a point of the patch UV rectangle, so the deposits
     // cover the whole visible patch. pos_2d is that point's gnomonic chart coordinate
     // (the inverse of the pos_3d mapping in the loop). Points 84 degrees or more from
-    // the patch centre (only near the largest patch size) have no usable chart
-    // coordinate, so those rays are not traced.
+    // the patch centre have no usable chart coordinate, so those rays are not traced.
+    // Larger patches lose their outer columns: the loop also stops rays beyond chart
+    // radius 2.5 (68 degrees) after one deposit. Measured lit share, one frame, centre
+    // u = 0.5: half size 0.158 90%, 0.20 80%, 0.25 61%, 0.30 47%. Exponential-map
+    // propagation (#47) would remove both limits.
     if (params.patch_enabled != 0u) {
         let start_3d = uv_to_sphere(map_to_patch(rand1, rand2));
         let cos_from_origin = dot(start_3d, entry_point);
