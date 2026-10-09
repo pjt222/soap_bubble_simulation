@@ -8,7 +8,8 @@ docs/audit-2026-10-09-issues.json). Standard library only.
 
 Run from the project root:
 
-    python3 scripts/audit/findings.py table  FINDINGS
+    python3 scripts/audit/findings.py table  FINDINGS [--groups GROUPS --filed FILED]
+    python3 scripts/audit/findings.py filed  GROUPS FILED
     python3 scripts/audit/findings.py check  FINDINGS GROUPS
     python3 scripts/audit/findings.py draft  FINDINGS GROUPS --out DIR
     python3 scripts/audit/findings.py file   FINDINGS GROUPS --out DIR [--yes]
@@ -84,30 +85,82 @@ def escape_cell(text):
 # ---------------------------------------------------------------- table
 
 
+def filed_locations(groups_path, filed_path):
+    """Map finding id -> where it was filed ('#42', or '#35 (comment)')."""
+    spec = load_groups(groups_path)
+    filed = json.loads(Path(filed_path).read_text(encoding="utf-8"))
+    locations = {}
+    for group in spec["groups"]:
+        record = filed.get(group["key"])
+        if not record:
+            label = "not filed"
+        elif group["kind"] == "issue":
+            label = f"#{record['number']}"
+        else:
+            label = f"#{group['target']} (comment)"
+        for finding_id in group.get("findings", []):
+            locations[finding_id] = label
+    return locations
+
+
 def command_table(arguments):
     findings = load_findings(arguments.findings)
+    if bool(arguments.groups) != bool(arguments.filed):
+        sys.exit("error: --groups and --filed go together")
+    locations = filed_locations(arguments.groups, arguments.filed) if arguments.groups else None
     ordered = sorted(
         findings.values(),
         key=lambda f: (SEVERITY_ORDER[effective_severity(f)], f["dimension"], f["id"]),
     )
-    print("| id | sev | verdict | evidence | location | title | issue |")
+    last_header = "filed as" if locations else "issue"
+    print(f"| id | sev | verdict | evidence | location | title | {last_header} |")
     print("|---|---|---|---|---|---|---|")
     for finding in ordered:
         location = f"`{finding['file']}:{finding['line']}`"
+        issue_cell = locations.get(finding["id"], "not filed") if locations else finding["related_issue"]
         print(
             f"| {finding['id']} | {effective_severity(finding)} | {verdict_label(finding)} "
             f"| {finding['evidence_kind']} | {location} | {escape_cell(finding['title'])} "
-            f"| {finding['related_issue']} |"
+            f"| {issue_cell} |"
         )
+    return 0
+
+
+def command_filed(arguments):
+    spec = load_groups(arguments.groups)
+    filed = json.loads(Path(arguments.filed).read_text(encoding="utf-8"))
+    print("| filed as | group | title / target | findings |")
+    print("|---|---|---|---|")
+    for group in spec["groups"]:
+        record = filed.get(group["key"])
+        if not record:
+            reference = "not filed"
+        elif group["kind"] == "issue":
+            reference = f"#{record['number']}"
+        else:
+            reference = f"#{group['target']} (comment)"
+        label = escape_cell(group.get("title") or f"status update on #{group['target']}")
+        finding_ids = ", ".join(group.get("findings", [])) or "-"
+        print(f"| {reference} | {group['key']} | {label} | {finding_ids} |")
     return 0
 
 
 # ---------------------------------------------------------------- check
 
 
+def placeholder_text(group):
+    """All spec fields in which {#key} placeholders are resolved."""
+    return " ".join(
+        [group.get("title", ""), group.get("summary", ""), group.get("related", "")]
+        + group.get("acceptance", [])
+        + group.get("lead_findings", [])
+    )
+
+
 def validate(findings, spec):
     problems = []
     seen_keys = []
+    issue_keys = set()
     assignment = {}
     for group in spec["groups"]:
         key = group["key"]
@@ -129,13 +182,14 @@ def validate(findings, spec):
                 problems.append(f"{finding_id}: in both {assignment[finding_id]} and {key}")
             else:
                 assignment[finding_id] = key
-        text = " ".join(
-            [group.get("summary", ""), group.get("related", "")] + group.get("acceptance", [])
-        )
-        for referenced in PLACEHOLDER.findall(text):
+        for referenced in PLACEHOLDER.findall(placeholder_text(group)):
             if referenced not in seen_keys:
                 problems.append(f"{key}: placeholder {{#{referenced}}} must reference an earlier group")
+            elif referenced not in issue_keys:
+                problems.append(f"{key}: placeholder {{#{referenced}}} points at a comment group, which has no issue number")
         seen_keys.append(key)
+        if kind == "issue":
+            issue_keys.add(key)
     unassigned = sorted(set(findings) - set(assignment))
     for finding_id in unassigned:
         problems.append(f"unassigned finding: {finding_id}")
@@ -205,7 +259,7 @@ def render_group(group, findings, context, filed_numbers):
             index = 0
             for lead_text in group.get("lead_findings", []):
                 index += 1
-                parts += [f"### {index}. {lead_text}", ""]
+                parts += [f"### {index}. {resolve_placeholders(lead_text, filed_numbers)}", ""]
             for finding in member_findings:
                 index += 1
                 parts += [render_finding(index, finding, include_derivation), ""]
@@ -290,7 +344,8 @@ def command_file(arguments):
         body_path = out_dir / f"{position:02d}-{key}.md"
         body_path.write_text(body, encoding="utf-8")
         if group["kind"] == "issue":
-            command = ["gh", "issue", "create", "--title", group["title"], "--body-file", str(body_path)]
+            title = resolve_placeholders(group["title"], filed_numbers)
+            command = ["gh", "issue", "create", "--title", title, "--body-file", str(body_path)]
             for label in group.get("labels", []):
                 command += ["--label", label]
         else:
@@ -301,12 +356,23 @@ def command_file(arguments):
         try:
             url = run_gh(command)
         except RuntimeError as error:
+            # Later groups may reference this one through {#key}; filing them now would
+            # bake "(not yet filed)" text into GitHub. Stop and let a re-run resume here.
             failures += 1
             print(f"FAILED {key}: {error}")
-            continue
-        number = int(url.rstrip("/").split("/")[-1]) if group["kind"] == "issue" else None
-        filed[key] = {"url": url, "number": number, "kind": group["kind"]}
+            print("stopping: fix the error and re-run; filed groups are skipped")
+            break
+        # Record the URL before parsing it, so a parse error can never cause a duplicate on re-run.
+        filed[key] = {"url": url, "number": None, "kind": group["kind"]}
         filed_path.write_text(json.dumps(filed, indent=1) + "\n", encoding="utf-8")
+        if group["kind"] == "issue":
+            last_segment = url.rstrip("/").split("/")[-1]
+            if not last_segment.isdigit():
+                failures += 1
+                print(f"FAILED {key}: created {url!r} but could not read its issue number; set it in {filed_path}")
+                break
+            filed[key]["number"] = int(last_segment)
+            filed_path.write_text(json.dumps(filed, indent=1) + "\n", encoding="utf-8")
         print(f"filed {key}: {url}")
     print_summary(spec, filed)
     return 1 if failures else 0
@@ -333,7 +399,14 @@ def main():
 
     table_parser = subcommands.add_parser("table", help="print a markdown table of all findings")
     table_parser.add_argument("findings")
+    table_parser.add_argument("--groups", help="grouping spec; with --filed, the last column shows where each finding was filed")
+    table_parser.add_argument("--filed", help="filed.json written by the `file` command")
     table_parser.set_defaults(handler=command_table)
+
+    filed_parser = subcommands.add_parser("filed", help="print a markdown table of filed issues/comments and their findings")
+    filed_parser.add_argument("groups")
+    filed_parser.add_argument("filed")
+    filed_parser.set_defaults(handler=command_filed)
 
     check_parser = subcommands.add_parser("check", help="validate a grouping spec against the findings")
     check_parser.add_argument("findings")

@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""Exact thin-film reflectance reference for checking the interference code.
+"""Thin-film reflectance reference: documents the math behind the interference code.
 
 Computes the reflectance of a free-standing film (air | film | air) from the
-exact complex-amplitude slab formula and compares it with the Airy expression
-the renderer uses, both with the correct geometric phase and with the extra
-pi that issue #42 removed. Standard library only.
+exact complex-amplitude slab formula and tabulates it next to:
+
+  airy      Airy per polarisation with the geometric phase, averaged afterwards
+            (algebraically identical to the exact formula),
+  shipped   the convention the renderer ships: s/p Fresnel reflectances averaged
+            BEFORE a single Airy evaluation (exact at normal incidence, an
+            approximation at oblique incidence; optics-07, issue #51),
+  airy+pi   the inverted-fringe form that issue #42 removed.
+
+This script does not import or run the project's code, so it cannot detect a
+regression there; the Rust tests in src/physics/interference.rs and
+src/render/interference_lut.rs (and tests/wgsl_validation.rs for the shaders)
+guard the code. Standard library only.
 
     python3 scripts/physics/thin_film_reference.py                 # table, 532 nm, normal incidence
     python3 scripts/physics/thin_film_reference.py --wavelength 450 --cos-theta 0.6
-    python3 scripts/physics/thin_film_reference.py --check         # exit 1 unless Airy(no pi) == exact
+    python3 scripts/physics/thin_film_reference.py --check         # exit 1 unless airy == exact (math sanity)
 
 Physics: with r12 = -r21 (Stokes), the slab amplitude is
     r = (r12 + r23 e^{i delta}) / (1 + r12 r23 e^{i delta}),  r23 = -r12,
@@ -78,6 +88,13 @@ def airy_per_polarisation(thickness_nm, cos_theta_incident, refractive_index, wa
     return 0.5 * (airy_reflectance(delta, r_s**2) + airy_reflectance(delta, r_p**2))
 
 
+def airy_as_shipped(thickness_nm, cos_theta_incident, refractive_index, wavelength_nm):
+    cos_theta_film = cos_transmitted(cos_theta_incident, refractive_index)
+    delta = geometric_phase(thickness_nm, cos_theta_film, refractive_index, wavelength_nm)
+    r_s, r_p = interface_amplitudes(cos_theta_incident, cos_theta_film, refractive_index)
+    return airy_reflectance(delta, 0.5 * (r_s**2 + r_p**2))
+
+
 def main():
     require_project_root()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -88,6 +105,12 @@ def main():
     parser.add_argument("--step", type=float, default=25.0, help="nm between table rows")
     parser.add_argument("--check", action="store_true", help="fail unless Airy without pi matches exact to 1e-12")
     arguments = parser.parse_args()
+    if not 0.0 < arguments.cos_theta <= 1.0:
+        parser.error("--cos-theta must be in (0, 1]; grazing incidence makes the surface reflectance 1")
+    if arguments.n <= 1.0:
+        parser.error("--n must exceed 1 (light enters the film from air; n <= 1 allows total internal reflection)")
+    if arguments.step <= 0.0:
+        parser.error("--step must be positive")
 
     cos_theta_film = cos_transmitted(arguments.cos_theta, arguments.n)
     quarter_wave = arguments.wavelength / (4.0 * arguments.n * cos_theta_film)
@@ -95,17 +118,21 @@ def main():
         f"n={arguments.n}  lambda={arguments.wavelength} nm  cos(theta_i)={arguments.cos_theta}  "
         f"cos(theta_t)={cos_theta_film:.6f}  first maximum at d={quarter_wave:.2f} nm"
     )
-    print(f"{'d (nm)':>8} {'exact':>10} {'airy':>10} {'airy+pi':>10}")
+    print(f"{'d (nm)':>8} {'exact':>10} {'airy':>10} {'shipped':>10} {'airy+pi':>10}")
     worst_error = 0.0
+    worst_shipped_error = 0.0
     thickness = 0.0
     while thickness <= arguments.max_thickness + 1e-9:
         exact = exact_reflectance(thickness, arguments.cos_theta, arguments.n, arguments.wavelength)
         airy = airy_per_polarisation(thickness, arguments.cos_theta, arguments.n, arguments.wavelength, 0.0)
+        shipped = airy_as_shipped(thickness, arguments.cos_theta, arguments.n, arguments.wavelength)
         airy_pi = airy_per_polarisation(thickness, arguments.cos_theta, arguments.n, arguments.wavelength, math.pi)
         worst_error = max(worst_error, abs(airy - exact))
-        print(f"{thickness:8.1f} {exact:10.6f} {airy:10.6f} {airy_pi:10.6f}")
+        worst_shipped_error = max(worst_shipped_error, abs(shipped - exact))
+        print(f"{thickness:8.1f} {exact:10.6f} {airy:10.6f} {shipped:10.6f} {airy_pi:10.6f}")
         thickness += arguments.step
     print(f"max |airy - exact| = {worst_error:.3e}")
+    print(f"max |shipped - exact| = {worst_shipped_error:.3e}  (s/p averaged before Airy; 0 at normal incidence)")
     if arguments.check and worst_error > 1e-12:
         print("CHECK FAILED: Airy (geometric phase) disagrees with the exact slab formula")
         return 1

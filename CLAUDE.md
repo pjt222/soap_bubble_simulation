@@ -47,7 +47,9 @@ soap-bubble-sim/
 - Optical path (two-beam convention): `δ = 2 n_film d cos(θ_t) + λ/2`. The code uses the Airy
   form `R = F sin²(φ/2) / (1 + F sin²(φ/2))` with the **geometric** phase `φ = 4π n_film d cos(θ_t) / λ`
   and no extra π, because `r21 = −r12` already carries the half-wave flip; adding π inverts every
-  fringe (issue #42). Check with `scripts/physics/thin_film_reference.py --check`
+  fringe (issue #42). Guarded by the interference tests in `src/physics/interference.rs`,
+  `src/render/interference_lut.rs` and `tests/wgsl_validation.rs`; `scripts/physics/thin_film_reference.py`
+  tabulates the math (it does not run the project code)
 - Wavelengths: R=650nm, G=532nm, B=450nm
 - Fresnel reflection via Schlick approximation
 
