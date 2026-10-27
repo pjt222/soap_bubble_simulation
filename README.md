@@ -5,6 +5,7 @@ Physically accurate 3D soap bubble simulation in Rust with GPU-accelerated visua
 ![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 ![wgpu](https://img.shields.io/badge/wgpu-24.0-green)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pjt222/soap_bubble_simulation)
 
 ![Soap Bubble Simulation](showcase.gif)
 
