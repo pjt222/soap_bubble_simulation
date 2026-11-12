@@ -249,6 +249,115 @@ const STREAM_JITTER_V: u32 = 2;
 const STREAM_SIGN: u32 = 3;
 const STREAM_STRENGTH: u32 = 4;
 const STREAM_RADIUS: u32 = 5;
+const STREAM_DRIFT_RADIUS: u32 = 6;
+const STREAM_DRIFT_ANGLE: u32 = 7;
+
+/// Scatterer drift (#47). Each scatterer's velocity follows an Ornstein-Uhlenbeck process:
+/// zero mean, exponentially correlated, so it moves smoothly and changes direction over
+/// a few seconds without a net drift. RMS velocity per axis in UV per film-second;
+/// sqrt(2) * 0.021 = 0.03, about one default scatterer radius per second.
+const DRIFT_SPEED_PER_AXIS: f32 = 0.021;
+/// Correlation time of the drift velocity in film-seconds
+const DRIFT_CORRELATION_TIME: f32 = 3.0;
+/// Longest film-time step applied at once; a longer gap (a hitch) moves this far only
+const MAX_DRIFT_STEP: f32 = 0.1;
+
+/// Two independent standard normal values for scatterer `index` at drift `step`
+/// (Box-Muller on two hash streams)
+fn gaussian_pair(index: u32, step: u32) -> (f32, f32) {
+    let radius = (-2.0 * (1.0 - unit_random(index, STREAM_DRIFT_RADIUS, step)).ln()).sqrt();
+    let angle = std::f32::consts::TAU * unit_random(index, STREAM_DRIFT_ANGLE, step);
+    (radius * angle.cos(), radius * angle.sin())
+}
+
+/// Where scatterers may drift: a UV rectangle, with u wrapping around the sphere in
+/// full-sphere mode and reflecting at the edges in patch mode. v always reflects (poles).
+#[derive(Debug, Clone, Copy)]
+struct DriftBounds {
+    min_u: f32,
+    max_u: f32,
+    min_v: f32,
+    max_v: f32,
+    wrap_u: bool,
+}
+
+/// Folds `value` into [low, high] by reflection at both ends. Returns the folded value
+/// and whether it was reflected an odd number of times (the velocity then flips).
+fn reflect_into(value: f32, low: f32, high: f32) -> (f32, bool) {
+    let span = high - low;
+    if span <= 0.0 {
+        return (low, false);
+    }
+    let folded = ((value - low) / span).rem_euclid(2.0);
+    if folded > 1.0 {
+        (low + (2.0 - folded) * span, true)
+    } else {
+        (low + folded * span, false)
+    }
+}
+
+/// Film time to drift by, given the film time of the previous update. Zero while the
+/// film is paused (time unchanged) or after it went backwards (a reset); capped at
+/// MAX_DRIFT_STEP.
+fn drift_time_step(previous_time: f32, time: f32) -> f32 {
+    (time - previous_time).clamp(0.0, MAX_DRIFT_STEP)
+}
+
+/// Advances each scatterer's Ornstein-Uhlenbeck velocity by `dt` film-seconds (exact
+/// update for that step) and moves the scatterer with it inside `bounds`. `step` seeds
+/// the noise, so successive calls must pass different steps. Before #47 the motion was
+/// `(fract(sin(...) * 43758.547) - 0.5) * 0.001` per frame, whose sign-preserving fract
+/// gave every scatterer a mean step of -0.0005 UV per frame on both axes.
+fn drift_scatterers(
+    scatterers: &mut [ScattererGPU],
+    velocities: &mut [[f32; 2]],
+    dt: f32,
+    step: u32,
+    bounds: DriftBounds,
+) {
+    let decay = (-dt / DRIFT_CORRELATION_TIME).exp();
+    let kick = DRIFT_SPEED_PER_AXIS * (1.0 - decay * decay).sqrt();
+    for (index, (scatterer, velocity)) in
+        scatterers.iter_mut().zip(velocities.iter_mut()).enumerate()
+    {
+        let (noise_u, noise_v) = gaussian_pair(index as u32, step);
+        velocity[0] = velocity[0] * decay + kick * noise_u;
+        velocity[1] = velocity[1] * decay + kick * noise_v;
+
+        let moved_u = scatterer.pos_u + velocity[0] * dt;
+        if bounds.wrap_u {
+            scatterer.pos_u = moved_u.rem_euclid(1.0);
+        } else {
+            let (folded, reflected) = reflect_into(moved_u, bounds.min_u, bounds.max_u);
+            scatterer.pos_u = folded;
+            if reflected {
+                velocity[0] = -velocity[0];
+            }
+        }
+        let (folded, reflected) = reflect_into(
+            scatterer.pos_v + velocity[1] * dt,
+            bounds.min_v,
+            bounds.max_v,
+        );
+        scatterer.pos_v = folded;
+        if reflected {
+            velocity[1] = -velocity[1];
+        }
+    }
+}
+
+/// Velocities drawn from the drift's stationary distribution, so motion starts at once
+fn initial_drift_velocities(count: usize, step: u32) -> Vec<[f32; 2]> {
+    (0..count as u32)
+        .map(|index| {
+            let (noise_u, noise_v) = gaussian_pair(index, step);
+            [
+                DRIFT_SPEED_PER_AXIS * noise_u,
+                DRIFT_SPEED_PER_AXIS * noise_v,
+            ]
+        })
+        .collect()
+}
 
 /// Generate scatterers using quasi-random distribution with jitter
 /// Uses Halton sequence for good spatial coverage
@@ -370,8 +479,15 @@ pub struct BranchedFlowSimulator {
     last_patch_center_u: f32,
     last_patch_center_v: f32,
     last_patch_half_size: f32,
-    /// Stored scatterers for temporal coherence (Brownian perturbation between regenerations)
+    /// Scatterers in generation order (stable identity for their drift); a sorted copy is
+    /// uploaded each frame
     current_scatterers: Vec<ScattererGPU>,
+    /// Drift velocity of each scatterer in UV per film-second, same order
+    scatterer_velocities: Vec<[f32; 2]>,
+    /// Film time of the last scatterer update, for the drift step
+    last_scatterer_time: f32,
+    /// Counter that seeds the drift noise; advances with every drift step
+    drift_step: u32,
     /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
     /// at the current chart origin before every upload
     beam_angle_deg: f32,
@@ -619,6 +735,9 @@ impl BranchedFlowSimulator {
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
             current_scatterers: Vec::new(),
+            scatterer_velocities: Vec::new(),
+            last_scatterer_time: 0.0,
+            drift_step: 0,
             beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
         }
     }
@@ -698,14 +817,38 @@ impl BranchedFlowSimulator {
         }
     }
 
+    /// The region scatterers drift in: the patch rectangle in patch mode, the whole sphere
+    /// (u wrapping) otherwise
+    fn drift_bounds(&self) -> DriftBounds {
+        if self.params.patch_enabled != 0 {
+            let half_size = self.params.patch_half_size;
+            DriftBounds {
+                min_u: (self.params.patch_center_u - half_size).max(0.0),
+                max_u: (self.params.patch_center_u + half_size).min(1.0),
+                min_v: (self.params.patch_center_v - half_size).max(0.0),
+                max_v: (self.params.patch_center_v + half_size).min(1.0),
+                wrap_u: false,
+            }
+        } else {
+            DriftBounds {
+                min_u: 0.0,
+                max_u: 1.0,
+                min_v: 0.0,
+                max_v: 1.0,
+                wrap_u: true,
+            }
+        }
+    }
+
     /// Update scatterer positions with temporal coherence.
     ///
     /// When structural parameters change (count, radius, patch bounds), scatterers are
-    /// fully regenerated. Otherwise, small Brownian perturbations are applied each frame
-    /// so the branching pattern evolves smoothly like real micelle clusters drifting in
-    /// the film, rather than jumping discontinuously.
+    /// fully regenerated. Otherwise each scatterer drifts with its own smooth, zero-mean
+    /// velocity (see [`drift_scatterers`]) by the film time elapsed since the last update,
+    /// so the pattern evolves continuously and stops while the film is paused. Scatterers
+    /// reflect at the patch edges and the poles; in full-sphere mode u wraps.
     ///
-    /// Sorts scatterers by grid cell and builds prefix-sum cell_offsets for O(k) GPU lookup.
+    /// Uploads a copy sorted by grid cell, with prefix-sum cell_offsets for O(k) GPU lookup.
     pub fn update_scatterers(&mut self, queue: &wgpu::Queue, time: f32) {
         // Check if parameters changed since last upload
         self.check_scatterer_params_changed();
@@ -729,41 +872,32 @@ impl BranchedFlowSimulator {
                 self.params.scatterer_radius,
                 patch_bounds,
             );
+            self.scatterer_velocities =
+                initial_drift_velocities(self.current_scatterers.len(), self.drift_step);
+            self.drift_step = self.drift_step.wrapping_add(1);
+            self.last_scatterer_time = time;
             self.scatterers_dirty = false;
         } else if !self.current_scatterers.is_empty() {
-            // Brownian perturbation: smooth temporal evolution
-            // Each scatterer drifts ~0.001 UV units per frame (~3% of σ per frame).
-            // Over ~30 frames the pattern shifts noticeably but continuously.
-            let perturbation_scale = 0.001f32;
-
-            let (min_u, max_u, min_v, max_v) = if self.params.patch_enabled != 0 {
-                let hs = self.params.patch_half_size;
-                (
-                    (self.params.patch_center_u - hs).max(0.0),
-                    (self.params.patch_center_u + hs).min(1.0),
-                    (self.params.patch_center_v - hs).max(0.0),
-                    (self.params.patch_center_v + hs).min(1.0),
-                )
-            } else {
-                (0.0, 1.0, 0.0, 1.0)
-            };
-
-            for (i, s) in self.current_scatterers.iter_mut().enumerate() {
-                // Pseudo-random perturbation using time × frequency mixing
-                // Different frequencies per scatterer prevent correlated drift
-                let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
-                let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
-                s.pos_u =
-                    (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale).clamp(min_u, max_u);
-                s.pos_v =
-                    (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale).clamp(min_v, max_v);
+            let dt = drift_time_step(self.last_scatterer_time, time);
+            self.last_scatterer_time = time;
+            if dt > 0.0 {
+                let bounds = self.drift_bounds();
+                drift_scatterers(
+                    &mut self.current_scatterers,
+                    &mut self.scatterer_velocities,
+                    dt,
+                    self.drift_step,
+                    bounds,
+                );
+                self.drift_step = self.drift_step.wrapping_add(1);
             }
         } else {
             return; // No scatterers to update
         }
 
-        // Sort scatterers by grid cell for true spatial hash
-        self.current_scatterers.sort_by_key(|s| {
+        // Sort a copy by grid cell for the spatial hash; the stored order stays stable
+        let mut sorted_scatterers = self.current_scatterers.clone();
+        sorted_scatterers.sort_by_key(|s| {
             let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
             let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
             v_cell * GRID_SIZE_U + u_cell
@@ -772,7 +906,7 @@ impl BranchedFlowSimulator {
         // Build prefix-sum cell_offsets: offsets[i] = start index of cell i in sorted array
         let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
         let mut cell_offsets = vec![0u32; total_cells + 1];
-        for s in &self.current_scatterers {
+        for s in &sorted_scatterers {
             let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
             let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
             let cell_idx = (v_cell * GRID_SIZE_U + u_cell) as usize;
@@ -786,7 +920,7 @@ impl BranchedFlowSimulator {
         queue.write_buffer(
             &self.scatterer_buffer,
             0,
-            bytemuck::cast_slice(&self.current_scatterers),
+            bytemuck::cast_slice(&sorted_scatterers),
         );
         queue.write_buffer(
             &self.cell_offsets_buffer,
@@ -1537,6 +1671,202 @@ mod tests {
             let mean = factors.iter().sum::<f32>() / factors.len() as f32;
             assert!((mean - 1.0).abs() < 0.03, "{name} factor mean {mean}");
         }
+    }
+
+    /// `count` scatterers on a jittered grid inside the given UV rectangle
+    fn scatterers_in(
+        count: usize,
+        min_u: f32,
+        max_u: f32,
+        min_v: f32,
+        max_v: f32,
+    ) -> Vec<ScattererGPU> {
+        (0..count as u32)
+            .map(|index| ScattererGPU {
+                pos_u: min_u + (max_u - min_u) * halton(index + 1, 2),
+                pos_v: min_v + (max_v - min_v) * halton(index + 1, 3),
+                strength: 0.5,
+                inv_sigma_sq: 1.0 / (2.0 * 0.03 * 0.03),
+            })
+            .collect()
+    }
+
+    /// Default patch rectangle (centre 0.75, 0.5, half size 0.158)
+    const DEFAULT_PATCH: DriftBounds = DriftBounds {
+        min_u: 0.592,
+        max_u: 0.908,
+        min_v: 0.342,
+        max_v: 0.658,
+        wrap_u: false,
+    };
+
+    #[test]
+    fn drift_velocity_is_zero_mean_at_the_set_speed() {
+        // The increments alone, far from any boundary: 400 scatterers for 50 film-seconds
+        // at 60 updates per second. Before #47 every scatterer moved by a mean of
+        // -0.0005 UV per frame on both axes, i.e. -0.03 UV per second.
+        let mut scatterers = scatterers_in(400, -0.5, 0.5, -0.5, 0.5);
+        let mut velocities = initial_drift_velocities(400, 0);
+        let unbounded = DriftBounds {
+            min_u: -1e6,
+            max_u: 1e6,
+            min_v: -1e6,
+            max_v: 1e6,
+            wrap_u: false,
+        };
+        let start: Vec<(f32, f32)> = scatterers.iter().map(|s| (s.pos_u, s.pos_v)).collect();
+        let (mut sum, mut sum_sq, mut samples) = ([0.0f64; 2], [0.0f64; 2], 0usize);
+        for step in 1..=3000 {
+            drift_scatterers(
+                &mut scatterers,
+                &mut velocities,
+                1.0 / 60.0,
+                step,
+                unbounded,
+            );
+            for velocity in &velocities {
+                for axis in 0..2 {
+                    sum[axis] += velocity[axis] as f64;
+                    sum_sq[axis] += (velocity[axis] as f64).powi(2);
+                }
+                samples += 1;
+            }
+        }
+        for axis in 0..2 {
+            let mean = sum[axis] / samples as f64;
+            let rms = (sum_sq[axis] / samples as f64).sqrt();
+            assert!(mean.abs() < 0.002, "axis {axis}: mean velocity {mean} UV/s");
+            assert!(
+                (rms / DRIFT_SPEED_PER_AXIS as f64 - 1.0).abs() < 0.1,
+                "axis {axis}: RMS velocity {rms} UV/s"
+            );
+        }
+        let mean_displacement = scatterers
+            .iter()
+            .zip(&start)
+            .map(|(s, &(u, v))| [(s.pos_u - u) as f64, (s.pos_v - v) as f64])
+            .fold([0.0; 2], |total, d| {
+                [total[0] + d[0] / 400.0, total[1] + d[1] / 400.0]
+            });
+        // The old bias would have moved every scatterer by -1.5 UV in 50 s
+        assert!(
+            mean_displacement.iter().all(|d| d.abs() < 0.05),
+            "mean displacement {mean_displacement:?} UV"
+        );
+    }
+
+    #[test]
+    fn drift_stops_while_the_film_is_paused() {
+        assert_eq!(
+            drift_time_step(4.0, 4.0),
+            0.0,
+            "paused: film time unchanged"
+        );
+        assert_eq!(drift_time_step(4.0, 1.0), 0.0, "film time reset");
+        assert_eq!(
+            drift_time_step(4.0, 9.0),
+            MAX_DRIFT_STEP,
+            "a long gap is capped"
+        );
+        assert!((drift_time_step(4.0, 4.0 + 1.0 / 60.0) - 1.0 / 60.0).abs() < 1e-6);
+        // A zero step leaves positions and velocities as they are
+        let mut scatterers = scatterers_in(50, 0.6, 0.9, 0.35, 0.65);
+        let mut velocities = initial_drift_velocities(50, 3);
+        let (before, velocities_before) = (scatterers.clone(), velocities.clone());
+        drift_scatterers(&mut scatterers, &mut velocities, 0.0, 7, DEFAULT_PATCH);
+        for (after, before) in scatterers.iter().zip(&before) {
+            assert_eq!((after.pos_u, after.pos_v), (before.pos_u, before.pos_v));
+        }
+        assert_eq!(velocities, velocities_before);
+    }
+
+    #[test]
+    fn drift_keeps_scatterers_spread_over_the_patch() {
+        // 60 film-seconds in the default patch. The old drift collected every scatterer
+        // in the patch's (min u, min v) corner within about 15 s; reflection at the edges
+        // keeps them spread, with no pile-up at an edge.
+        let patch = DEFAULT_PATCH;
+        let mut scatterers = scatterers_in(400, patch.min_u, patch.max_u, patch.min_v, patch.max_v);
+        let mut velocities = initial_drift_velocities(400, 0);
+        for step in 1..=3600 {
+            drift_scatterers(&mut scatterers, &mut velocities, 1.0 / 60.0, step, patch);
+        }
+        let (span_u, span_v) = (patch.max_u - patch.min_u, patch.max_v - patch.min_v);
+        let mut near_edge = 0;
+        for s in &scatterers {
+            assert!(
+                (patch.min_u..=patch.max_u).contains(&s.pos_u),
+                "u {} left the patch",
+                s.pos_u
+            );
+            assert!(
+                (patch.min_v..=patch.max_v).contains(&s.pos_v),
+                "v {} left the patch",
+                s.pos_v
+            );
+            let edge_distance_u = (s.pos_u - patch.min_u).min(patch.max_u - s.pos_u) / span_u;
+            let edge_distance_v = (s.pos_v - patch.min_v).min(patch.max_v - s.pos_v) / span_v;
+            if edge_distance_u < 0.02 || edge_distance_v < 0.02 {
+                near_edge += 1;
+            }
+        }
+        // A uniform spread puts about 7.8% within 2% of the span from an edge
+        assert!(near_edge < 60, "{near_edge} of 400 scatterers at an edge");
+        let lower_half = scatterers.iter().filter(|s| s.pos_v > 0.5).count();
+        let right_half = scatterers.iter().filter(|s| s.pos_u > 0.75).count();
+        assert!(
+            (140..=260).contains(&lower_half),
+            "{lower_half} of 400 in the lower half"
+        );
+        assert!(
+            (140..=260).contains(&right_half),
+            "{right_half} of 400 in the right half"
+        );
+    }
+
+    #[test]
+    fn drift_wraps_u_across_the_seam_in_full_sphere_mode() {
+        let full_sphere = DriftBounds {
+            min_u: 0.0,
+            max_u: 1.0,
+            min_v: 0.0,
+            max_v: 1.0,
+            wrap_u: true,
+        };
+        let mut scatterers = vec![ScattererGPU {
+            pos_u: 0.999,
+            pos_v: 0.5,
+            strength: 0.5,
+            inv_sigma_sq: 555.0,
+        }];
+        let mut velocities = vec![[0.06f32, 0.0]];
+        for step in 1..=60 {
+            drift_scatterers(
+                &mut scatterers,
+                &mut velocities,
+                1.0 / 60.0,
+                step,
+                full_sphere,
+            );
+        }
+        // About 0.05 UV east of the seam after one second, not held at u = 1
+        assert!(
+            scatterers[0].pos_u > 0.0 && scatterers[0].pos_u < 0.3,
+            "u = {} after crossing the seam",
+            scatterers[0].pos_u
+        );
+    }
+
+    #[test]
+    fn reflect_into_folds_values_back_into_the_range() {
+        assert_eq!(reflect_into(0.5, 0.0, 1.0), (0.5, false));
+        let (value, reflected) = reflect_into(1.1, 0.0, 1.0);
+        assert!((value - 0.9).abs() < 1e-6 && reflected);
+        let (value, reflected) = reflect_into(-0.2, 0.0, 1.0);
+        assert!((value - 0.2).abs() < 1e-6 && reflected);
+        let (value, reflected) = reflect_into(2.3, 0.0, 1.0);
+        assert!((value - 0.3).abs() < 1e-5 && !reflected, "two reflections");
+        assert_eq!(reflect_into(0.7, 0.4, 0.4), (0.4, false), "empty range");
     }
 
     #[test]
