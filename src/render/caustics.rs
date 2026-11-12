@@ -17,10 +17,12 @@
 //! `caustic_intensity` everywhere. The audit's smooth drained profile (30 nm at the top to
 //! 1000 nm at the bottom) spans 0.9% of it; how much the field the drainage solver will
 //! produce (#43) varies the map is not measured. On screen the ground adds
-//! `light * value * min(0.5 * value, 1)` (`SrcAlpha`, `One`), so inside 80% of the disc
-//! radius every value of about 1.45 or more saturates all three channels to the same
-//! white in an 8-bit target (derived, not rendered). The compute bind group is built once and is not rebuilt when
-//! the GPU drainage swaps buffers (#43).
+//! `min(light * value, 1) * min(0.5 * value, 1)` per channel (`SrcAlpha`, `One`; an
+//! 8-bit target clamps the colour to 1 before blending), so inside 80% of the disc radius
+//! every value of 2.0 or more renders the same white, whatever is behind it. A one-off
+//! render on lavapipe over black gave 0.72 (linear) at 1.45 and 1.0 at 2.0 and 3.0. The
+//! compute bind group is built once and is not rebuilt when the GPU drainage swaps
+//! buffers (#43).
 //!
 //! # Reference
 //! Patsyk et al. (2020) - Observation of branched flow of light

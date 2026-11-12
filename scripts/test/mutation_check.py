@@ -16,9 +16,11 @@ names (a build error, a crashed test binary, a missing driver) is inconclusive. 
         -- scripts/test-local.sh --no-fail-fast --lib -- --ignored --test-threads=1 caustic
 
 Restoring: FILE is restored in a `finally` block, which also runs on Ctrl-C, SIGTERM and
-SIGHUP. Before mutating, the original is copied to target/mutation-check/<name>.orig and
-deleted after a verified restore; if a run is killed with SIGKILL, that copy remains, and
-the next run refuses to start until you restore FILE from it and delete it.
+SIGHUP. Before mutating, the original is copied byte-for-byte to
+target/mutation-check/<name>.orig, with FILE's path in <name>.orig.path; both are deleted
+after a verified restore. If a run is killed with SIGKILL they remain, and the next run
+refuses to start until you restore FILE (`cp <name>.orig "$(cat <name>.orig.path)"`) and
+delete both.
 
 Outputs go to target/mutation-check/<name>.baseline.log and <name>.log. Exit status:
 0 caught, 1 not caught (the mutated run passed), 2 anything else (usage error, baseline
@@ -110,9 +112,11 @@ def main() -> int:
     stem = re.sub(r"[^A-Za-z0-9_.-]", "_", args.name)
     leftover_backups = sorted(LOG_DIR.glob("*.orig"))
     if leftover_backups:
+        leftover = leftover_backups[0]
         print(
-            f"error: {leftover_backups[0]} exists: an earlier run did not finish. Restore the "
-            "mutated file from it (the first line names the file), then delete it.",
+            f"error: {leftover} exists: an earlier run did not finish. Restore with "
+            f'cp {leftover} "$(cat {leftover}.path)", then delete {leftover} and '
+            f"{leftover}.path.",
             file=sys.stderr,
         )
         return 2
@@ -141,7 +145,9 @@ def main() -> int:
                 )
                 return 2
         backup = LOG_DIR / f"{stem}.orig"
-        backup.write_bytes(f"{args.file}\n".encode("utf-8") + original)
+        backup_path_note = LOG_DIR / f"{stem}.orig.path"
+        backup.write_bytes(original)
+        backup_path_note.write_text(f"{args.file}\n", encoding="utf-8")
         try:
             args.file.write_bytes(text.replace(args.old, args.new).encode("utf-8"))
             status, output = run(command, LOG_DIR / f"{stem}.log")
@@ -149,6 +155,7 @@ def main() -> int:
             args.file.write_bytes(original)
             if args.file.read_bytes() == original:
                 backup.unlink()
+                backup_path_note.unlink()
         if backup.exists():
             print(f"error: {args.file} was NOT restored; see {backup}", file=sys.stderr)
             return 2
