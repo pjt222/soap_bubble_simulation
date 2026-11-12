@@ -337,10 +337,10 @@ mod tests {
 
         // View-projection matrix should match
         let vp = camera.view_projection_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
+        for (i, column) in uniform.view_proj.iter().enumerate() {
+            for (j, &value) in column.iter().enumerate() {
                 assert!(
-                    (uniform.view_proj[i][j] - vp.col(i)[j]).abs() < 0.001,
+                    (value - vp.col(i)[j]).abs() < 0.001,
                     "View-projection matrix mismatch at [{},{}]",
                     i,
                     j

@@ -164,7 +164,17 @@ helpers (`#[ignore]`, lavapipe via `scripts/test-local.sh`; CI does not run it).
   code before the loop; the loop body stayed byte-identical)
 
 **Scatterers:** When patch mode is active, scatterers are confined within the patch
-bounds for higher density coverage.
+bounds for higher density coverage. Each scatterer drifts with its own zero-mean
+Ornstein-Uhlenbeck velocity (RMS 0.021 UV per film-second per axis, correlation time 3 s),
+advanced by elapsed `film_time` (at most 1 film-second per update), so it stops while the
+film is paused. Scatterers reflect at the patch edges and the poles; u wraps in
+full-sphere mode. The CPU state lives in `ScattererField` (in generation order, so each
+scatterer keeps its velocity; the upload is a sorted copy). Their randomness comes from an
+integer hash (`unit_random`), because Rust's `f32::fract` keeps the sign. Before #47,
+`fract` gave every scatterer a mean drift of -0.0005 UV per frame toward the patch's
+(min u, min v) corner (top right on screen), made only 24% repulsive, and spread strength
+and radius over 0.4-1.2 instead of 0.8-1.2. Captures before and after:
+`docs/evidence/2026-11-12-scatterer-drift/`.
 
 ## Workflow Diagram (putior)
 

@@ -226,6 +226,230 @@ impl PatchBounds {
     }
 }
 
+/// PCG-style 32-bit integer hash (Jarzynski and Olano 2020, "Hash Functions for GPU
+/// Rendering"), used for all scatterer randomness. The `sin(x) * 43758.547` hashes it
+/// replaces went through Rust's `f32::fract`, which keeps the sign, so they returned
+/// values in (-1, 1) instead of [0, 1) (#47).
+fn pcg_hash(input: u32) -> u32 {
+    let state = input.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    let word = ((state >> ((state >> 28) + 4)) ^ state).wrapping_mul(277_803_737);
+    (word >> 22) ^ word
+}
+
+/// Uniform value in [0, 1) (never 1.0: 24 bits over 2^24) for scatterer `index` in an
+/// independent random `stream` at time `step`
+fn unit_random(index: u32, stream: u32, step: u32) -> f32 {
+    let hash = pcg_hash(index ^ pcg_hash(stream.wrapping_add(pcg_hash(step))));
+    (hash >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// Random streams for scatterer generation and drift
+const STREAM_JITTER_U: u32 = 1;
+const STREAM_JITTER_V: u32 = 2;
+const STREAM_SIGN: u32 = 3;
+const STREAM_STRENGTH: u32 = 4;
+const STREAM_RADIUS: u32 = 5;
+const STREAM_DRIFT_RADIUS: u32 = 6;
+const STREAM_DRIFT_ANGLE: u32 = 7;
+
+/// Scatterer drift (#47). Each scatterer's velocity follows an Ornstein-Uhlenbeck process:
+/// zero mean, exponentially correlated, so it moves smoothly and changes direction over
+/// a few seconds without a net drift. RMS velocity per axis in UV per film-second;
+/// sqrt(2) * 0.021 = 0.03, about one default scatterer radius per second.
+const DRIFT_SPEED_PER_AXIS: f32 = 0.021;
+/// Correlation time of the drift velocity in film-seconds
+const DRIFT_CORRELATION_TIME: f32 = 3.0;
+/// Longest film-time step applied at once. The velocity update is exact for any step and
+/// positions move in a straight line within one, so the cap only bounds the jump after a
+/// long hitch. At 1 s the drift keeps up with film time down to one frame per
+/// film-second, so at film speed 1 it covers the CPU adapter with `--compute` (about 1 fps
+/// when last measured).
+const MAX_DRIFT_STEP: f32 = 1.0;
+
+/// Two independent standard normal values for scatterer `index` at drift `step`
+/// (Box-Muller on two hash streams)
+fn gaussian_pair(index: u32, step: u32) -> (f32, f32) {
+    let radius = (-2.0 * (1.0 - unit_random(index, STREAM_DRIFT_RADIUS, step)).ln()).sqrt();
+    let angle = std::f32::consts::TAU * unit_random(index, STREAM_DRIFT_ANGLE, step);
+    (radius * angle.cos(), radius * angle.sin())
+}
+
+/// Where scatterers may drift: a UV rectangle, with u wrapping around the sphere in
+/// full-sphere mode and reflecting at the edges in patch mode. v always reflects (poles).
+#[derive(Debug, Clone, Copy)]
+struct DriftBounds {
+    min_u: f32,
+    max_u: f32,
+    min_v: f32,
+    max_v: f32,
+    wrap_u: bool,
+}
+
+/// Folds `value` into [low, high] by reflection at both ends. Returns the folded value
+/// and whether it was reflected an odd number of times (the velocity then flips).
+fn reflect_into(value: f32, low: f32, high: f32) -> (f32, bool) {
+    let span = high - low;
+    if span <= 0.0 {
+        return (low, false);
+    }
+    let folded = ((value - low) / span).rem_euclid(2.0);
+    if folded > 1.0 {
+        (low + (2.0 - folded) * span, true)
+    } else {
+        (low + folded * span, false)
+    }
+}
+
+/// Film time to drift by, given the film time of the previous update. Zero while the
+/// film is paused (time unchanged) or after it went backwards (a reset); capped at
+/// MAX_DRIFT_STEP.
+fn drift_time_step(previous_time: f32, time: f32) -> f32 {
+    (time - previous_time).clamp(0.0, MAX_DRIFT_STEP)
+}
+
+/// Advances each scatterer's Ornstein-Uhlenbeck velocity by `dt` film-seconds (exact
+/// update for that step) and moves the scatterer with it inside `bounds`. `step` seeds
+/// the noise, so successive calls must pass different steps. Before #47 the motion was
+/// `(fract(sin(...) * 43758.547) - 0.5) * 0.001` per frame, whose sign-preserving fract
+/// gave every scatterer a mean step of -0.0005 UV per frame on both axes.
+fn drift_scatterers(
+    scatterers: &mut [ScattererGPU],
+    velocities: &mut [[f32; 2]],
+    dt: f32,
+    step: u32,
+    bounds: DriftBounds,
+) {
+    let decay = (-dt / DRIFT_CORRELATION_TIME).exp();
+    let kick = DRIFT_SPEED_PER_AXIS * (1.0 - decay * decay).sqrt();
+    for (index, (scatterer, velocity)) in
+        scatterers.iter_mut().zip(velocities.iter_mut()).enumerate()
+    {
+        let (noise_u, noise_v) = gaussian_pair(index as u32, step);
+        velocity[0] = velocity[0] * decay + kick * noise_u;
+        velocity[1] = velocity[1] * decay + kick * noise_v;
+
+        let moved_u = scatterer.pos_u + velocity[0] * dt;
+        if bounds.wrap_u {
+            scatterer.pos_u = moved_u.rem_euclid(1.0);
+        } else {
+            let (folded, reflected) = reflect_into(moved_u, bounds.min_u, bounds.max_u);
+            scatterer.pos_u = folded;
+            if reflected {
+                velocity[0] = -velocity[0];
+            }
+        }
+        let (folded, reflected) = reflect_into(
+            scatterer.pos_v + velocity[1] * dt,
+            bounds.min_v,
+            bounds.max_v,
+        );
+        scatterer.pos_v = folded;
+        if reflected {
+            velocity[1] = -velocity[1];
+        }
+    }
+}
+
+/// Velocities drawn from the drift's stationary distribution, so motion starts at once
+fn initial_drift_velocities(count: usize, step: u32) -> Vec<[f32; 2]> {
+    (0..count as u32)
+        .map(|index| {
+            let (noise_u, noise_v) = gaussian_pair(index, step);
+            [
+                DRIFT_SPEED_PER_AXIS * noise_u,
+                DRIFT_SPEED_PER_AXIS * noise_v,
+            ]
+        })
+        .collect()
+}
+
+/// What scatterer generation needs from the simulation parameters
+#[derive(Debug, Clone, Copy)]
+struct ScattererGeneration {
+    count: u32,
+    strength: f32,
+    radius: f32,
+    patch_bounds: Option<PatchBounds>,
+}
+
+/// Scatterer positions and drift state, separate from the GPU buffers so the CPU update
+/// can be tested without a device
+#[derive(Debug, Default)]
+struct ScattererField {
+    /// In generation order: a scatterer's index is its identity for the drift
+    scatterers: Vec<ScattererGPU>,
+    /// Drift velocity of each scatterer in UV per film-second, same order
+    velocities: Vec<[f32; 2]>,
+    /// Film time of the last update, for the drift step
+    last_time: f32,
+    /// Seeds the drift noise; advances with every drift step and regeneration
+    drift_step: u32,
+}
+
+impl ScattererField {
+    /// New scatterers at film time `time`, inside `bounds`, with stationary velocities
+    fn regenerate(&mut self, time: f32, generation: ScattererGeneration, bounds: DriftBounds) {
+        self.scatterers = generate_scatterers(
+            generation.count,
+            time,
+            generation.strength,
+            generation.radius,
+            generation.patch_bounds,
+        );
+        // Generation jitter can place a scatterer slightly outside the patch (up to about
+        // 0.006 UV at the default size); fold it in now instead of with a jump on the
+        // first drift step
+        for scatterer in &mut self.scatterers {
+            if !bounds.wrap_u {
+                scatterer.pos_u = reflect_into(scatterer.pos_u, bounds.min_u, bounds.max_u).0;
+            }
+            scatterer.pos_v = reflect_into(scatterer.pos_v, bounds.min_v, bounds.max_v).0;
+        }
+        self.velocities = initial_drift_velocities(self.scatterers.len(), self.drift_step);
+        self.drift_step = self.drift_step.wrapping_add(1);
+        self.last_time = time;
+    }
+
+    /// Drifts every scatterer by the film time elapsed since the last update: nothing
+    /// while the film is paused (see [`drift_time_step`])
+    fn advance(&mut self, time: f32, bounds: DriftBounds) {
+        let dt = drift_time_step(self.last_time, time);
+        self.last_time = time;
+        if dt > 0.0 && !self.scatterers.is_empty() {
+            drift_scatterers(
+                &mut self.scatterers,
+                &mut self.velocities,
+                dt,
+                self.drift_step,
+                bounds,
+            );
+            self.drift_step = self.drift_step.wrapping_add(1);
+        }
+    }
+
+    /// A copy sorted by grid cell for the spatial hash, and the prefix-sum cell offsets:
+    /// `offsets[i]` is the index of the first scatterer in cell i, `offsets[i + 1]` one
+    /// past the last. The stored order stays as generated.
+    fn sorted_for_upload(&self) -> (Vec<ScattererGPU>, Vec<u32>) {
+        let cell_of = |s: &ScattererGPU| {
+            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
+            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
+            (v_cell * GRID_SIZE_U + u_cell) as usize
+        };
+        let mut sorted = self.scatterers.clone();
+        sorted.sort_by_key(cell_of);
+        let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
+        let mut cell_offsets = vec![0u32; total_cells + 1];
+        for scatterer in &sorted {
+            cell_offsets[cell_of(scatterer) + 1] += 1;
+        }
+        for cell in 1..=total_cells {
+            cell_offsets[cell] += cell_offsets[cell - 1];
+        }
+        (sorted, cell_offsets)
+    }
+}
+
 /// Generate scatterers using quasi-random distribution with jitter
 /// Uses Halton sequence for good spatial coverage
 /// If patch_bounds is provided, scatterers are confined within the patch
@@ -247,11 +471,10 @@ fn generate_scatterers(
         let u = halton(i + 1, base_u);
         let v = halton(i + 1, base_v);
 
-        // Add time-based jitter for animation
+        // Time-dependent jitter in (-0.02, 0.02), centred
         let jitter_scale = 0.02;
-        let hash_seed = (i as f32) * 0.1031 + time * 0.1;
-        let jitter_u = (hash_seed.sin() * 43758.547).fract() * jitter_scale;
-        let jitter_v = (hash_seed.cos() * 43758.547).fract() * jitter_scale;
+        let jitter_u = (unit_random(i, STREAM_JITTER_U, time.to_bits()) - 0.5) * 2.0 * jitter_scale;
+        let jitter_v = (unit_random(i, STREAM_JITTER_V, time.to_bits()) - 0.5) * 2.0 * jitter_scale;
 
         let (pos_u, pos_v) = if let Some(bounds) = patch_bounds {
             // Map to patch bounds, then apply jitter within patch
@@ -268,17 +491,18 @@ fn generate_scatterers(
             )
         };
 
-        // Randomize sign of strength (attractive vs repulsive)
-        // Use deterministic hash based on index
-        let sign_hash = ((i as f32 * 0.7531 + 0.3).sin() * 43758.547).fract();
-        let sign = if sign_hash > 0.5 { 1.0 } else { -1.0 };
+        // Sign of strength: positive repels, negative attracts, half each.
+        // Before #47 the sign-preserving fract made only about 24% repulsive.
+        let sign = if unit_random(i, STREAM_SIGN, 0) < 0.5 {
+            1.0
+        } else {
+            -1.0
+        };
 
-        // Slight variation in strength magnitude
-        let strength_var = 0.8 + 0.4 * ((i as f32 * 0.9371).sin() * 43758.547).fract();
+        // Strength and radius vary by a factor in [0.8, 1.2) (before #47: 0.4 to 1.2)
+        let strength_var = 0.8 + 0.4 * unit_random(i, STREAM_STRENGTH, 0);
         let strength = sign * base_strength * strength_var;
-
-        // Slight variation in radius
-        let radius_var = 0.8 + 0.4 * ((i as f32 * 0.5791).cos() * 43758.547).fract();
+        let radius_var = 0.8 + 0.4 * unit_random(i, STREAM_RADIUS, 0);
         let sigma = (base_radius * radius_var).max(1e-6);
         let inv_sigma_sq = 1.0 / (2.0 * sigma * sigma);
 
@@ -346,8 +570,8 @@ pub struct BranchedFlowSimulator {
     last_patch_center_u: f32,
     last_patch_center_v: f32,
     last_patch_half_size: f32,
-    /// Stored scatterers for temporal coherence (Brownian perturbation between regenerations)
-    current_scatterers: Vec<ScattererGPU>,
+    /// Scatterer positions and drift state; a sorted copy is uploaded each frame
+    scatterer_field: ScattererField,
     /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
     /// at the current chart origin before every upload
     beam_angle_deg: f32,
@@ -594,7 +818,7 @@ impl BranchedFlowSimulator {
             last_patch_center_u: params.patch_center_u,
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
-            current_scatterers: Vec::new(),
+            scatterer_field: ScattererField::default(),
             beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
         }
     }
@@ -674,95 +898,70 @@ impl BranchedFlowSimulator {
         }
     }
 
+    /// The region scatterers drift in: the patch rectangle in patch mode, the whole sphere
+    /// (u wrapping) otherwise
+    fn drift_bounds(&self) -> DriftBounds {
+        if self.params.patch_enabled != 0 {
+            let half_size = self.params.patch_half_size;
+            DriftBounds {
+                min_u: (self.params.patch_center_u - half_size).max(0.0),
+                max_u: (self.params.patch_center_u + half_size).min(1.0),
+                min_v: (self.params.patch_center_v - half_size).max(0.0),
+                max_v: (self.params.patch_center_v + half_size).min(1.0),
+                wrap_u: false,
+            }
+        } else {
+            DriftBounds {
+                min_u: 0.0,
+                max_u: 1.0,
+                min_v: 0.0,
+                max_v: 1.0,
+                wrap_u: true,
+            }
+        }
+    }
+
     /// Update scatterer positions with temporal coherence.
     ///
     /// When structural parameters change (count, radius, patch bounds), scatterers are
-    /// fully regenerated. Otherwise, small Brownian perturbations are applied each frame
-    /// so the branching pattern evolves smoothly like real micelle clusters drifting in
-    /// the film, rather than jumping discontinuously.
+    /// fully regenerated. Otherwise each scatterer drifts with its own smooth, zero-mean
+    /// velocity (see [`drift_scatterers`]) by the film time elapsed since the last update,
+    /// so the pattern evolves continuously and stops while the film is paused. Scatterers
+    /// reflect at the patch edges and the poles; in full-sphere mode u wraps.
     ///
-    /// Sorts scatterers by grid cell and builds prefix-sum cell_offsets for O(k) GPU lookup.
+    /// Uploads a copy sorted by grid cell, with prefix-sum cell_offsets for O(k) GPU lookup.
     pub fn update_scatterers(&mut self, queue: &wgpu::Queue, time: f32) {
         // Check if parameters changed since last upload
         self.check_scatterer_params_changed();
 
+        let bounds = self.drift_bounds();
         if self.scatterers_dirty {
             // Full regeneration: structural parameters changed
-            let patch_bounds = if self.params.patch_enabled != 0 {
-                Some(PatchBounds {
-                    center_u: self.params.patch_center_u,
-                    center_v: self.params.patch_center_v,
-                    half_size: self.params.patch_half_size,
-                })
-            } else {
-                None
-            };
-
-            self.current_scatterers = generate_scatterers(
-                self.params.num_scatterers.min(MAX_SCATTERERS),
-                time,
-                self.params.scatterer_strength,
-                self.params.scatterer_radius,
+            let patch_bounds = (self.params.patch_enabled != 0).then_some(PatchBounds {
+                center_u: self.params.patch_center_u,
+                center_v: self.params.patch_center_v,
+                half_size: self.params.patch_half_size,
+            });
+            let generation = ScattererGeneration {
+                count: self.params.num_scatterers.min(MAX_SCATTERERS),
+                strength: self.params.scatterer_strength,
+                radius: self.params.scatterer_radius,
                 patch_bounds,
-            );
-            self.scatterers_dirty = false;
-        } else if !self.current_scatterers.is_empty() {
-            // Brownian perturbation: smooth temporal evolution
-            // Each scatterer drifts ~0.001 UV units per frame (~3% of σ per frame).
-            // Over ~30 frames the pattern shifts noticeably but continuously.
-            let perturbation_scale = 0.001f32;
-
-            let (min_u, max_u, min_v, max_v) = if self.params.patch_enabled != 0 {
-                let hs = self.params.patch_half_size;
-                (
-                    (self.params.patch_center_u - hs).max(0.0),
-                    (self.params.patch_center_u + hs).min(1.0),
-                    (self.params.patch_center_v - hs).max(0.0),
-                    (self.params.patch_center_v + hs).min(1.0),
-                )
-            } else {
-                (0.0, 1.0, 0.0, 1.0)
             };
-
-            for (i, s) in self.current_scatterers.iter_mut().enumerate() {
-                // Pseudo-random perturbation using time × frequency mixing
-                // Different frequencies per scatterer prevent correlated drift
-                let seed_u = (i as f32 * 0.7531 + time * 31.37).sin() * 43758.547;
-                let seed_v = (i as f32 * 0.9371 + time * 17.53).cos() * 43758.547;
-                s.pos_u =
-                    (s.pos_u + (seed_u.fract() - 0.5) * perturbation_scale).clamp(min_u, max_u);
-                s.pos_v =
-                    (s.pos_v + (seed_v.fract() - 0.5) * perturbation_scale).clamp(min_v, max_v);
-            }
+            self.scatterer_field.regenerate(time, generation, bounds);
+            self.scatterers_dirty = false;
+        } else if !self.scatterer_field.scatterers.is_empty() {
+            self.scatterer_field.advance(time, bounds);
         } else {
             return; // No scatterers to update
         }
-
-        // Sort scatterers by grid cell for true spatial hash
-        self.current_scatterers.sort_by_key(|s| {
-            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
-            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
-            v_cell * GRID_SIZE_U + u_cell
-        });
-
-        // Build prefix-sum cell_offsets: offsets[i] = start index of cell i in sorted array
-        let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
-        let mut cell_offsets = vec![0u32; total_cells + 1];
-        for s in &self.current_scatterers {
-            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
-            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
-            let cell_idx = (v_cell * GRID_SIZE_U + u_cell) as usize;
-            cell_offsets[cell_idx + 1] += 1;
-        }
-        for i in 1..=total_cells {
-            cell_offsets[i] += cell_offsets[i - 1];
-        }
+        let (sorted_scatterers, cell_offsets) = self.scatterer_field.sorted_for_upload();
 
         // Upload sorted scatterers and cell offsets
         queue.write_buffer(
             &self.scatterer_buffer,
             0,
-            bytemuck::cast_slice(&self.current_scatterers),
+            bytemuck::cast_slice(&sorted_scatterers),
         );
         queue.write_buffer(
             &self.cell_offsets_buffer,
@@ -1483,13 +1682,364 @@ mod tests {
 
     #[test]
     fn generate_scatterers_has_mixed_signs() {
-        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
-        let positive = scatterers.iter().filter(|s| s.strength > 0.0).count();
-        let negative = scatterers.iter().filter(|s| s.strength < 0.0).count();
+        // Positive strength repels, negative attracts; about half each. Before #47 only
+        // about 24% were repulsive (sign-preserving fract in the hash).
+        let scatterers = generate_scatterers(400, 0.0, 0.5, 0.03, None);
+        let repulsive = scatterers.iter().filter(|s| s.strength > 0.0).count();
+        assert!(
+            (160..=240).contains(&repulsive),
+            "{repulsive} of 400 scatterers repel; expected about half"
+        );
+    }
 
-        // Should have a mix of attractive and repulsive scatterers
-        assert!(positive > 20, "Too few attractive scatterers: {positive}");
-        assert!(negative > 20, "Too few repulsive scatterers: {negative}");
+    #[test]
+    fn generate_scatterers_vary_strength_and_radius_by_20_percent() {
+        // Factors in [0.8, 1.2); before #47 they spanned 0.4 to 1.2 with mean 0.79
+        let scatterers = generate_scatterers(400, 0.0, 0.5, 0.03, None);
+        let strength_factors: Vec<f32> =
+            scatterers.iter().map(|s| s.strength.abs() / 0.5).collect();
+        let radius_factors: Vec<f32> = scatterers
+            .iter()
+            .map(|s| (1.0 / (2.0 * s.inv_sigma_sq)).sqrt() / 0.03)
+            .collect();
+        for (name, factors) in [("strength", &strength_factors), ("radius", &radius_factors)] {
+            assert!(
+                factors
+                    .iter()
+                    .all(|&factor| (0.8 - 1e-5..1.2 + 1e-5).contains(&factor)),
+                "{name} factor outside [0.8, 1.2)"
+            );
+            let mean = factors.iter().sum::<f32>() / factors.len() as f32;
+            assert!((mean - 1.0).abs() < 0.03, "{name} factor mean {mean}");
+        }
+    }
+
+    /// `count` scatterers on a jittered grid inside the given UV rectangle
+    fn scatterers_in(
+        count: usize,
+        min_u: f32,
+        max_u: f32,
+        min_v: f32,
+        max_v: f32,
+    ) -> Vec<ScattererGPU> {
+        (0..count as u32)
+            .map(|index| ScattererGPU {
+                pos_u: min_u + (max_u - min_u) * halton(index + 1, 2),
+                pos_v: min_v + (max_v - min_v) * halton(index + 1, 3),
+                strength: 0.5,
+                inv_sigma_sq: 1.0 / (2.0 * 0.03 * 0.03),
+            })
+            .collect()
+    }
+
+    /// Default patch rectangle (centre 0.75, 0.5, half size 0.158)
+    const DEFAULT_PATCH: DriftBounds = DriftBounds {
+        min_u: 0.592,
+        max_u: 0.908,
+        min_v: 0.342,
+        max_v: 0.658,
+        wrap_u: false,
+    };
+
+    #[test]
+    fn drift_velocity_is_zero_mean_at_the_set_speed() {
+        // The increments alone, far from any boundary: 400 scatterers for 50 film-seconds
+        // at 60 updates per second. Before #47 every scatterer moved by a mean of
+        // -0.0005 UV per frame on both axes, i.e. -0.03 UV per second.
+        let mut scatterers = scatterers_in(400, -0.5, 0.5, -0.5, 0.5);
+        let mut velocities = initial_drift_velocities(400, 0);
+        let unbounded = DriftBounds {
+            min_u: -1e6,
+            max_u: 1e6,
+            min_v: -1e6,
+            max_v: 1e6,
+            wrap_u: false,
+        };
+        let start: Vec<(f32, f32)> = scatterers.iter().map(|s| (s.pos_u, s.pos_v)).collect();
+        let (mut sum, mut sum_sq, mut samples) = ([0.0f64; 2], [0.0f64; 2], 0usize);
+        for step in 1..=3000 {
+            drift_scatterers(
+                &mut scatterers,
+                &mut velocities,
+                1.0 / 60.0,
+                step,
+                unbounded,
+            );
+            for velocity in &velocities {
+                for axis in 0..2 {
+                    sum[axis] += velocity[axis] as f64;
+                    sum_sq[axis] += (velocity[axis] as f64).powi(2);
+                }
+                samples += 1;
+            }
+        }
+        for axis in 0..2 {
+            let mean = sum[axis] / samples as f64;
+            let rms = (sum_sq[axis] / samples as f64).sqrt();
+            assert!(mean.abs() < 0.002, "axis {axis}: mean velocity {mean} UV/s");
+            assert!(
+                (rms / DRIFT_SPEED_PER_AXIS as f64 - 1.0).abs() < 0.1,
+                "axis {axis}: RMS velocity {rms} UV/s"
+            );
+        }
+        let mean_displacement = scatterers
+            .iter()
+            .zip(&start)
+            .map(|(s, &(u, v))| [(s.pos_u - u) as f64, (s.pos_v - v) as f64])
+            .fold([0.0; 2], |total, d| {
+                [total[0] + d[0] / 400.0, total[1] + d[1] / 400.0]
+            });
+        // The old bias would have moved every scatterer by -1.5 UV in 50 s. The mean of
+        // 400 independent displacements has a standard deviation of about 0.018 UV here.
+        assert!(
+            mean_displacement.iter().all(|d| d.abs() < 0.08),
+            "mean displacement {mean_displacement:?} UV"
+        );
+    }
+
+    #[test]
+    fn drift_stops_while_the_film_is_paused() {
+        assert_eq!(
+            drift_time_step(4.0, 4.0),
+            0.0,
+            "paused: film time unchanged"
+        );
+        assert_eq!(drift_time_step(4.0, 1.0), 0.0, "film time reset");
+        assert_eq!(
+            drift_time_step(4.0, 9.0),
+            MAX_DRIFT_STEP,
+            "a long gap is capped"
+        );
+        assert!((drift_time_step(4.0, 4.0 + 1.0 / 60.0) - 1.0 / 60.0).abs() < 1e-6);
+        // A zero step leaves positions and velocities as they are
+        let mut scatterers = scatterers_in(50, 0.6, 0.9, 0.35, 0.65);
+        let mut velocities = initial_drift_velocities(50, 3);
+        let (before, velocities_before) = (scatterers.clone(), velocities.clone());
+        drift_scatterers(&mut scatterers, &mut velocities, 0.0, 7, DEFAULT_PATCH);
+        for (after, before) in scatterers.iter().zip(&before) {
+            assert_eq!((after.pos_u, after.pos_v), (before.pos_u, before.pos_v));
+        }
+        assert_eq!(velocities, velocities_before);
+    }
+
+    #[test]
+    fn drift_keeps_scatterers_spread_over_the_patch() {
+        // 60 film-seconds in the default patch. The old drift collected every scatterer
+        // in the patch's (min u, min v) corner within about 15 s; reflection at the edges
+        // keeps them spread, with no pile-up at an edge.
+        let patch = DEFAULT_PATCH;
+        let mut scatterers = scatterers_in(400, patch.min_u, patch.max_u, patch.min_v, patch.max_v);
+        let mut velocities = initial_drift_velocities(400, 0);
+        for step in 1..=3600 {
+            drift_scatterers(&mut scatterers, &mut velocities, 1.0 / 60.0, step, patch);
+        }
+        let (span_u, span_v) = (patch.max_u - patch.min_u, patch.max_v - patch.min_v);
+        let mut near_edge = 0;
+        for s in &scatterers {
+            assert!(
+                (patch.min_u..=patch.max_u).contains(&s.pos_u),
+                "u {} left the patch",
+                s.pos_u
+            );
+            assert!(
+                (patch.min_v..=patch.max_v).contains(&s.pos_v),
+                "v {} left the patch",
+                s.pos_v
+            );
+            let edge_distance_u = (s.pos_u - patch.min_u).min(patch.max_u - s.pos_u) / span_u;
+            let edge_distance_v = (s.pos_v - patch.min_v).min(patch.max_v - s.pos_v) / span_v;
+            if edge_distance_u < 0.02 || edge_distance_v < 0.02 {
+                near_edge += 1;
+            }
+        }
+        // A uniform spread puts about 7.8% within 2% of the span from an edge
+        assert!(near_edge < 60, "{near_edge} of 400 scatterers at an edge");
+        // The old drift emptied the lower half (larger v) and the larger-u half, which is
+        // the left half on screen at the default camera
+        let lower_half = scatterers.iter().filter(|s| s.pos_v > 0.5).count();
+        let larger_u_half = scatterers.iter().filter(|s| s.pos_u > 0.75).count();
+        assert!(
+            (140..=260).contains(&lower_half),
+            "{lower_half} of 400 in the lower half"
+        );
+        assert!(
+            (140..=260).contains(&larger_u_half),
+            "{larger_u_half} of 400 in the larger-u half"
+        );
+    }
+
+    #[test]
+    fn drift_wraps_u_across_the_seam_in_full_sphere_mode() {
+        let full_sphere = DriftBounds {
+            min_u: 0.0,
+            max_u: 1.0,
+            min_v: 0.0,
+            max_v: 1.0,
+            wrap_u: true,
+        };
+        let mut scatterers = vec![ScattererGPU {
+            pos_u: 0.999,
+            pos_v: 0.5,
+            strength: 0.5,
+            inv_sigma_sq: 555.0,
+        }];
+        let mut velocities = vec![[0.06f32, 0.0]];
+        for step in 1..=60 {
+            drift_scatterers(
+                &mut scatterers,
+                &mut velocities,
+                1.0 / 60.0,
+                step,
+                full_sphere,
+            );
+        }
+        // About 0.05 UV east of the seam after one second, not held at u = 1
+        assert!(
+            scatterers[0].pos_u > 0.0 && scatterers[0].pos_u < 0.3,
+            "u = {} after crossing the seam",
+            scatterers[0].pos_u
+        );
+    }
+
+    /// The default generation for the default patch
+    fn default_patch_generation() -> ScattererGeneration {
+        ScattererGeneration {
+            count: 400,
+            strength: 0.5,
+            radius: 0.03,
+            patch_bounds: Some(PatchBounds {
+                center_u: 0.75,
+                center_v: 0.5,
+                half_size: 0.158,
+            }),
+        }
+    }
+
+    #[test]
+    fn scatterer_field_stands_still_while_the_film_is_paused() {
+        // The update path the app runs every frame: regenerate, then advance by film time.
+        // A paused film repeats the same film time; it must not move anything.
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        for frame in 1..=30 {
+            field.advance(frame as f32 / 60.0, DEFAULT_PATCH);
+        }
+        let positions = |field: &ScattererField| -> Vec<(f32, f32)> {
+            field
+                .scatterers
+                .iter()
+                .map(|s| (s.pos_u, s.pos_v))
+                .collect()
+        };
+        let paused_at = positions(&field);
+        for _ in 0..30 {
+            field.advance(0.5, DEFAULT_PATCH);
+        }
+        assert_eq!(
+            positions(&field),
+            paused_at,
+            "scatterers moved while paused"
+        );
+        field.advance(0.2, DEFAULT_PATCH);
+        assert_eq!(
+            positions(&field),
+            paused_at,
+            "film time going backwards moved scatterers"
+        );
+        field.advance(0.2 + 1.0 / 60.0, DEFAULT_PATCH);
+        assert_ne!(positions(&field), paused_at, "playing again must move them");
+    }
+
+    #[test]
+    fn scatterer_field_keeps_each_scatterer_with_its_velocity() {
+        // Each velocity belongs to the scatterer at the same index, so the stored order
+        // must stay the generation order however the upload copy is sorted
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        let generated_strengths: Vec<f32> = field.scatterers.iter().map(|s| s.strength).collect();
+        for frame in 1..=120 {
+            field.advance(frame as f32 / 60.0, DEFAULT_PATCH);
+            let (sorted, _) = field.sorted_for_upload();
+            assert_eq!(sorted.len(), field.scatterers.len());
+        }
+        let strengths: Vec<f32> = field.scatterers.iter().map(|s| s.strength).collect();
+        assert_eq!(strengths, generated_strengths, "scatterers were reordered");
+        assert_eq!(field.velocities.len(), field.scatterers.len());
+    }
+
+    #[test]
+    fn scatterer_field_starts_inside_the_patch() {
+        // Generation jitter puts a few scatterers just outside the patch; regenerate folds
+        // them in, so the first drift step does not jump
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        for s in &field.scatterers {
+            assert!(
+                (DEFAULT_PATCH.min_u..=DEFAULT_PATCH.max_u).contains(&s.pos_u),
+                "u {}",
+                s.pos_u
+            );
+            assert!(
+                (DEFAULT_PATCH.min_v..=DEFAULT_PATCH.max_v).contains(&s.pos_v),
+                "v {}",
+                s.pos_v
+            );
+        }
+    }
+
+    #[test]
+    fn sorted_for_upload_groups_scatterers_by_cell() {
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        let (sorted, offsets) = field.sorted_for_upload();
+        assert_eq!(offsets.len(), (GRID_SIZE_U * GRID_SIZE_V) as usize + 1);
+        assert_eq!(offsets[offsets.len() - 1] as usize, sorted.len());
+        for cell in 0..(GRID_SIZE_U * GRID_SIZE_V) as usize {
+            for s in &sorted[offsets[cell] as usize..offsets[cell + 1] as usize] {
+                let u_cell =
+                    (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as usize;
+                let v_cell =
+                    (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as usize;
+                assert_eq!(v_cell * GRID_SIZE_U as usize + u_cell, cell);
+            }
+        }
+    }
+
+    #[test]
+    fn reflect_into_folds_values_back_into_the_range() {
+        assert_eq!(reflect_into(0.5, 0.0, 1.0), (0.5, false));
+        let (value, reflected) = reflect_into(1.1, 0.0, 1.0);
+        assert!((value - 0.9).abs() < 1e-6 && reflected);
+        let (value, reflected) = reflect_into(-0.2, 0.0, 1.0);
+        assert!((value - 0.2).abs() < 1e-6 && reflected);
+        let (value, reflected) = reflect_into(2.3, 0.0, 1.0);
+        assert!((value - 0.3).abs() < 1e-5 && !reflected, "two reflections");
+        assert_eq!(reflect_into(0.7, 0.4, 0.4), (0.4, false), "empty range");
+    }
+
+    #[test]
+    fn unit_random_is_uniform_on_the_unit_interval() {
+        assert!(((u32::MAX >> 8) as f32 * (1.0 / 16_777_216.0)) < 1.0);
+        let samples: Vec<f32> = (0..100_000u32)
+            .map(|index| unit_random(index, 7, 3))
+            .collect();
+        assert!(samples.iter().all(|&value| (0.0..1.0).contains(&value)));
+        let mean = samples.iter().map(|&value| value as f64).sum::<f64>() / samples.len() as f64;
+        assert!((mean - 0.5).abs() < 0.005, "mean {mean}");
+        // Each decile holds about a tenth of the samples
+        let mut deciles = [0usize; 10];
+        for &value in &samples {
+            deciles[(value * 10.0) as usize] += 1;
+        }
+        assert!(
+            deciles
+                .iter()
+                .all(|&count| (9_500..10_500).contains(&count)),
+            "{deciles:?}"
+        );
+        // Streams and steps give different values
+        assert_ne!(unit_random(5, 1, 0), unit_random(5, 2, 0));
+        assert_ne!(unit_random(5, 1, 0), unit_random(5, 1, 1));
     }
 
     #[test]
