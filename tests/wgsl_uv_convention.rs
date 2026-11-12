@@ -8,6 +8,10 @@
 //! this test extracts each function's source text from the shader file, wraps it in a
 //! one-line compute kernel and evaluates it on the device.
 //!
+//! The same harness checks the functions that tie UV to the drainage grid and to lengths
+//! on the sphere, which the GRIN force uses (#45): `periodic_columns` and
+//! `surface_gradient`.
+//!
 //! GPU tests are `#[ignore]`d; run them with `scripts/test-local.sh -- --ignored`
 //! (lavapipe works).
 
@@ -218,4 +222,103 @@ fn extract_wgsl_function_returns_the_whole_body() {
         extract_wgsl_function(source, "b"),
         "fn b(x: f32) -> f32 {\n    if (x > 0.0) { return x; }\n    return -x;\n}"
     );
+}
+
+#[test]
+#[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+fn branched_flow_thickness_columns_follow_the_periodic_drainage_grid() {
+    // drainage.wgsl puts column j at phi = j * 2 pi / W and wraps column W to 0, so a
+    // longitude u lies (weight) of the way from column0 to column1 = column0 + 1 mod W,
+    // with u = (column0 + weight) / W mod 1. The u values include both sides of the seam.
+    const WIDTH: f32 = 256.0;
+    let longitudes = [
+        0.0,
+        0.5,
+        0.25,
+        0.123,
+        0.999,
+        1.0,
+        -0.001,
+        1.001,
+        -0.5,
+        255.5 / 256.0,
+    ];
+    let inputs: Vec<[f32; 4]> = longitudes.iter().map(|&u| [u, 0.0, 0.0, 0.0]).collect();
+    let call = "vec4<f32>(periodic_columns(input.x, 256u), 0.0)";
+    let outputs = run_wgsl_function(
+        "branched_flow_compute.wgsl",
+        "periodic_columns",
+        call,
+        &inputs,
+    );
+    for (&u, &[column0, column1, weight, _]) in longitudes.iter().zip(&outputs) {
+        assert!(
+            column0.fract() == 0.0 && (0.0..WIDTH).contains(&column0),
+            "u = {u}: column0 {column0}"
+        );
+        assert_eq!(column1, (column0 + 1.0) % WIDTH, "u = {u}");
+        assert!((0.0..1.0).contains(&weight), "u = {u}: weight {weight}");
+        let distance = ((column0 + weight) / WIDTH - u).rem_euclid(1.0);
+        assert!(
+            distance.min(1.0 - distance) < 1e-5,
+            "u = {u}: columns ({column0}, {column1}), weight {weight}"
+        );
+    }
+    // The seam interpolates between the last column and column 0
+    assert_eq!(outputs[4][..2], [255.0, 0.0]);
+    assert_eq!(outputs[6][..2], [255.0, 0.0]);
+}
+
+#[test]
+#[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+fn branched_flow_surface_gradient_is_the_gradient_on_the_unit_sphere() {
+    // For the field f(n) = a . n the gradient on the unit sphere is a - (a . n) n. Feed
+    // the WGSL function the same central differences the shader takes (eps = 0.01 in u and
+    // v) and compare with that gradient's components along phi_hat (east) and theta_hat
+    // (south). Before #45 the east component came out 2x the south one (audit branched-08).
+    let field_direction = glam::Vec3::new(0.3, -0.7, 0.5);
+    let field = |u: f32, v: f32| field_direction.dot(uv_to_unit_sphere(u, v));
+    let eps = 0.01f32;
+    let points: Vec<(f32, f32)> = (0..8)
+        .flat_map(|i| (0..4).map(move |j| (i as f32 / 8.0 + 0.03, 0.2 + j as f32 * 0.2)))
+        .collect();
+    let inputs: Vec<[f32; 4]> = points
+        .iter()
+        .map(|&(u, v)| {
+            [
+                field(u + eps, v) - field(u - eps, v),
+                field(u, v + eps) - field(u, v - eps),
+                eps,
+                v,
+            ]
+        })
+        .collect();
+    let call = "vec4<f32>(surface_gradient(input.x, input.y, input.z, input.w), 0.0, 0.0)";
+    let outputs = run_wgsl_function(
+        "branched_flow_compute.wgsl",
+        "surface_gradient",
+        call,
+        &inputs,
+    );
+    for (&(u, v), output) in points.iter().zip(&outputs) {
+        let normal = uv_to_unit_sphere(u, v);
+        let gradient = field_direction - field_direction.dot(normal) * normal;
+        let phi = (2.0 * u - 1.0) * std::f32::consts::PI;
+        let theta = v * std::f32::consts::PI;
+        let east = glam::Vec3::new(-phi.sin(), 0.0, phi.cos());
+        let south = glam::Vec3::new(
+            theta.cos() * phi.cos(),
+            -theta.sin(),
+            theta.cos() * phi.sin(),
+        );
+        let expected = [gradient.dot(east), gradient.dot(south)];
+        assert!(
+            (output[0] - expected[0]).abs() < 2e-3 && (output[1] - expected[1]).abs() < 2e-3,
+            "surface_gradient at ({u}, {v}) = ({}, {}), expected ({}, {})",
+            output[0],
+            output[1],
+            expected[0],
+            expected[1]
+        );
+    }
 }
