@@ -1248,9 +1248,9 @@ mod tests {
             // centroid on the central ray the predictions follow. At the default width of
             // 0.4 the phi test read +0.00886 / -0.00884, 4.6-4.9% above its prediction. A
             // numpy replica of the loop and the deposit pass with the exact force gives
-            // 0.00885, while its rays' mean crossing is 0.00847: the excess is in the
-            // deposit-weighted centroid of a wide beam, not in the force (replicas in
-            // docs/evidence/2026-11-12-grin-deflection/). The theta test
+            // 0.00885, while a per-ray replica puts the rays' mean crossing at 0.00847: the
+            // excess is in the deposit-weighted centroid of a wide beam, not in the force
+            // (both replicas in docs/evidence/2026-11-12-grin-deflection/). The theta test
             // read 0.4% below its prediction at 0.4 and reads 0.8-0.9% above at 0.1.
             simulator.params.spread_angle = 0.1;
             simulator.set_beam_angle(beam_angle_deg);

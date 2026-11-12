@@ -2,7 +2,8 @@
 
 Numeric replicas behind statements in PR #60 and in the code it added. These are snapshots, not
 maintained tools; the maintained tools live in `scripts/` (see `scripts/README.md`). They need
-`numpy`, so run them with `python3` but not in isolated mode (`-I`). Each runs in under 20 s.
+`numpy`, so run them with `python3` but not in isolated mode (`-I`). `deposit_replica.py` took
+13 to 32 s, depending on machine load; the others take a few seconds.
 
 | Script | Backs | Output (re-run 2026-11-12) |
 |---|---|---|
@@ -13,4 +14,5 @@ maintained tools; the maintained tools live in `scripts/` (see `scripts/README.m
 The replicas model the shader's propagation loop (kick, renormalise, drift in the gnomonic chart,
 adaptive step factor) and, in `deposit_replica.py`, `deposit_bilinear`, with the GRIN force given
 analytically rather than sampled from a thickness grid. Rays are spread uniformly across the beam;
-the shader uses a hash of the ray index.
+the shader uses a hash of the ray index. The replicas also leave out the shader's small random
+start offset along the beam (up to ±0.02 at spread 0.4).
