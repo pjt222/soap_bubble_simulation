@@ -14,8 +14,13 @@
 //! slope of the film thickness (micrometres, differences per grid texel) to a brightness,
 //! and `caustics.wgsl` maps ground (x, z) linearly onto the (phi, theta) grid, which is
 //! not a projection of any light path (audit branched-02, #45). A uniform film gives
-//! `caustic_intensity` everywhere, and smooth drained profiles vary little. The compute
-//! bind group is built once and is not rebuilt when the GPU drainage swaps buffers (#43).
+//! `caustic_intensity` everywhere. The audit's smooth drained profile (30 nm at the top to
+//! 1000 nm at the bottom) spans 0.9% of it; how much the field the drainage solver will
+//! produce (#43) varies the map is not measured. On screen the ground adds
+//! `light * value * min(0.5 * value, 1)` (`SrcAlpha`, `One`), so inside 80% of the disc
+//! radius every value of about 1.45 or more saturates all three channels to the same
+//! white in an 8-bit target (derived, not rendered). The compute bind group is built once and is not rebuilt when
+//! the GPU drainage swaps buffers (#43).
 //!
 //! # Reference
 //! Patsyk et al. (2020) - Observation of branched flow of light
@@ -44,13 +49,16 @@ pub struct CausticParams {
     pub light_dir_z: f32,
     /// Light intensity
     pub light_intensity: f32,
-    /// Effective focal length for curvature-based focusing
+    /// Effective focal length for curvature-based focusing, acting on the Laplacian of the
+    /// thickness in micrometres per texel². Not retuned in #45: before it, the map was
+    /// constant and this had no effect.
     pub focal_length: f32,
     /// Overall caustic intensity multiplier
     pub caustic_intensity: f32,
     /// Sharpness of caustic patterns (power exponent)
     pub caustic_sharpness: f32,
-    /// Threshold for branch detection
+    /// Threshold on the Hessian determinant (micrometres per texel², squared) below which
+    /// the branch factor applies. Not retuned in #45 (see `focal_length`).
     pub branch_threshold: f32,
     /// Y position of ground plane
     pub ground_y: f32,
@@ -668,47 +676,47 @@ mod tests {
         (intensity.clamp(0.0, 10.0), hessian_det)
     }
 
-    /// A 500 nm film (metres) with a Gaussian bump of `amplitude_nm` and width
-    /// `sigma_texels` centred on texel (128, 64)
-    fn thickness_with_bump(amplitude_nm: f64, sigma_texels: f64) -> Vec<f32> {
+    /// A 500 nm film (metres) with Gaussian bumps of `amplitude_nm` and width
+    /// `sigma_texels` centred on the given texels; distances wrap in x (phi is periodic)
+    fn thickness_with_bumps(
+        amplitude_nm: f64,
+        sigma_texels: f64,
+        centres: &[(f64, f64)],
+    ) -> Vec<f32> {
         (0..GRID_HEIGHT)
             .flat_map(|row| {
                 (0..GRID_WIDTH).map(move |column| {
-                    let r_sq = (column as f64 - 128.0).powi(2) + (row as f64 - 64.0).powi(2);
-                    let bump = amplitude_nm * (-r_sq / (2.0 * sigma_texels * sigma_texels)).exp();
-                    ((500.0 + bump) * 1e-9) as f32
+                    let bumps: f64 = centres
+                        .iter()
+                        .map(|&(centre_x, centre_y)| {
+                            let dx = (column as f64 - centre_x).abs();
+                            let dx = dx.min(GRID_WIDTH as f64 - dx);
+                            let r_sq = dx * dx + (row as f64 - centre_y).powi(2);
+                            amplitude_nm * (-r_sq / (2.0 * sigma_texels * sigma_texels)).exp()
+                        })
+                        .sum();
+                    ((500.0 + bumps) * 1e-9) as f32
                 })
             })
             .collect()
     }
 
-    #[test]
-    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
-    fn caustic_map_follows_the_thickness_field_in_micrometres() {
-        // #45: the compute shader differentiated the drainage thickness in metres, so every
-        // derivative was ~1e-6 of its intended size and the map was caustic_intensity (2.0)
-        // everywhere. A uniform film must still give exactly that; a sharp bump (500 nm,
-        // sigma 2 texels) must vary as the shader formula predicts in micrometres, including
-        // the branch factor where the Hessian determinant is below -branch_threshold.
-        let params = CausticParams::default();
-        let uniform = caustic_map(&vec![500e-9f32; GRID_WIDTH * GRID_HEIGHT]);
-        assert!(
-            uniform
-                .iter()
-                .all(|&value| (value - params.caustic_intensity).abs() < 1e-6),
-            "a uniform film must give caustic_intensity everywhere"
-        );
-
-        let bump = thickness_with_bump(500.0, 2.0);
-        let gpu_map = caustic_map(&bump);
-        let bump_um: Vec<f64> = bump
+    /// Compares a GPU caustic map with `reference_intensity` at every texel, converting the
+    /// field with a literal 1e6 so a wrong `film_thickness_scale` cannot cancel out.
+    /// Returns (compared, texels away from the uniform value, with the branch factor, skipped).
+    fn assert_matches_reference(
+        gpu_map: &[f32],
+        thickness_m: &[f32],
+        params: &CausticParams,
+    ) -> (usize, usize, usize, usize) {
+        let thickness_um: Vec<f64> = thickness_m
             .iter()
-            .map(|&metres| metres as f64 * params.film_thickness_scale as f64)
+            .map(|&metres| metres as f64 * 1e6)
             .collect();
-        let (mut compared, mut branched, mut skipped) = (0, 0, 0);
+        let (mut compared, mut informative, mut branched, mut skipped) = (0, 0, 0, 0);
         for y in 0..GRID_HEIGHT as i32 {
             for x in 0..GRID_WIDTH as i32 {
-                let (expected, hessian_det) = reference_intensity(&bump_um, &params, x, y);
+                let (expected, hessian_det) = reference_intensity(&thickness_um, params, x, y);
                 if (hessian_det + params.branch_threshold as f64).abs() < 1e-6 {
                     skipped += 1; // f32 and f64 may fall on different sides of the threshold
                     continue;
@@ -719,26 +727,61 @@ mod tests {
                     "texel ({x}, {y}): GPU {actual}, micrometre reference {expected}"
                 );
                 compared += 1;
+                if (expected - params.caustic_intensity as f64).abs() > 1e-4 * expected {
+                    informative += 1;
+                }
                 if hessian_det < -(params.branch_threshold as f64) {
                     branched += 1;
                 }
             }
         }
-        let (minimum, maximum) = gpu_map
+        assert!(
+            skipped < 10,
+            "{skipped} texels too close to branch_threshold to compare"
+        );
+        (compared, informative, branched, skipped)
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn caustic_map_follows_the_thickness_field_in_micrometres() {
+        // #45: the compute shader differentiated the drainage thickness in metres, so every
+        // derivative was ~1e-6 of its intended size and the map was caustic_intensity (2.0)
+        // everywhere. The map must now match a CPU port of the shader formula evaluated in
+        // micrometres (reference_intensity), which also pins the port's wrap in x and clamp
+        // in y: one bump sits mid-grid, one on the phi seam (column 0), and the drained
+        // profile reaches the pole rows.
+        let params = CausticParams::default();
+        assert_eq!(params.film_thickness_scale, 1e6, "metres to micrometres");
+        let uniform = caustic_map(&vec![500e-9f32; GRID_WIDTH * GRID_HEIGHT]);
+        assert!(
+            uniform
+                .iter()
+                .all(|&value| (value - params.caustic_intensity).abs() < 1e-6),
+            "a uniform film must give caustic_intensity everywhere"
+        );
+
+        // 500 nm bumps, sigma 2 texels: sharp enough for the branch factor
+        let bumps = thickness_with_bumps(500.0, 2.0, &[(128.0, 64.0), (0.0, 64.0)]);
+        let bump_map = caustic_map(&bumps);
+        let (compared, informative, branched, skipped) =
+            assert_matches_reference(&bump_map, &bumps, &params);
+        let (minimum, maximum) = bump_map
             .iter()
             .fold((f32::MAX, f32::MIN), |(low, high), &value| {
                 (low.min(value), high.max(value))
             });
         println!(
-            "bump: {compared} texels match the reference ({branched} with the branch factor, \
-             {skipped} skipped at the threshold); map range {minimum:.4} to {maximum:.4}"
+            "bumps: {compared} texels match the reference, {informative} of them away from \
+             the uniform value, {branched} with the branch factor, {skipped} skipped; map \
+             range {minimum:.4} to {maximum:.4}"
         );
-        assert!(branched > 0, "the bump never triggers the branch factor");
+        assert!(branched > 0, "the bumps never trigger the branch factor");
         assert!(maximum - minimum > 1.0, "map range {minimum} to {maximum}");
 
-        // Diagnostic, not asserted: a smooth drained profile (30 nm at the top to 1000 nm at
-        // the bottom, as in the audit) varies far less, because its derivatives per texel
-        // are small. The effect is stylised; see the module documentation.
+        // The audit's smooth drained profile, 30 nm at the top to 1000 nm at the bottom. Its
+        // derivatives per texel are small, so the map varies little; the range is printed
+        // as a diagnostic, not asserted. The effect is stylised; see the module documentation.
         let drained: Vec<f32> = (0..GRID_HEIGHT)
             .flat_map(|row| {
                 let theta = row as f64 * std::f64::consts::PI / (GRID_HEIGHT - 1) as f64;
@@ -747,13 +790,17 @@ mod tests {
             })
             .collect();
         let drained_map = caustic_map(&drained);
+        let (drained_compared, drained_informative, _, _) =
+            assert_matches_reference(&drained_map, &drained, &params);
         let (low, high) = drained_map
             .iter()
             .fold((f32::MAX, f32::MIN), |(low, high), &value| {
                 (low.min(value), high.max(value))
             });
         println!(
-            "drained profile: map range {low:.5} to {high:.5} ({:.2}% of caustic_intensity)",
+            "drained profile: {drained_compared} texels match the reference \
+             ({drained_informative} away from the uniform value); map range {low:.5} to \
+             {high:.5}, a span of {:.2}% of caustic_intensity",
             (high - low) / params.caustic_intensity * 100.0
         );
     }
