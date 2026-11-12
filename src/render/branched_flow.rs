@@ -2,7 +2,8 @@
 //! Traces light rays through the soap film, bending based on thickness gradients
 //!
 //! Uses a hybrid model combining:
-//! - GRIN optics: Rays bend toward thicker regions (smooth gradients)
+//! - GRIN optics: Rays bend toward thicker regions along the gradient of ln n_eff, the
+//!   effective index of light guided in the film (#45, [`crate::physics::film_waveguide`])
 //! - Particle scattering: Discrete scatterers (micelles) create local deflections
 //!
 //! The particle scattering is key for creating tree-like branches (caustics)
@@ -12,6 +13,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
+use crate::physics::film_waveguide::ln_effective_index_table;
 use crate::physics::geometry::uv_to_unit_sphere;
 
 /// Maximum number of scatterers supported
@@ -64,7 +66,10 @@ pub struct BranchedFlowParams {
     pub ray_steps: u32,
     /// Step size for ray marching
     pub step_size: f32,
-    /// How much thickness gradient bends rays
+    /// Multiplier on the ray kick, applied to both forces: the GRIN force (the surface
+    /// gradient of ln n_eff, weighted by `1 - particle_weight`) and the scatterer force
+    /// (weighted by `particle_weight`). With `particle_weight = 0`, 1.0 is the physical
+    /// GRIN curvature near the chart origin (#45).
     pub bend_strength: f32,
     /// Initial beam spread angle (radians)
     pub spread_angle: f32,
@@ -75,7 +80,8 @@ pub struct BranchedFlowParams {
     pub tex_height: u32,
     /// Time for animation
     pub time: f32,
-    /// Scale factor for thickness values (meters -> micrometers = 1e6)
+    /// Converts the drainage thickness (metres) to micrometres, the unit of the shader's
+    /// ln n_eff table: 1e6. Unused before #45, which left the GRIN force in metres.
     pub thickness_scale: f32,
     /// Base film thickness in nanometers (synced from BubbleUniform)
     pub base_thickness_nm: f32,
@@ -123,7 +129,9 @@ impl Default for BranchedFlowParams {
             ray_steps: 200,
             // Small steps for smooth ray paths
             step_size: 0.005,
-            // Moderate GRIN bending (particle scattering now creates branching)
+            // Also scales the scatterer kick, which this value was tuned for. With the default
+            // particle_weight the GRIN kick is 5.0 * 0.9 = 4.5x the physical one (#45). The
+            // live thickness field stays uniform until #43, so GRIN is zero at runtime now.
             bend_strength: 5.0,
             // Beam width (now controls position spread, not angle spread)
             spread_angle: 0.4,
@@ -317,6 +325,9 @@ pub struct BranchedFlowSimulator {
     scatterer_buffer: wgpu::Buffer,
     /// Cell offsets prefix-sum buffer for spatial hash (GRID_SIZE_U * GRID_SIZE_V + 1 entries)
     cell_offsets_buffer: wgpu::Buffer,
+    /// ln n_eff of the film's TE0 mode against thickness, for the GRIN force (#45; see
+    /// [`crate::physics::film_waveguide`]). Written once at creation.
+    ln_neff_table_buffer: wgpu::Buffer,
     /// Current parameters
     pub params: BranchedFlowParams,
     /// Whether simulation is enabled
@@ -448,6 +459,17 @@ impl BranchedFlowSimulator {
                     },
                     count: None,
                 },
+                // ln n_eff table for the GRIN force (read-only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -512,6 +534,12 @@ impl BranchedFlowSimulator {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        let ln_neff_table_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Branched Flow ln n_eff Table Buffer"),
+            contents: bytemuck::cast_slice(&ln_effective_index_table()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
         // Create bind group using the external caustic buffer
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Branched Flow Bind Group"),
@@ -537,6 +565,10 @@ impl BranchedFlowSimulator {
                     binding: 4,
                     resource: cell_offsets_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: ln_neff_table_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -548,6 +580,7 @@ impl BranchedFlowSimulator {
             params_buffer,
             scatterer_buffer,
             cell_offsets_buffer,
+            ln_neff_table_buffer,
             params,
             enabled: false,
             tex_width,
@@ -610,6 +643,10 @@ impl BranchedFlowSimulator {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.cell_offsets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.ln_neff_table_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -812,6 +849,7 @@ impl BranchedFlowSimulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::film_waveguide;
 
     #[test]
     fn params_struct_size_matches_wgsl_layout() {
@@ -989,17 +1027,28 @@ mod tests {
         }
     }
 
-    /// Deposit texture after one compute frame of a simulator set up by `configure`.
-    /// The drainage thickness is uniform, so only the scatterers bend the rays.
+    /// Drainage grid size, as in `branched_flow_compute.wgsl` (THICKNESS_WIDTH, _HEIGHT)
+    const THICKNESS_COLUMNS: usize = 256;
+    const THICKNESS_ROWS: usize = 128;
+
+    /// A uniform 500 nm film in metres, the drainage solver's initial state: no GRIN force,
+    /// so only the scatterers bend the rays
+    fn uniform_thickness() -> Vec<f32> {
+        vec![500e-9f32; THICKNESS_COLUMNS * THICKNESS_ROWS]
+    }
+
+    /// Deposit texture after one compute frame of a simulator set up by `configure`,
+    /// over the drainage thickness field `thickness` (metres, row-major, rows = theta)
     fn one_frame_deposits(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        thickness: &[f32],
         configure: impl FnOnce(&mut BranchedFlowSimulator),
     ) -> Vec<u32> {
-        let thickness = vec![500e-9f32; 256 * 128];
+        assert_eq!(thickness.len(), THICKNESS_COLUMNS * THICKNESS_ROWS);
         let thickness_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&thickness),
+            contents: bytemuck::cast_slice(thickness),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let texture_bytes = 512 * 256 * 4;
@@ -1053,7 +1102,7 @@ mod tests {
         let Some((device, queue)) = test_device() else {
             panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
         };
-        let texels = one_frame_deposits(&device, &queue, |simulator| {
+        let texels = one_frame_deposits(&device, &queue, &uniform_thickness(), |simulator| {
             simulator.params.patch_center_u = 0.5;
         });
         let coverage = DepositCoverage::of(&texels, 512, 256);
@@ -1081,7 +1130,7 @@ mod tests {
         // Default laser entry (0, 0, 1) is at u = 0.75, v = 0.5
         // The patch centre (u = 0.5) differs from the laser entry, so this fails if the
         // full-sphere chart is centred on the patch instead
-        let texels = one_frame_deposits(&device, &queue, |simulator| {
+        let texels = one_frame_deposits(&device, &queue, &uniform_thickness(), |simulator| {
             simulator.params.patch_enabled = 0;
             simulator.params.patch_center_u = 0.5;
         });
@@ -1099,6 +1148,103 @@ mod tests {
             (centroid_u - 0.75).abs() < 0.05 && (centroid_v - 0.5).abs() < 0.1,
             "deposits centred at ({centroid_u}, {centroid_v}), not near the entry (0.75, 0.5)"
         );
+    }
+
+    /// Thickness field (metres) whose ln n_eff rises linearly with theta at `slope` per
+    /// radian within 0.5 rad of the equator, constant beyond, around `ln_at_equator`
+    fn ln_index_ramp_in_theta(ln_at_equator: f64, slope: f64) -> Vec<f32> {
+        (0..THICKNESS_ROWS)
+            .flat_map(|row| {
+                let theta = row as f64 * std::f64::consts::PI / (THICKNESS_ROWS - 1) as f64;
+                let offset = (theta - std::f64::consts::FRAC_PI_2).clamp(-0.5, 0.5);
+                let thickness_nm = film_waveguide::thickness_for_ln_effective_index(
+                    ln_at_equator + slope * offset,
+                );
+                std::iter::repeat_n((thickness_nm * 1e-9) as f32, THICKNESS_COLUMNS)
+            })
+            .collect()
+    }
+
+    /// Deposit-weighted mean v (0 to 1) of one deposit texture column
+    fn column_centroid_v(texels: &[u32], column: usize) -> f64 {
+        let (mut weight, mut weighted_v) = (0.0f64, 0.0f64);
+        for row in 0..256 {
+            let texel = texels[row * 512 + column] as f64;
+            weight += texel;
+            weighted_v += texel * row as f64 / 255.0;
+        }
+        assert!(weight > 0.0, "no deposits in column {column}");
+        weighted_v / weight
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn grin_force_bends_rays_toward_thicker_film_by_the_physical_amount() {
+        // #45: before it, the GRIN force differentiated thickness in metres and bent a ray
+        // by about 2e-4 degrees. Here a beam runs east along the equator from the laser
+        // entry (0, 0, 1) through a film whose ln n_eff changes by `slope` per radian
+        // toward the south; only the GRIN force acts (particle_weight = 0) at its physical
+        // strength (bend_strength = 1). In the gnomonic chart the loop integrates
+        // y'' = slope, so at chart distance x the beam has moved y = slope x^2 / 2 south,
+        // which is v = atan(y / sqrt(1 + x^2)) / pi. A missing pi in the metric or a
+        // missing thickness scale would miss this by 3x or 1e6x; mirrored fields must
+        // move the beam in opposite directions.
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let ln_at_equator = film_waveguide::te0_effective_index(
+            400.0,
+            film_waveguide::GUIDED_FILM_INDEX,
+            film_waveguide::GUIDED_WAVELENGTH_NM,
+        )
+        .ln();
+        let slope = 0.1;
+        let configure = |simulator: &mut BranchedFlowSimulator| {
+            simulator.params.patch_enabled = 0;
+            simulator.params.particle_weight = 0.0;
+            simulator.params.bend_strength = 1.0;
+            // |force| = 0.1 sets the step factor to 1, so 400 steps reach chart distance 2
+            simulator.params.ray_steps = 400;
+            simulator.set_beam_angle(0.0);
+        };
+        let straight = one_frame_deposits(&device, &queue, &uniform_thickness(), configure);
+        let thicker_south = one_frame_deposits(
+            &device,
+            &queue,
+            &ln_index_ramp_in_theta(ln_at_equator, slope),
+            configure,
+        );
+        let thicker_north = one_frame_deposits(
+            &device,
+            &queue,
+            &ln_index_ramp_in_theta(ln_at_equator, -slope),
+            configure,
+        );
+
+        // Column 447 is u = 0.8748, i.e. 0.7839 rad east of the entry (u = 0.75)
+        let column = 447;
+        let chart_distance = ((column as f64 / 511.0 - 0.75) * std::f64::consts::TAU).tan();
+        let chart_shift = slope * chart_distance * chart_distance / 2.0;
+        let predicted = (chart_shift / (1.0 + chart_distance * chart_distance).sqrt()).atan()
+            / std::f64::consts::PI;
+        let baseline = column_centroid_v(&straight, column);
+        let south_shift = column_centroid_v(&thicker_south, column) - baseline;
+        let north_shift = column_centroid_v(&thicker_north, column) - baseline;
+        println!(
+            "column {column} (chart x = {chart_distance:.4}): baseline v {baseline:.5}, \
+             shift toward thicker south {south_shift:+.5}, north {north_shift:+.5}, \
+             predicted +-{predicted:.5}"
+        );
+        assert!(
+            south_shift > 0.0 && north_shift < 0.0,
+            "rays not bent toward thicker film"
+        );
+        for shift in [south_shift, -north_shift] {
+            assert!(
+                (0.8..1.25).contains(&(shift / predicted)),
+                "shift {shift:.5} vs predicted {predicted:.5}"
+            );
+        }
     }
 
     #[test]
