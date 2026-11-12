@@ -259,8 +259,11 @@ const STREAM_DRIFT_ANGLE: u32 = 7;
 const DRIFT_SPEED_PER_AXIS: f32 = 0.021;
 /// Correlation time of the drift velocity in film-seconds
 const DRIFT_CORRELATION_TIME: f32 = 3.0;
-/// Longest film-time step applied at once; a longer gap (a hitch) moves this far only
-const MAX_DRIFT_STEP: f32 = 0.1;
+/// Longest film-time step applied at once. The velocity update is exact for any step and
+/// positions move in a straight line within one, so the cap only bounds the jump after a
+/// long hitch. At 1 s the drift keeps up with film time down to one frame per
+/// film-second, which covers the CPU adapter with `--compute` (about 1 fps).
+const MAX_DRIFT_STEP: f32 = 1.0;
 
 /// Two independent standard normal values for scatterer `index` at drift `step`
 /// (Box-Muller on two hash streams)
@@ -357,6 +360,93 @@ fn initial_drift_velocities(count: usize, step: u32) -> Vec<[f32; 2]> {
             ]
         })
         .collect()
+}
+
+/// What scatterer generation needs from the simulation parameters
+#[derive(Debug, Clone, Copy)]
+struct ScattererGeneration {
+    count: u32,
+    strength: f32,
+    radius: f32,
+    patch_bounds: Option<PatchBounds>,
+}
+
+/// Scatterer positions and drift state, separate from the GPU buffers so the CPU update
+/// can be tested without a device
+#[derive(Debug, Default)]
+struct ScattererField {
+    /// In generation order: a scatterer's index is its identity for the drift
+    scatterers: Vec<ScattererGPU>,
+    /// Drift velocity of each scatterer in UV per film-second, same order
+    velocities: Vec<[f32; 2]>,
+    /// Film time of the last update, for the drift step
+    last_time: f32,
+    /// Seeds the drift noise; advances with every drift step and regeneration
+    drift_step: u32,
+}
+
+impl ScattererField {
+    /// New scatterers at film time `time`, inside `bounds`, with stationary velocities
+    fn regenerate(&mut self, time: f32, generation: ScattererGeneration, bounds: DriftBounds) {
+        self.scatterers = generate_scatterers(
+            generation.count,
+            time,
+            generation.strength,
+            generation.radius,
+            generation.patch_bounds,
+        );
+        // Generation jitter can place a scatterer slightly outside the patch (up to about
+        // 0.006 UV at the default size); fold it in now instead of with a jump on the
+        // first drift step
+        for scatterer in &mut self.scatterers {
+            if !bounds.wrap_u {
+                scatterer.pos_u = reflect_into(scatterer.pos_u, bounds.min_u, bounds.max_u).0;
+            }
+            scatterer.pos_v = reflect_into(scatterer.pos_v, bounds.min_v, bounds.max_v).0;
+        }
+        self.velocities = initial_drift_velocities(self.scatterers.len(), self.drift_step);
+        self.drift_step = self.drift_step.wrapping_add(1);
+        self.last_time = time;
+    }
+
+    /// Drifts every scatterer by the film time elapsed since the last update: nothing
+    /// while the film is paused (see [`drift_time_step`])
+    fn advance(&mut self, time: f32, bounds: DriftBounds) {
+        let dt = drift_time_step(self.last_time, time);
+        self.last_time = time;
+        if dt > 0.0 && !self.scatterers.is_empty() {
+            drift_scatterers(
+                &mut self.scatterers,
+                &mut self.velocities,
+                dt,
+                self.drift_step,
+                bounds,
+            );
+            self.drift_step = self.drift_step.wrapping_add(1);
+        }
+    }
+
+    /// A copy sorted by grid cell for the spatial hash, and the prefix-sum cell offsets:
+    /// `offsets[i]` is the index of the first scatterer in cell i, `offsets[i + 1]` one
+    /// past the last. The stored order stays as generated.
+    fn sorted_for_upload(&self) -> (Vec<ScattererGPU>, Vec<u32>) {
+        let cell_of = |s: &ScattererGPU| {
+            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
+            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
+            (v_cell * GRID_SIZE_U + u_cell) as usize
+        };
+        let mut sorted = self.scatterers.clone();
+        sorted.sort_by_key(cell_of);
+        let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
+        let mut cell_offsets = vec![0u32; total_cells + 1];
+        for scatterer in &sorted {
+            cell_offsets[cell_of(scatterer) + 1] += 1;
+        }
+        for cell in 1..=total_cells {
+            cell_offsets[cell] += cell_offsets[cell - 1];
+        }
+        (sorted, cell_offsets)
+    }
 }
 
 /// Generate scatterers using quasi-random distribution with jitter
@@ -479,15 +569,8 @@ pub struct BranchedFlowSimulator {
     last_patch_center_u: f32,
     last_patch_center_v: f32,
     last_patch_half_size: f32,
-    /// Scatterers in generation order (stable identity for their drift); a sorted copy is
-    /// uploaded each frame
-    current_scatterers: Vec<ScattererGPU>,
-    /// Drift velocity of each scatterer in UV per film-second, same order
-    scatterer_velocities: Vec<[f32; 2]>,
-    /// Film time of the last scatterer update, for the drift step
-    last_scatterer_time: f32,
-    /// Counter that seeds the drift noise; advances with every drift step
-    drift_step: u32,
+    /// Scatterer positions and drift state; a sorted copy is uploaded each frame
+    scatterer_field: ScattererField,
     /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
     /// at the current chart origin before every upload
     beam_angle_deg: f32,
@@ -734,10 +817,7 @@ impl BranchedFlowSimulator {
             last_patch_center_u: params.patch_center_u,
             last_patch_center_v: params.patch_center_v,
             last_patch_half_size: params.patch_half_size,
-            current_scatterers: Vec::new(),
-            scatterer_velocities: Vec::new(),
-            last_scatterer_time: 0.0,
-            drift_step: 0,
+            scatterer_field: ScattererField::default(),
             beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
         }
     }
@@ -853,68 +933,28 @@ impl BranchedFlowSimulator {
         // Check if parameters changed since last upload
         self.check_scatterer_params_changed();
 
+        let bounds = self.drift_bounds();
         if self.scatterers_dirty {
             // Full regeneration: structural parameters changed
-            let patch_bounds = if self.params.patch_enabled != 0 {
-                Some(PatchBounds {
-                    center_u: self.params.patch_center_u,
-                    center_v: self.params.patch_center_v,
-                    half_size: self.params.patch_half_size,
-                })
-            } else {
-                None
-            };
-
-            self.current_scatterers = generate_scatterers(
-                self.params.num_scatterers.min(MAX_SCATTERERS),
-                time,
-                self.params.scatterer_strength,
-                self.params.scatterer_radius,
+            let patch_bounds = (self.params.patch_enabled != 0).then_some(PatchBounds {
+                center_u: self.params.patch_center_u,
+                center_v: self.params.patch_center_v,
+                half_size: self.params.patch_half_size,
+            });
+            let generation = ScattererGeneration {
+                count: self.params.num_scatterers.min(MAX_SCATTERERS),
+                strength: self.params.scatterer_strength,
+                radius: self.params.scatterer_radius,
                 patch_bounds,
-            );
-            self.scatterer_velocities =
-                initial_drift_velocities(self.current_scatterers.len(), self.drift_step);
-            self.drift_step = self.drift_step.wrapping_add(1);
-            self.last_scatterer_time = time;
+            };
+            self.scatterer_field.regenerate(time, generation, bounds);
             self.scatterers_dirty = false;
-        } else if !self.current_scatterers.is_empty() {
-            let dt = drift_time_step(self.last_scatterer_time, time);
-            self.last_scatterer_time = time;
-            if dt > 0.0 {
-                let bounds = self.drift_bounds();
-                drift_scatterers(
-                    &mut self.current_scatterers,
-                    &mut self.scatterer_velocities,
-                    dt,
-                    self.drift_step,
-                    bounds,
-                );
-                self.drift_step = self.drift_step.wrapping_add(1);
-            }
+        } else if !self.scatterer_field.scatterers.is_empty() {
+            self.scatterer_field.advance(time, bounds);
         } else {
             return; // No scatterers to update
         }
-
-        // Sort a copy by grid cell for the spatial hash; the stored order stays stable
-        let mut sorted_scatterers = self.current_scatterers.clone();
-        sorted_scatterers.sort_by_key(|s| {
-            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
-            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
-            v_cell * GRID_SIZE_U + u_cell
-        });
-
-        // Build prefix-sum cell_offsets: offsets[i] = start index of cell i in sorted array
-        let total_cells = (GRID_SIZE_U * GRID_SIZE_V) as usize;
-        let mut cell_offsets = vec![0u32; total_cells + 1];
-        for s in &sorted_scatterers {
-            let u_cell = (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as u32;
-            let v_cell = (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as u32;
-            let cell_idx = (v_cell * GRID_SIZE_U + u_cell) as usize;
-            cell_offsets[cell_idx + 1] += 1;
-        }
-        for i in 1..=total_cells {
-            cell_offsets[i] += cell_offsets[i - 1];
-        }
+        let (sorted_scatterers, cell_offsets) = self.scatterer_field.sorted_for_upload();
 
         // Upload sorted scatterers and cell offsets
         queue.write_buffer(
@@ -1748,9 +1788,10 @@ mod tests {
             .fold([0.0; 2], |total, d| {
                 [total[0] + d[0] / 400.0, total[1] + d[1] / 400.0]
             });
-        // The old bias would have moved every scatterer by -1.5 UV in 50 s
+        // The old bias would have moved every scatterer by -1.5 UV in 50 s. The mean of
+        // 400 independent displacements has a standard deviation of about 0.018 UV here.
         assert!(
-            mean_displacement.iter().all(|d| d.abs() < 0.05),
+            mean_displacement.iter().all(|d| d.abs() < 0.08),
             "mean displacement {mean_displacement:?} UV"
         );
     }
@@ -1812,15 +1853,17 @@ mod tests {
         }
         // A uniform spread puts about 7.8% within 2% of the span from an edge
         assert!(near_edge < 60, "{near_edge} of 400 scatterers at an edge");
+        // The old drift emptied the lower half (larger v) and the larger-u half, which is
+        // the left half on screen at the default camera
         let lower_half = scatterers.iter().filter(|s| s.pos_v > 0.5).count();
-        let right_half = scatterers.iter().filter(|s| s.pos_u > 0.75).count();
+        let larger_u_half = scatterers.iter().filter(|s| s.pos_u > 0.75).count();
         assert!(
             (140..=260).contains(&lower_half),
             "{lower_half} of 400 in the lower half"
         );
         assert!(
-            (140..=260).contains(&right_half),
-            "{right_half} of 400 in the right half"
+            (140..=260).contains(&larger_u_half),
+            "{larger_u_half} of 400 in the larger-u half"
         );
     }
 
@@ -1857,6 +1900,110 @@ mod tests {
         );
     }
 
+    /// The default generation for the default patch
+    fn default_patch_generation() -> ScattererGeneration {
+        ScattererGeneration {
+            count: 400,
+            strength: 0.5,
+            radius: 0.03,
+            patch_bounds: Some(PatchBounds {
+                center_u: 0.75,
+                center_v: 0.5,
+                half_size: 0.158,
+            }),
+        }
+    }
+
+    #[test]
+    fn scatterer_field_stands_still_while_the_film_is_paused() {
+        // The update path the app runs every frame: regenerate, then advance by film time.
+        // A paused film repeats the same film time; it must not move anything.
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        for frame in 1..=30 {
+            field.advance(frame as f32 / 60.0, DEFAULT_PATCH);
+        }
+        let positions = |field: &ScattererField| -> Vec<(f32, f32)> {
+            field
+                .scatterers
+                .iter()
+                .map(|s| (s.pos_u, s.pos_v))
+                .collect()
+        };
+        let paused_at = positions(&field);
+        for _ in 0..30 {
+            field.advance(0.5, DEFAULT_PATCH);
+        }
+        assert_eq!(
+            positions(&field),
+            paused_at,
+            "scatterers moved while paused"
+        );
+        field.advance(0.2, DEFAULT_PATCH);
+        assert_eq!(
+            positions(&field),
+            paused_at,
+            "film time going backwards moved scatterers"
+        );
+        field.advance(0.2 + 1.0 / 60.0, DEFAULT_PATCH);
+        assert_ne!(positions(&field), paused_at, "playing again must move them");
+    }
+
+    #[test]
+    fn scatterer_field_keeps_each_scatterer_with_its_velocity() {
+        // Each velocity belongs to the scatterer at the same index, so the stored order
+        // must stay the generation order however the upload copy is sorted
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        let generated_strengths: Vec<f32> = field.scatterers.iter().map(|s| s.strength).collect();
+        for frame in 1..=120 {
+            field.advance(frame as f32 / 60.0, DEFAULT_PATCH);
+            let (sorted, _) = field.sorted_for_upload();
+            assert_eq!(sorted.len(), field.scatterers.len());
+        }
+        let strengths: Vec<f32> = field.scatterers.iter().map(|s| s.strength).collect();
+        assert_eq!(strengths, generated_strengths, "scatterers were reordered");
+        assert_eq!(field.velocities.len(), field.scatterers.len());
+    }
+
+    #[test]
+    fn scatterer_field_starts_inside_the_patch() {
+        // Generation jitter puts a few scatterers just outside the patch; regenerate folds
+        // them in, so the first drift step does not jump
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        for s in &field.scatterers {
+            assert!(
+                (DEFAULT_PATCH.min_u..=DEFAULT_PATCH.max_u).contains(&s.pos_u),
+                "u {}",
+                s.pos_u
+            );
+            assert!(
+                (DEFAULT_PATCH.min_v..=DEFAULT_PATCH.max_v).contains(&s.pos_v),
+                "v {}",
+                s.pos_v
+            );
+        }
+    }
+
+    #[test]
+    fn sorted_for_upload_groups_scatterers_by_cell() {
+        let mut field = ScattererField::default();
+        field.regenerate(0.0, default_patch_generation(), DEFAULT_PATCH);
+        let (sorted, offsets) = field.sorted_for_upload();
+        assert_eq!(offsets.len(), (GRID_SIZE_U * GRID_SIZE_V) as usize + 1);
+        assert_eq!(offsets[offsets.len() - 1] as usize, sorted.len());
+        for cell in 0..(GRID_SIZE_U * GRID_SIZE_V) as usize {
+            for s in &sorted[offsets[cell] as usize..offsets[cell + 1] as usize] {
+                let u_cell =
+                    (s.pos_u / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_U - 1) as f32) as usize;
+                let v_cell =
+                    (s.pos_v / GRID_CELL_SIZE).clamp(0.0, (GRID_SIZE_V - 1) as f32) as usize;
+                assert_eq!(v_cell * GRID_SIZE_U as usize + u_cell, cell);
+            }
+        }
+    }
+
     #[test]
     fn reflect_into_folds_values_back_into_the_range() {
         assert_eq!(reflect_into(0.5, 0.0, 1.0), (0.5, false));
@@ -1889,7 +2036,7 @@ mod tests {
                 .all(|&count| (9_500..10_500).contains(&count)),
             "{deciles:?}"
         );
-        // Streams and steps are independent of each other
+        // Streams and steps give different values
         assert_ne!(unit_random(5, 1, 0), unit_random(5, 2, 0));
         assert_ne!(unit_random(5, 1, 0), unit_random(5, 1, 1));
     }
