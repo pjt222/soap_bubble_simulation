@@ -22,7 +22,8 @@ after a verified restore. If a run is killed with SIGKILL they remain, and the n
 refuses to start until you restore FILE (`cp <name>.orig "$(cat <name>.orig.path)"`) and
 delete both.
 
-Outputs go to target/mutation-check/<name>.baseline.log and <name>.log. Exit status:
+Outputs go to target/mutation-check/<name>.baseline.log and <name>.log; the latter starts
+with the mutation (file, old and new text) and the command. Exit status:
 0 caught, 1 not caught (the mutated run passed), 2 anything else (usage error, baseline
 failed, inconclusive result, restore failure). Run from the project root. Standard
 library only.
@@ -74,12 +75,12 @@ def failing_tests(output: str) -> list[str]:
     return sorted(set(names))
 
 
-def run(command: list[str], log_path: pathlib.Path) -> tuple[int, str]:
+def run(command: list[str], log_path: pathlib.Path, header: str = "") -> tuple[int, str]:
     result = subprocess.run(
         command, capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
     output = result.stdout + result.stderr
-    log_path.write_text(output, encoding="utf-8")
+    log_path.write_text(header + output, encoding="utf-8")
     return result.returncode, output
 
 
@@ -150,7 +151,11 @@ def main() -> int:
         backup_path_note.write_text(f"{args.file}\n", encoding="utf-8")
         try:
             args.file.write_bytes(text.replace(args.old, args.new).encode("utf-8"))
-            status, output = run(command, LOG_DIR / f"{stem}.log")
+            header = (
+                f"mutation: {args.name}\nfile: {args.file}\n--- old\n{args.old}\n"
+                f"--- new\n{args.new}\ncommand: {' '.join(command)}\n--- output\n"
+            )
+            status, output = run(command, LOG_DIR / f"{stem}.log", header)
         finally:
             args.file.write_bytes(original)
             if args.file.read_bytes() == original:
