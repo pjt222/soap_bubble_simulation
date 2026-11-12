@@ -1246,10 +1246,11 @@ mod tests {
             simulator.params.ray_steps = 400;
             // A narrow beam (rays within 0.05 of the central one) keeps the measured
             // centroid on the central ray the predictions follow. At the default width of
-            // 0.4 the phi test's deposit centroid reads 4.6% above the central ray's
-            // crossing; a replica of the loop and the deposit pass with the exact force
-            // gives the same (0.00885 against the GPU's 0.00886), so it is the observable,
-            // not the force. The theta test is unaffected.
+            // 0.4 the phi test read +0.00886 / -0.00884, 4.6-4.9% above its prediction. A
+            // numpy replica of the loop and the deposit pass with the exact force gives
+            // 0.00885, while its rays' mean crossing is 0.00847: the excess is in the
+            // deposit-weighted centroid of a wide beam, not in the force. The theta test
+            // read 0.4% below its prediction at 0.4 and reads 0.8-0.9% above at 0.1.
             simulator.params.spread_angle = 0.1;
             simulator.set_beam_angle(beam_angle_deg);
         };
@@ -1261,8 +1262,9 @@ mod tests {
     }
 
     /// The measured shifts must have opposite signs (toward the thicker film) and lie
-    /// within 5% of the chart integrator's prediction. The measured agreement is under
-    /// 1%; the window rejects a 20% error such as uploading n_eff instead of ln n_eff.
+    /// within 5% of the closed-form prediction in the loop's gnomonic chart. Unmutated,
+    /// the tests read 0.8-0.9% (theta) and 1.2-1.3% (phi) above it; uploading n_eff instead
+    /// of ln n_eff reads about 27% above and fails.
     fn assert_shifts_match(toward_thicker: f64, away: f64, predicted: f64) {
         assert!(
             toward_thicker > 0.0 && away < 0.0,
