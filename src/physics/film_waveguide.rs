@@ -22,7 +22,8 @@
 //!
 //! The choice of mode and wavelength matters at the tens-of-percent level: at 500 nm the
 //! TM0 mode would bend rays 1.43x harder than TE0, and 450 nm or 650 nm light 0.81x or
-//! 1.25x as hard as 532 nm (0.101 and 0.155 against 0.1245 per µm).
+//! 1.25x as hard as 532 nm (0.101 and 0.155 against 0.1245 per µm;
+//! `docs/evidence/2026-11-12-grin-deflection/neff_sensitivity.py`).
 
 use super::interference::wavelengths;
 
