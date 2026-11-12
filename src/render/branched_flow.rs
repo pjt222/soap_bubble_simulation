@@ -1379,9 +1379,10 @@ mod tests {
             params.intensity_falloff > 0.0 && params.intensity_falloff < 0.1,
             "Intensity falloff should be small per step"
         );
-        assert!(
-            params.thickness_scale > 0.0,
-            "Thickness scale must be positive"
+        // The shader's ln n_eff table is in micrometres and the drainage buffer in metres
+        assert_eq!(
+            params.thickness_scale, 1e6,
+            "thickness_scale must convert metres to micrometres"
         );
         assert_eq!(params.tex_width, 512);
         assert_eq!(params.tex_height, 256);

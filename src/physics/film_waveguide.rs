@@ -126,11 +126,11 @@ mod tests {
             (100.0, 1.0740),
             (500.0, 1.2745),
             (1000.0, 1.3112),
-            (2000.0, 1.3250),
+            (2000.0, 1.3245),
         ] {
             let index = guided_index(thickness_nm);
             assert!(
-                (index - expected).abs() < 6e-4,
+                (index - expected).abs() < 1e-4,
                 "n_eff({thickness_nm} nm) = {index:.5}, audit {expected}"
             );
         }
