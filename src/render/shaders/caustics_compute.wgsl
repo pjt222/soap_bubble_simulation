@@ -1,12 +1,19 @@
 // Caustic Compute Shader
-// Computes caustic intensity from thickness field variations
+// Computes caustic intensity from thickness field variations.
+//
+// A stylised effect, not light transport: it maps the curvature and slope of the film
+// thickness (micrometres, differences per grid texel) to a brightness. Nothing is traced
+// through the film, and caustics.wgsl maps ground (x, z) linearly onto this (phi, theta)
+// grid, which is not a projection (audit branched-02). Of the parameters, only the grid
+// size, film_thickness_scale, focal_length, branch_threshold, caustic_sharpness and
+// caustic_intensity are used here.
 // put id:'gpu_compute_caustics_shader', label:'Caustic intensity compute', input:'compute_results_gpu.internal', output:'compute_results_gpu.internal'
 
 struct CausticParams {
     grid_width: u32,
     grid_height: u32,
     refractive_index: f32,
-    film_thickness_scale: f32,
+    film_thickness_scale: f32,  // drainage thickness (metres) to micrometres, 1e6
     light_dir_x: f32,
     light_dir_y: f32,
     light_dir_z: f32,
@@ -25,7 +32,9 @@ struct CausticParams {
 @group(0) @binding(1) var<storage, read> thickness_field: array<f32>;
 @group(0) @binding(2) var<storage, read_write> caustic_map: array<f32>;
 
-// Sample thickness at grid position with boundary handling
+// Sample thickness in micrometres at grid position with boundary handling. The drainage
+// buffer holds metres; before #45 the scale was never applied, so every derivative was
+// about 1e-6 of its intended size and the output was caustic_intensity everywhere.
 fn sample_thickness(x: i32, y: i32) -> f32 {
     let width = i32(params.grid_width);
     let height = i32(params.grid_height);
@@ -38,7 +47,7 @@ fn sample_thickness(x: i32, y: i32) -> f32 {
     let sy = clamp(y, 0, height - 1);
 
     let idx = u32(sy * width + sx);
-    return thickness_field[idx];
+    return thickness_field[idx] * params.film_thickness_scale;
 }
 
 // Compute thickness gradient using central differences
