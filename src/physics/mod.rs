@@ -3,11 +3,13 @@
 //! Contains the physical models for soap bubble behavior:
 //! - Geometry: Spherical coordinates and mesh generation
 //! - Drainage: Film thickness evolution under gravity
+//! - Film waveguide: Effective index of light guided in the film plane (branched flow)
 //! - Interference: Thin-film optical calculations
 //! - Fluid: Surface flow and Marangoni effect
 //! - Foam: Multi-bubble foam system with inter-bubble physics
 
 pub mod drainage;
+pub mod film_waveguide;
 pub mod foam;
 pub mod foam_dynamics;
 pub mod foam_generation;

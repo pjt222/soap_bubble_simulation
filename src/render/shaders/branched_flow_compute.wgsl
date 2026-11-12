@@ -8,6 +8,9 @@
 // - Correlation length > wavelength creates branching (not random scattering)
 // - Caustics form where rays converge -> bright branch lines
 // - Pattern is tree-like with successive bifurcations
+// - The film is a slab waveguide: guided light sees the effective index n_eff(d) of its
+//   TE0 mode, so rays bend toward thicker film along grad ln n_eff (#45). The CPU solves
+//   for n_eff and uploads ln n_eff as a table (src/physics/film_waveguide.rs).
 //
 // Performance: True spatial hash with prefix-sum cell_offsets for O(k) scatterer lookups.
 // Adaptive step size scales dt by inverse gradient magnitude.
@@ -26,7 +29,7 @@ struct BranchedFlowParams {
     num_rays: u32,
     ray_steps: u32,
     step_size: f32,
-    bend_strength: f32,      // How much potential gradient bends rays
+    bend_strength: f32,      // Multiplier on the GRIN curvature (1 = physical) and the scatterer force
     spread_angle: f32,       // Initial beam spread (radians)
     intensity_falloff: f32,  // Absorption/scattering loss along ray path
     // Output texture size
@@ -34,7 +37,7 @@ struct BranchedFlowParams {
     tex_height: u32,
     // Time for animation
     time: f32,
-    // Scale factor for thickness values (meters -> micrometers = 1e6)
+    // Drainage thickness (metres) to micrometres, the unit of ln_neff_table (1e6)
     thickness_scale: f32,
     // Film dynamics parameters (synced from BubbleUniform but currently UNUSED).
     // Reserved for future: implementing FBM noise modulations in the compute shader
@@ -69,10 +72,16 @@ struct Scatterer {
 @group(0) @binding(2) var<storage, read_write> caustic_texture: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> scatterers: array<Scatterer>;
 @group(0) @binding(4) var<storage, read> cell_offsets: array<u32>;
+// ln n_eff of the film's TE0 mode at thicknesses i * LN_NEFF_TABLE_STEP_UM (#45)
+@group(0) @binding(5) var<storage, read> ln_neff_table: array<f32>;
 
 // Thickness field dimensions (matches GPU drainage grid)
 const THICKNESS_WIDTH: u32 = 256u;
 const THICKNESS_HEIGHT: u32 = 128u;
+
+// Thickness spacing of ln_neff_table in micrometres. Must match LN_NEFF_TABLE_STEP_UM in
+// src/physics/film_waveguide.rs (checked by a test there).
+const LN_NEFF_TABLE_STEP_UM: f32 = 0.005;
 
 // Number of cosine modes for random potential (more = finer detail)
 const NUM_POTENTIAL_MODES: i32 = 12;
@@ -161,8 +170,9 @@ fn uv_force_to_tangent_frame(
         local_theta_hat = cross(n, local_phi_hat);
     } else {
         // At poles (sin(theta) ≈ 0): phi is undefined, use arbitrary tangent frame.
-        // Forces are already tapered to zero near poles by smoothstep in
-        // thickness_gradient_uv(), so this branch has negligible effect.
+        // This covers only points within about 0.06 degrees of a pole (|xz| < 0.001).
+        // The east GRIN component is tapered to zero there (surface_gradient); the south
+        // component and the scatterer force are not.
         local_phi_hat = vec3<f32>(1.0, 0.0, 0.0);
         local_theta_hat = vec3<f32>(0.0, 0.0, 1.0);
     }
@@ -241,21 +251,33 @@ fn hash31(p: vec3<f32>) -> f32 {
 
 // ============================================================================
 // Film Thickness as Optical Potential
-// The actual soap film thickness creates the correlated disorder for branching
-// Thicker regions = higher refractive index = rays bend toward them (GRIN optics)
+// The actual soap film thickness creates the correlated disorder for branching.
+// Guided light sees the effective index n_eff(d) of the film's TE0 mode, which rises
+// with thickness, so rays bend toward thicker film (GRIN optics, #45).
 // ============================================================================
 
-// Sample film thickness at UV position (uses the GPU drainage buffer)
+// Drainage-grid columns around longitude u: (column 0, column 1, weight of column 1).
+// The grid is periodic in u with column j at u = j / width (drainage.wgsl uses
+// delta_phi = 2 pi / W), so u wraps and the last column interpolates with column 0.
+// Before #45 the sampler clamped u and put column j at u = j / (W - 1).
+fn periodic_columns(u: f32, width: u32) -> vec3<f32> {
+    let position = fract(u) * f32(width);
+    let column0 = u32(floor(position)) % width;
+    let column1 = (column0 + 1u) % width;
+    return vec3<f32>(f32(column0), f32(column1), position - floor(position));
+}
+
+// Sample film thickness at UV position (the GPU drainage buffer, in metres). Rows follow
+// the drainage grid too: row i at v = i / (H - 1) (delta_theta = pi / (H - 1)).
 fn sample_thickness_at_uv(uv: vec2<f32>) -> f32 {
-    let fx = clamp(uv.x, 0.0, 1.0) * f32(THICKNESS_WIDTH - 1u);
+    let columns = periodic_columns(uv.x, THICKNESS_WIDTH);
+    let x0 = u32(columns.x);
+    let x1 = u32(columns.y);
+    let sx = columns.z;
+
     let fy = clamp(uv.y, 0.0, 1.0) * f32(THICKNESS_HEIGHT - 1u);
-
-    let x0 = u32(floor(fx));
     let y0 = u32(floor(fy));
-    let x1 = min(x0 + 1u, THICKNESS_WIDTH - 1u);
     let y1 = min(y0 + 1u, THICKNESS_HEIGHT - 1u);
-
-    let sx = fx - floor(fx);
     let sy = fy - floor(fy);
 
     let h00 = thickness_field[y0 * THICKNESS_WIDTH + x0];
@@ -268,32 +290,57 @@ fn sample_thickness_at_uv(uv: vec2<f32>) -> f32 {
     return mix(h0, h1, sy);
 }
 
-// Compute thickness gradient at UV position with spherical metric correction.
-// UV maps to (phi, theta) on the sphere. The physical gradient on a sphere requires
-// a 1/sin(theta) factor for the phi component to account for the metric:
-//   grad(h) = (1/R) * (dh/dtheta, (1/sin(theta)) * dh/dphi)
-// Without this correction, ray bending is artificially exaggerated near the poles.
+// ln n_eff of the film's TE0 mode at a thickness in micrometres, interpolated linearly in
+// the CPU-built table. Clamps beyond the table (4 um), where n_eff has nearly reached n_film.
+fn ln_effective_index(thickness_um: f32) -> f32 {
+    let last = arrayLength(&ln_neff_table) - 1u;
+    let position = clamp(thickness_um / LN_NEFF_TABLE_STEP_UM, 0.0, f32(last));
+    let index0 = min(u32(floor(position)), last);
+    let index1 = min(index0 + 1u, last);
+    return mix(ln_neff_table[index0], ln_neff_table[index1], position - floor(position));
+}
+
+// ln n_eff of the film at a UV position. The drainage buffer holds metres; thickness_scale
+// (1e6) converts them to the table's micrometres. Before #45 the scale was never applied.
+fn ln_effective_index_at_uv(uv: vec2<f32>) -> f32 {
+    return ln_effective_index(sample_thickness_at_uv(uv) * params.thickness_scale);
+}
+
+// Surface gradient on the unit sphere, per radian, from central differences of a field
+// over +-eps in u and in v, at latitude v. Returns the components along (phi_hat, theta_hat),
+// i.e. east and south. u = (phi + pi) / (2 pi) and v = theta / pi, so
+// d/dphi = (d/du) / (2 pi) and d/dtheta = (d/dv) / pi, and the east component carries the
+// 1/sin(theta) metric factor. Before #45 the 2 pi and pi were missing, which weighted the
+// east component 2x against the south one (audit branched-08).
+fn surface_gradient(difference_u: f32, difference_v: f32, eps: f32, v: f32) -> vec2<f32> {
+    let theta = v * PI;
+    let sin_theta = sin(theta);
+    let clamped_sin_theta = max(sin_theta, 0.1);
+    // Smoothly taper the east component to zero near the poles to avoid singularity artifacts
+    let pole_taper = smoothstep(0.0, 0.15, sin_theta);
+    let east = difference_u / (2.0 * eps * 2.0 * PI * clamped_sin_theta) * pole_taper;
+    let south = difference_v / (2.0 * eps * PI);
+    return vec2<f32>(east, south);
+}
+
+// GRIN force on a guided ray at a UV position: the surface gradient of ln n_eff(d), per
+// radian on the unit sphere, along (phi_hat, theta_hat). A guided ray obeys
+// dT/ds = grad_perp ln n_eff (the ray-optics limit of the Helmholtz model of Patsyk et
+// al. 2020; see src/physics/film_waveguide.rs), so it bends toward thicker film. The
+// propagation loop adds this times bend_strength * (1 - particle_weight) per unit of chart
+// length, so bend_strength = 1 with particle_weight = 0 gives the physical curvature near
+// the chart origin; the gnomonic chart's distortion grows away from it (exponential map, #47).
+// The name predates #45, when this differentiated the raw thickness in metres; the loop
+// calls it by this name and stays unchanged.
 fn thickness_gradient_uv(uv: vec2<f32>) -> vec2<f32> {
     let eps = 0.01;  // Sampling distance in UV space
 
-    let h_right = sample_thickness_at_uv(uv + vec2<f32>(eps, 0.0));
-    let h_left = sample_thickness_at_uv(uv - vec2<f32>(eps, 0.0));
-    let h_up = sample_thickness_at_uv(uv + vec2<f32>(0.0, eps));
-    let h_down = sample_thickness_at_uv(uv - vec2<f32>(0.0, eps));
+    let ln_right = ln_effective_index_at_uv(uv + vec2<f32>(eps, 0.0));
+    let ln_left = ln_effective_index_at_uv(uv - vec2<f32>(eps, 0.0));
+    let ln_up = ln_effective_index_at_uv(uv + vec2<f32>(0.0, eps));
+    let ln_down = ln_effective_index_at_uv(uv - vec2<f32>(0.0, eps));
 
-    // UV.y maps to theta: theta = UV.y * PI (0 at north pole, PI at south pole)
-    let theta = uv.y * 3.14159265;
-    let sin_theta = sin(theta);
-    let clamped_sin_theta = max(sin_theta, 0.1);
-    // Smoothly taper gradient to zero near poles to avoid singularity artifacts
-    let pole_taper = smoothstep(0.0, 0.15, sin_theta);
-
-    // phi gradient (UV.x direction) needs 1/sin(theta) spherical metric correction
-    let grad_x = (h_right - h_left) / (2.0 * eps * clamped_sin_theta) * pole_taper;
-    // theta gradient (UV.y direction) — no correction needed
-    let grad_y = (h_up - h_down) / (2.0 * eps);
-
-    return vec2<f32>(grad_x, grad_y);
+    return surface_gradient(ln_right - ln_left, ln_up - ln_down, eps, uv.y);
 }
 
 // ============================================================================
