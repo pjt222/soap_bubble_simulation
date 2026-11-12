@@ -9,6 +9,14 @@
 //! The characteristic "branched flow" pattern emerges when the correlation length
 //! of thickness variations exceeds the wavelength of light.
 //!
+//! # What this module computes
+//! A stylised effect, not that physics: `caustics_compute.wgsl` maps the curvature and
+//! slope of the film thickness (micrometres, differences per grid texel) to a brightness,
+//! and `caustics.wgsl` maps ground (x, z) linearly onto the (phi, theta) grid, which is
+//! not a projection of any light path (audit branched-02, #45). A uniform film gives
+//! `caustic_intensity` everywhere, and smooth drained profiles vary little. The compute
+//! bind group is built once and is not rebuilt when the GPU drainage swaps buffers (#43).
+//!
 //! # Reference
 //! Patsyk et al. (2020) - Observation of branched flow of light
 
@@ -25,7 +33,8 @@ pub struct CausticParams {
     pub grid_height: u32,
     /// Refractive index of soap film
     pub refractive_index: f32,
-    /// Scale factor for thickness to optical path
+    /// Converts the drainage thickness (metres) to micrometres: 1e6. The compute shader's
+    /// `focal_length` and `branch_threshold` act on derivatives in micrometres per texel.
     pub film_thickness_scale: f32,
     /// Light direction X
     pub light_dir_x: f32,
@@ -157,7 +166,10 @@ impl CausticRenderer {
         let caustic_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Caustic Map Buffer"),
             contents: bytemuck::cast_slice(&caustic_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            // COPY_SRC lets the tests read the map back
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         });
 
         // Load compute shader
@@ -552,6 +564,198 @@ mod tests {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Drainage grid size (`CausticParams::default()` and the GPU drainage buffer)
+    const GRID_WIDTH: usize = 256;
+    const GRID_HEIGHT: usize = 128;
+
+    /// Caustic map after one compute pass over `thickness` (metres, row-major, rows = theta)
+    fn caustic_map(thickness: &[f32]) -> Vec<f32> {
+        assert_eq!(thickness.len(), GRID_WIDTH * GRID_HEIGHT);
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<crate::render::camera::CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let thickness_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(thickness),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let unused_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[],
+        });
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut renderer = CausticRenderer::new(
+            &device,
+            &camera_buffer,
+            &unused_layout,
+            &thickness_buffer,
+            COLOR_FORMAT,
+            DEPTH_FORMAT,
+            1,
+        );
+        renderer.enabled = true;
+        let map_bytes = std::mem::size_of_val(thickness) as u64;
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: map_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        renderer.compute(&mut encoder);
+        encoder.copy_buffer_to_buffer(&renderer._caustic_buffer, 0, &readback_buffer, 0, map_bytes);
+        queue.submit(std::iter::once(encoder.finish()));
+        if let Some(error) = pollster::block_on(device.pop_error_scope()) {
+            panic!("caustic compute failed validation: {error}");
+        }
+        readback_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                result.expect("map caustic map")
+            });
+        device.poll(wgpu::Maintain::Wait);
+        bytemuck::cast_slice::<u8, f32>(&readback_buffer.slice(..).get_mapped_range()).to_vec()
+    }
+
+    /// CPU port of `compute_caustic_intensity` (caustics_compute.wgsl) at texel (x, y),
+    /// on a thickness field already in micrometres. Also returns the Hessian determinant,
+    /// so callers can skip texels where f32 and f64 may disagree about `branch_threshold`.
+    fn reference_intensity(
+        thickness_um: &[f64],
+        params: &CausticParams,
+        x: i32,
+        y: i32,
+    ) -> (f64, f64) {
+        let (width, height) = (params.grid_width as i32, params.grid_height as i32);
+        let sample = |column: i32, row: i32| {
+            thickness_um[(row.clamp(0, height - 1) * width + column.rem_euclid(width)) as usize]
+        };
+        let center = sample(x, y);
+        let (left, right, up, down) = (
+            sample(x - 1, y),
+            sample(x + 1, y),
+            sample(x, y - 1),
+            sample(x, y + 1),
+        );
+        let gradient = ((right - left) / 2.0, (down - up) / 2.0);
+        let laplacian = left + right + up + down - 4.0 * center;
+        let second_x = left + right - 2.0 * center;
+        let second_y = up + down - 2.0 * center;
+        let mixed = (sample(x + 1, y + 1) - sample(x - 1, y + 1) - sample(x + 1, y - 1)
+            + sample(x - 1, y - 1))
+            / 4.0;
+        let hessian_det = second_x * second_y - mixed * mixed;
+        let focusing = 1.0
+            / (1.0 + laplacian * params.focal_length as f64)
+                .abs()
+                .max(0.01);
+        let branch = if hessian_det < -(params.branch_threshold as f64) {
+            1.5
+        } else {
+            1.0
+        };
+        let refraction = 1.0 + (gradient.0 * gradient.0 + gradient.1 * gradient.1).sqrt() * 0.5;
+        let intensity = (focusing * branch * refraction).powf(params.caustic_sharpness as f64)
+            * params.caustic_intensity as f64;
+        (intensity.clamp(0.0, 10.0), hessian_det)
+    }
+
+    /// A 500 nm film (metres) with a Gaussian bump of `amplitude_nm` and width
+    /// `sigma_texels` centred on texel (128, 64)
+    fn thickness_with_bump(amplitude_nm: f64, sigma_texels: f64) -> Vec<f32> {
+        (0..GRID_HEIGHT)
+            .flat_map(|row| {
+                (0..GRID_WIDTH).map(move |column| {
+                    let r_sq = (column as f64 - 128.0).powi(2) + (row as f64 - 64.0).powi(2);
+                    let bump = amplitude_nm * (-r_sq / (2.0 * sigma_texels * sigma_texels)).exp();
+                    ((500.0 + bump) * 1e-9) as f32
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn caustic_map_follows_the_thickness_field_in_micrometres() {
+        // #45: the compute shader differentiated the drainage thickness in metres, so every
+        // derivative was ~1e-6 of its intended size and the map was caustic_intensity (2.0)
+        // everywhere. A uniform film must still give exactly that; a sharp bump (500 nm,
+        // sigma 2 texels) must vary as the shader formula predicts in micrometres, including
+        // the branch factor where the Hessian determinant is below -branch_threshold.
+        let params = CausticParams::default();
+        let uniform = caustic_map(&vec![500e-9f32; GRID_WIDTH * GRID_HEIGHT]);
+        assert!(
+            uniform
+                .iter()
+                .all(|&value| (value - params.caustic_intensity).abs() < 1e-6),
+            "a uniform film must give caustic_intensity everywhere"
+        );
+
+        let bump = thickness_with_bump(500.0, 2.0);
+        let gpu_map = caustic_map(&bump);
+        let bump_um: Vec<f64> = bump
+            .iter()
+            .map(|&metres| metres as f64 * params.film_thickness_scale as f64)
+            .collect();
+        let (mut compared, mut branched, mut skipped) = (0, 0, 0);
+        for y in 0..GRID_HEIGHT as i32 {
+            for x in 0..GRID_WIDTH as i32 {
+                let (expected, hessian_det) = reference_intensity(&bump_um, &params, x, y);
+                if (hessian_det + params.branch_threshold as f64).abs() < 1e-6 {
+                    skipped += 1; // f32 and f64 may fall on different sides of the threshold
+                    continue;
+                }
+                let actual = gpu_map[y as usize * GRID_WIDTH + x as usize] as f64;
+                assert!(
+                    (actual - expected).abs() < 1e-4 * expected,
+                    "texel ({x}, {y}): GPU {actual}, micrometre reference {expected}"
+                );
+                compared += 1;
+                if hessian_det < -(params.branch_threshold as f64) {
+                    branched += 1;
+                }
+            }
+        }
+        let (minimum, maximum) = gpu_map
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(low, high), &value| {
+                (low.min(value), high.max(value))
+            });
+        println!(
+            "bump: {compared} texels match the reference ({branched} with the branch factor, \
+             {skipped} skipped at the threshold); map range {minimum:.4} to {maximum:.4}"
+        );
+        assert!(branched > 0, "the bump never triggers the branch factor");
+        assert!(maximum - minimum > 1.0, "map range {minimum} to {maximum}");
+
+        // Diagnostic, not asserted: a smooth drained profile (30 nm at the top to 1000 nm at
+        // the bottom, as in the audit) varies far less, because its derivatives per texel
+        // are small. The effect is stylised; see the module documentation.
+        let drained: Vec<f32> = (0..GRID_HEIGHT)
+            .flat_map(|row| {
+                let theta = row as f64 * std::f64::consts::PI / (GRID_HEIGHT - 1) as f64;
+                let thickness_nm = 30.0 + 970.0 * (1.0 - theta.cos()) / 2.0;
+                std::iter::repeat_n((thickness_nm * 1e-9) as f32, GRID_WIDTH)
+            })
+            .collect();
+        let drained_map = caustic_map(&drained);
+        let (low, high) = drained_map
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(low, high), &value| {
+                (low.min(value), high.max(value))
+            });
+        println!(
+            "drained profile: map range {low:.5} to {high:.5} ({:.2}% of caustic_intensity)",
+            (high - low) / params.caustic_intensity * 100.0
+        );
     }
 
     #[test]
