@@ -83,8 +83,11 @@ mode, so rays bend toward thicker film along `grad ln n_eff` (#45):
   `particle_weight = 0`, 1.0 is the physical curvature near the chart origin. The default
   5.0 was tuned for the scatterers.
 - The live drainage field stays uniform until #43, so the GRIN force is zero in the app
-  today; `grin_force_bends_rays_toward_thicker_film_by_the_physical_amount` checks it on a
-  synthetic field.
+  today. `grin_force_along_theta_matches_the_chart_integrator` and
+  `grin_force_along_phi_across_the_seam_matches_the_chart_integrator` check it on synthetic
+  fields (`#[ignore]`d GPU tests: lavapipe via `scripts/test-local.sh`, not in CI, #58).
+  They pin the loop's gnomonic-chart integrator, which differs from geodesic propagation
+  away from the chart origin (#47).
 
 **Dual thickness sources (intentionally independent):**
 - The **fragment shader** (`bubble.wgsl`) computes film thickness procedurally:
