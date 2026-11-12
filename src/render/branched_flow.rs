@@ -262,7 +262,8 @@ const DRIFT_CORRELATION_TIME: f32 = 3.0;
 /// Longest film-time step applied at once. The velocity update is exact for any step and
 /// positions move in a straight line within one, so the cap only bounds the jump after a
 /// long hitch. At 1 s the drift keeps up with film time down to one frame per
-/// film-second, which covers the CPU adapter with `--compute` (about 1 fps).
+/// film-second, so at film speed 1 it covers the CPU adapter with `--compute` (about 1 fps
+/// when last measured).
 const MAX_DRIFT_STEP: f32 = 1.0;
 
 /// Two independent standard normal values for scatterer `index` at drift `step`
