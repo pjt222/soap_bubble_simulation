@@ -226,6 +226,30 @@ impl PatchBounds {
     }
 }
 
+/// PCG-style 32-bit integer hash (Jarzynski and Olano 2020, "Hash Functions for GPU
+/// Rendering"), used for all scatterer randomness. The `sin(x) * 43758.547` hashes it
+/// replaces went through Rust's `f32::fract`, which keeps the sign, so they returned
+/// values in (-1, 1) instead of [0, 1) (#47).
+fn pcg_hash(input: u32) -> u32 {
+    let state = input.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    let word = ((state >> ((state >> 28) + 4)) ^ state).wrapping_mul(277_803_737);
+    (word >> 22) ^ word
+}
+
+/// Uniform value in [0, 1) (never 1.0: 24 bits over 2^24) for scatterer `index` in an
+/// independent random `stream` at time `step`
+fn unit_random(index: u32, stream: u32, step: u32) -> f32 {
+    let hash = pcg_hash(index ^ pcg_hash(stream.wrapping_add(pcg_hash(step))));
+    (hash >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// Random streams for scatterer generation and drift
+const STREAM_JITTER_U: u32 = 1;
+const STREAM_JITTER_V: u32 = 2;
+const STREAM_SIGN: u32 = 3;
+const STREAM_STRENGTH: u32 = 4;
+const STREAM_RADIUS: u32 = 5;
+
 /// Generate scatterers using quasi-random distribution with jitter
 /// Uses Halton sequence for good spatial coverage
 /// If patch_bounds is provided, scatterers are confined within the patch
@@ -247,11 +271,10 @@ fn generate_scatterers(
         let u = halton(i + 1, base_u);
         let v = halton(i + 1, base_v);
 
-        // Add time-based jitter for animation
+        // Time-dependent jitter in (-0.02, 0.02), centred
         let jitter_scale = 0.02;
-        let hash_seed = (i as f32) * 0.1031 + time * 0.1;
-        let jitter_u = (hash_seed.sin() * 43758.547).fract() * jitter_scale;
-        let jitter_v = (hash_seed.cos() * 43758.547).fract() * jitter_scale;
+        let jitter_u = (unit_random(i, STREAM_JITTER_U, time.to_bits()) - 0.5) * 2.0 * jitter_scale;
+        let jitter_v = (unit_random(i, STREAM_JITTER_V, time.to_bits()) - 0.5) * 2.0 * jitter_scale;
 
         let (pos_u, pos_v) = if let Some(bounds) = patch_bounds {
             // Map to patch bounds, then apply jitter within patch
@@ -268,17 +291,18 @@ fn generate_scatterers(
             )
         };
 
-        // Randomize sign of strength (attractive vs repulsive)
-        // Use deterministic hash based on index
-        let sign_hash = ((i as f32 * 0.7531 + 0.3).sin() * 43758.547).fract();
-        let sign = if sign_hash > 0.5 { 1.0 } else { -1.0 };
+        // Sign of strength: positive repels, negative attracts, half each.
+        // Before #47 the sign-preserving fract made only about 24% repulsive.
+        let sign = if unit_random(i, STREAM_SIGN, 0) < 0.5 {
+            1.0
+        } else {
+            -1.0
+        };
 
-        // Slight variation in strength magnitude
-        let strength_var = 0.8 + 0.4 * ((i as f32 * 0.9371).sin() * 43758.547).fract();
+        // Strength and radius vary by a factor in [0.8, 1.2) (before #47: 0.4 to 1.2)
+        let strength_var = 0.8 + 0.4 * unit_random(i, STREAM_STRENGTH, 0);
         let strength = sign * base_strength * strength_var;
-
-        // Slight variation in radius
-        let radius_var = 0.8 + 0.4 * ((i as f32 * 0.5791).cos() * 43758.547).fract();
+        let radius_var = 0.8 + 0.4 * unit_random(i, STREAM_RADIUS, 0);
         let sigma = (base_radius * radius_var).max(1e-6);
         let inv_sigma_sq = 1.0 / (2.0 * sigma * sigma);
 
@@ -1483,13 +1507,61 @@ mod tests {
 
     #[test]
     fn generate_scatterers_has_mixed_signs() {
-        let scatterers = generate_scatterers(100, 0.0, 0.5, 0.03, None);
-        let positive = scatterers.iter().filter(|s| s.strength > 0.0).count();
-        let negative = scatterers.iter().filter(|s| s.strength < 0.0).count();
+        // Positive strength repels, negative attracts; about half each. Before #47 only
+        // about 24% were repulsive (sign-preserving fract in the hash).
+        let scatterers = generate_scatterers(400, 0.0, 0.5, 0.03, None);
+        let repulsive = scatterers.iter().filter(|s| s.strength > 0.0).count();
+        assert!(
+            (160..=240).contains(&repulsive),
+            "{repulsive} of 400 scatterers repel; expected about half"
+        );
+    }
 
-        // Should have a mix of attractive and repulsive scatterers
-        assert!(positive > 20, "Too few attractive scatterers: {positive}");
-        assert!(negative > 20, "Too few repulsive scatterers: {negative}");
+    #[test]
+    fn generate_scatterers_vary_strength_and_radius_by_20_percent() {
+        // Factors in [0.8, 1.2); before #47 they spanned 0.4 to 1.2 with mean 0.79
+        let scatterers = generate_scatterers(400, 0.0, 0.5, 0.03, None);
+        let strength_factors: Vec<f32> =
+            scatterers.iter().map(|s| s.strength.abs() / 0.5).collect();
+        let radius_factors: Vec<f32> = scatterers
+            .iter()
+            .map(|s| (1.0 / (2.0 * s.inv_sigma_sq)).sqrt() / 0.03)
+            .collect();
+        for (name, factors) in [("strength", &strength_factors), ("radius", &radius_factors)] {
+            assert!(
+                factors
+                    .iter()
+                    .all(|&factor| (0.8 - 1e-5..1.2 + 1e-5).contains(&factor)),
+                "{name} factor outside [0.8, 1.2)"
+            );
+            let mean = factors.iter().sum::<f32>() / factors.len() as f32;
+            assert!((mean - 1.0).abs() < 0.03, "{name} factor mean {mean}");
+        }
+    }
+
+    #[test]
+    fn unit_random_is_uniform_on_the_unit_interval() {
+        assert!(((u32::MAX >> 8) as f32 * (1.0 / 16_777_216.0)) < 1.0);
+        let samples: Vec<f32> = (0..100_000u32)
+            .map(|index| unit_random(index, 7, 3))
+            .collect();
+        assert!(samples.iter().all(|&value| (0.0..1.0).contains(&value)));
+        let mean = samples.iter().map(|&value| value as f64).sum::<f64>() / samples.len() as f64;
+        assert!((mean - 0.5).abs() < 0.005, "mean {mean}");
+        // Each decile holds about a tenth of the samples
+        let mut deciles = [0usize; 10];
+        for &value in &samples {
+            deciles[(value * 10.0) as usize] += 1;
+        }
+        assert!(
+            deciles
+                .iter()
+                .all(|&count| (9_500..10_500).contains(&count)),
+            "{deciles:?}"
+        );
+        // Streams and steps are independent of each other
+        assert_ne!(unit_random(5, 1, 0), unit_random(5, 2, 0));
+        assert_ne!(unit_random(5, 1, 0), unit_random(5, 1, 1));
     }
 
     #[test]
