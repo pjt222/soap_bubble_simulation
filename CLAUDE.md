@@ -30,6 +30,7 @@ soap-bubble-sim/
 │   ├── physics/
 │   │   ├── geometry.rs   # SphereMesh, Vertex (icosphere generation)
 │   │   ├── drainage.rs   # DrainageSimulator, ThicknessField
+│   │   ├── film_waveguide.rs # TE0 effective index n_eff(d), ln n_eff table (GRIN)
 │   │   └── interference.rs # InterferenceCalculator, color computation
 │   ├── render/
 │   │   ├── pipeline.rs   # RenderPipeline (wgpu setup, buffers, rendering)
@@ -71,7 +72,19 @@ soap-bubble-sim/
 ## Architecture: Branched Flow & Film Dynamics
 
 The branched flow system traces light rays through the soap film as a 2D waveguide
-(GRIN optics). Rays bend toward thicker regions via `thickness_gradient()`.
+(GRIN optics). Guided light sees the effective index `n_eff(d)` of the film's TE0 slab
+mode, so rays bend toward thicker film along `grad ln n_eff` (#45):
+- `physics::film_waveguide` solves for `n_eff` on the CPU and uploads `ln n_eff` as a
+  table (binding 5, 5 nm steps up to 4 µm, 532 nm light). `thickness_gradient_uv` in
+  `branched_flow_compute.wgsl` converts the drainage thickness from metres with
+  `thickness_scale` (1e6), looks it up, and takes the surface gradient per radian on
+  the unit sphere (`surface_gradient`: d/du ÷ 2π sinθ, d/dv ÷ π).
+- `bend_strength` multiplies the GRIN force and the scatterer force alike; with
+  `particle_weight = 0`, 1.0 is the physical curvature near the chart origin. The default
+  5.0 was tuned for the scatterers.
+- The live drainage field stays uniform until #43, so the GRIN force is zero in the app
+  today; `grin_force_bends_rays_toward_thicker_film_by_the_physical_amount` checks it on a
+  synthetic field.
 
 **Dual thickness sources (intentionally independent):**
 - The **fragment shader** (`bubble.wgsl`) computes film thickness procedurally:
