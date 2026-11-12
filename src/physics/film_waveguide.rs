@@ -2,9 +2,15 @@
 //!
 //! A free-standing film (air | film | air) guides light like a symmetric slab. Its
 //! fundamental TE mode travels with an effective index `n_eff(d)` between 1 (air, for a
-//! vanishing film) and `n_film` (a thick film), set by the film thickness `d`. A guided
-//! ray then obeys the 2D ray equation `dT/ds = grad_perp ln n_eff(d)` (Patsyk et al.
-//! 2020, "Observation of branched flow of light"), so it bends toward thicker film. The
+//! vanishing film) and `n_film` (a thick film), set by the film thickness `d`.
+//!
+//! Patsyk et al. 2020 ("Observation of branched flow of light", Nature 583, 60) model the
+//! light in the film with a 2D Helmholtz equation in `n_eff(x, z)` (their Eq. 2), for
+//! "the electric field component parallel to the plane of the thin film", i.e. a TE mode.
+//! They couple a 532 nm laser into a film of n = 1.33, and "only the first mode of the
+//! film is excited" (p. 61). The ray-optics limit of that equation is the ray equation
+//! `d/ds (n_eff dr/ds) = grad n_eff`, i.e. `dT/ds = grad_perp ln n_eff` (Born & Wolf,
+//! Principles of Optics, section 3.2), so a ray bends toward thicker film. The
 //! branched-flow compute shader reads `ln n_eff` from the table built here and
 //! differentiates it along the film (`thickness_gradient_uv` in
 //! `branched_flow_compute.wgsl`).
@@ -13,10 +19,17 @@
 //! 100 nm, 0.125 per µm at 500 nm and 0.024 per µm at 1 µm (532 nm light). A constant
 //! factor times the thickness gradient is therefore only a local approximation, which is
 //! why the shader uses this table rather than a fixed coefficient.
+//!
+//! The choice of mode and wavelength matters at the tens-of-percent level: at 500 nm the
+//! TM0 mode would bend rays 1.43x harder than TE0, and 450 nm or 650 nm light 0.81x or
+//! 1.25x as hard as 532 nm (0.101 and 0.155 against 0.1245 per µm).
 
 use super::interference::wavelengths;
 
 /// Refractive index of the film for the guided-light model (water-based soap film).
+/// Fixed: the branched-flow table is built once with it, while the film index slider and
+/// the config's `refractive_index` only rebuild the interference table
+/// (`pipeline.rs`, `last_refractive_index`).
 pub const GUIDED_FILM_INDEX: f64 = 1.33;
 
 /// Vacuum wavelength of the guided light in nanometres: the green channel, near the
@@ -24,8 +37,11 @@ pub const GUIDED_FILM_INDEX: f64 = 1.33;
 pub const GUIDED_WAVELENGTH_NM: f64 = wavelengths::GREEN_NM;
 
 /// Thickness spacing of [`ln_effective_index_table`] in micrometres (5 nm). Must match
-/// `LN_NEFF_TABLE_STEP_UM` in `branched_flow_compute.wgsl` (checked by a test). At 10 nm
-/// the interpolated slope was off by up to 50% below 30 nm, where `ln n_eff` curves most.
+/// `LN_NEFF_TABLE_STEP_UM` in `branched_flow_compute.wgsl` (checked by a test). The
+/// interpolated slope is within 3% of the exact `d ln n_eff / dd` from 60 nm up (tested).
+/// Below that `ln n_eff` curves strongly: near zero it grows like `d^2`, so the first
+/// interval's chord has half the slope at its upper end, on any grid. The force is a
+/// difference over many table intervals unless the film is nearly uniform.
 pub const LN_NEFF_TABLE_STEP_UM: f64 = 0.005;
 
 /// Number of entries in [`ln_effective_index_table`]: thicknesses 0 to 4 µm. Beyond

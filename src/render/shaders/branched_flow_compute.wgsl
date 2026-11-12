@@ -170,8 +170,9 @@ fn uv_force_to_tangent_frame(
         local_theta_hat = cross(n, local_phi_hat);
     } else {
         // At poles (sin(theta) ≈ 0): phi is undefined, use arbitrary tangent frame.
-        // Forces are already tapered to zero near poles by smoothstep in
-        // thickness_gradient_uv(), so this branch has negligible effect.
+        // This covers only points within about 0.06 degrees of a pole (|xz| < 0.001).
+        // The east GRIN component is tapered to zero there (surface_gradient); the south
+        // component and the scatterer force are not.
         local_phi_hat = vec3<f32>(1.0, 0.0, 0.0);
         local_theta_hat = vec3<f32>(0.0, 0.0, 1.0);
     }
@@ -324,7 +325,8 @@ fn surface_gradient(difference_u: f32, difference_v: f32, eps: f32, v: f32) -> v
 
 // GRIN force on a guided ray at a UV position: the surface gradient of ln n_eff(d), per
 // radian on the unit sphere, along (phi_hat, theta_hat). A guided ray obeys
-// dT/ds = grad_perp ln n_eff (Patsyk et al. 2020), so it bends toward thicker film. The
+// dT/ds = grad_perp ln n_eff (the ray-optics limit of the Helmholtz model of Patsyk et
+// al. 2020; see src/physics/film_waveguide.rs), so it bends toward thicker film. The
 // propagation loop adds this times bend_strength * (1 - particle_weight) per unit of chart
 // length, so bend_strength = 1 with particle_weight = 0 gives the physical curvature near
 // the chart origin; the gnomonic chart's distortion grows away from it (exponential map, #47).
