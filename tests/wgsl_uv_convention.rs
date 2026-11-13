@@ -348,14 +348,19 @@ fn branched_flow_surface_gradient_is_the_gradient_on_the_unit_sphere() {
 fn branched_flow_ray_seeds_match_rust_bit_for_bit() {
     // The CPU tests of `ray_seeds` (distinct start pairs at the slider's 65536 rays, a
     // new start for every ray when the seed advances) hold for the shader only if its
-    // port computes the same bits. Ray indices and seeds below 2^24 pass through f32
-    // exactly; every output is a 24-bit integer times 2^-24, which f32 holds exactly.
+    // port computes the same bits. The inputs travel as f32: the ray index (below 2^24,
+    // exact) and the seed split into two 16-bit halves (exact), so seeds up to u32::MAX are
+    // covered. Every output is a 24-bit integer times 2^-24, which f32 holds exactly.
     const SLIDER_MAX_RAYS: u32 = 65_536;
-    let inputs: Vec<[f32; 4]> = [0u32, 1, 1_000_000]
+    let seed_halves = |seed: u32| [(seed & 0xFFFF) as f32, (seed >> 16) as f32];
+    let inputs: Vec<[f32; 4]> = [0u32, 1, 1_000_000, (1 << 24) + 1, u32::MAX]
         .into_iter()
-        .flat_map(|seed| (0..SLIDER_MAX_RAYS).map(move |ray| [ray as f32, seed as f32, 0.0, 0.0]))
+        .flat_map(|seed| {
+            let [low, high] = seed_halves(seed);
+            (0..SLIDER_MAX_RAYS).map(move |ray| [ray as f32, low, high, 0.0])
+        })
         .collect();
-    let call = "vec4<f32>(ray_seeds(u32(input.x), u32(input.y)), 0.0, 0.0)";
+    let call = "vec4<f32>(ray_seeds(u32(input.x), u32(input.y) | (u32(input.z) << 16u)), 0.0, 0.0)";
     let gpu_seeds = run_wgsl_functions(
         "branched_flow_compute.wgsl",
         &["pcg_hash", "unit_random", "ray_seeds"],
@@ -366,7 +371,7 @@ fn branched_flow_ray_seeds_match_rust_bit_for_bit() {
         .iter()
         .zip(&gpu_seeds)
         .filter_map(|(input, gpu)| {
-            let (ray, seed) = (input[0] as u32, input[1] as u32);
+            let (ray, seed) = (input[0] as u32, input[1] as u32 | ((input[2] as u32) << 16));
             let expected = ray_seeds(ray, seed);
             let matches = gpu[0].to_bits() == expected[0].to_bits()
                 && gpu[1].to_bits() == expected[1].to_bits();
