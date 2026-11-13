@@ -1,0 +1,5 @@
+# stdout of measure_frame_to_frame_change, lavapipe, 2026-11-13 (MEASURE lines only)
+MEASURE paused, per-frame seeds: frame-to-frame change, frames 40-59: texels 0.0000, displayed 0.0000
+MEASURE playing 60 fps, per-frame seeds: frame-to-frame change, frames 40-59: texels 0.0741, displayed 0.0983
+MEASURE playing 60 fps, frozen seeds: frame-to-frame change, frames 40-59: texels 0.0494, displayed 0.0522
+MEASURE paused, frozen seeds: frame-to-frame change, frames 40-59: texels 0.0000, displayed 0.0000
