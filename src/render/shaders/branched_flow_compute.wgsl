@@ -35,7 +35,7 @@ struct BranchedFlowParams {
     // Output texture size
     tex_width: u32,
     tex_height: u32,
-    // Seeds the ray start positions (ray_seeds); advances only while film time moves (#47)
+    // Seeds the ray start positions (ray_seeds); new for every traced frame (#47)
     ray_seed_index: u32,
     // Drainage thickness (metres) to micrometres, the unit of ln_neff_table (1e6)
     thickness_scale: f32,
@@ -248,10 +248,10 @@ fn unit_random(index: u32, stream: u32, step: u32) -> f32 {
 
 // The two start-position random numbers of ray `ray_idx` under seed `ray_seed_index`:
 // across and along the beam in full-sphere mode, u and v in the patch. Streams 8 and 9
-// are STREAM_RAY_START_X and STREAM_RAY_START_Y in branched_flow.rs. The seed advances
-// on every frame on which film time moved (RaySeedClock), so while the film plays the
-// 0.85 fade adds rays from new start positions, and a paused film re-traces the same
-// rays. Before #47 the start positions depended on ray_idx alone.
+// are STREAM_RAY_START_X and STREAM_RAY_START_Y in branched_flow.rs. Every traced frame
+// gets a new seed (TraceSchedule in branched_flow.rs), so the 0.85 fade adds rays from new
+// start positions; while the film is paused nothing is traced. Before #47 the start
+// positions depended on ray_idx alone.
 fn ray_seeds(ray_idx: u32, ray_seed_index: u32) -> vec2<f32> {
     return vec2<f32>(
         unit_random(ray_idx, 8u, ray_seed_index),

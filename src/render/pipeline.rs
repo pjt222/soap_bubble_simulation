@@ -1380,15 +1380,20 @@ impl RenderPipeline {
             );
             // 4. Dispatch compute passes with GPU timing. Requesting timestamps marks
             //    the passes as written, so request them only when step() will record
-            //    both passes: it returns early only when disabled, which this `if` excludes.
-            let clear_ts = self
-                .gpu_profiler
-                .compute_pass_timestamps(GpuPass::BranchedFlowClear);
-            let trace_ts = self
-                .gpu_profiler
-                .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
-            self.branched_flow_simulator
-                .step(&mut encoder, clear_ts, trace_ts);
+            //    both passes. With the film paused it records nothing, which freezes the
+            //    picture (TraceSchedule).
+            if self.branched_flow_simulator.traces_this_frame() {
+                let clear_ts = self
+                    .gpu_profiler
+                    .compute_pass_timestamps(GpuPass::BranchedFlowClear);
+                let trace_ts = self
+                    .gpu_profiler
+                    .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
+                self.branched_flow_simulator
+                    .step(&mut encoder, clear_ts, trace_ts);
+            }
+        } else {
+            self.branched_flow_simulator.skip_frame();
         }
 
         // Update egui buffers
