@@ -17,7 +17,7 @@ functions, not maintained tools.
 | `frame_to_frame_change.rs` | `measure_frame_to_frame_change` | `f8d0998` | `frame_to_frame_change.log` | most of a 302 s run |
 | `accumulation_error.rs` | `measure_accumulation_error` | `f8d0998` | `accumulation_error.log` | 247 s |
 | `patch_size_coverage.rs` | `measure_patch_size_coverage` | `f8d0998`, and `main` at `4216e34` | `patch_size_coverage.log`, `patch_size_coverage_main.log` | a few seconds |
-| `review_measurements.rs` | `review_measure_pause_transition`, `review_measure_coverage_seed_band` | `f8d0998` | `review_measurements.log` | not recorded |
+| `review_measurements.rs` | `review_measure_pause_transition`, `review_measure_coverage_seed_band` | `f8d0998` | `review_measurements.log` | 155 s for both |
 
 **Common setup.**
 - **Simulator.** The default `BranchedFlowSimulator`: 8192 rays, 400 scatterers, patch view
@@ -119,6 +119,10 @@ That is why a paused film now traces nothing:
 - A change to a traced input re-traces `PAUSED_SETTLE_FRAMES` frames, then freezes again.
 - `a_paused_film_freezes_the_picture` and
   `an_input_change_while_paused_retraces_until_the_picture_settles` check this on the GPU.
+- The second review round found that the UI's per-frame laser-angle round trip never settled
+  at azimuth ±180° or elevation ±90°, so the picture did not freeze there. The simulator now
+  keeps the angles in degrees.
+  `paused_picture_freezes_under_the_ui_round_trip_at_the_laser_end_stops` covers it.
 
 ## Patch coverage per patch size
 

@@ -110,13 +110,17 @@ gets a new seed:
 - **Paused.** Film time stands still, so nothing is traced or faded. `step()` records no
   pass, which freezes the picture at once at the accumulated image.
 - **Paused, but an input changed.** A change to a traced input (`traced_inputs`: the params
-  the shader reads), the first frame, or a frame the simulator skipped (`skip_frame`)
-  traces `PAUSED_SETTLE_FRAMES` (40) frames, then the picture freezes again.
+  the shader reads), the first frame, or the first frame after frames the simulator
+  skipped (`skip_frame`) traces `PAUSED_SETTLE_FRAMES` (40) frames, then the picture
+  freezes again. The laser angles are stored in degrees (`laser_angles_deg`) because the
+  UI reads and sets them every frame: derived from `entry_point`, that round trip never
+  settled at azimuth ±180° or elevation ±90°, so the paused picture did not freeze there.
 
-Measurements on lavapipe, at 60 fps in the default patch view on a uniform film:
-- While playing, the displayed layer changes about 1.9× as much per frame (raw texels
-  1.5×) as with seed 0 held fixed, a stand-in for `main` before #47.
-- On a still scatterer field, the faded image comes 3.1× closer to a many-seed reference.
+Measurements on lavapipe, in the default patch view on a uniform film:
+- While playing at 60 fps, the displayed layer changes about 1.9× as much per frame (raw
+  texels 1.5×) as with seed 0 held fixed, a stand-in for `main` before #47.
+- On a still scatterer field, the faded image comes 3.1× closer to a many-seed reference
+  over raw texels (2.6× over displayed values).
 
 Evidence: `docs/evidence/2026-11-13-ray-seeds/`. The freeze holds while the GPU drainage
 field is static: `gpu_drainage.step` takes the wall-clock `last_dt`, so #43 must stop it
