@@ -122,9 +122,10 @@ impl Default for BranchedFlowParams {
             beam_dir: [0.0; 3],
             // Rays per frame. With 200 steps this is 8x fewer ray-steps than the earlier
             // 32768 x 400, chosen for the WSL CPU rasteriser (llvmpipe); the frame-time gain was
-            // not measured. Ray start positions change every frame (ray_seeds, #47), so the
-            // 0.85 fade accumulates rays from earlier frames' start positions too; how much
-            // that makes up for the cut was not measured. Ray count per adapter type: #37.
+            // not measured. Every traced frame starts its rays from new positions (ray_seeds,
+            // TraceSchedule, #47), so while the film plays the 0.85 fade accumulates rays from
+            // earlier frames' start positions too; how much that makes up for the cut was not
+            // measured. Ray count per adapter type: #37.
             num_rays: 8192,
             // Steps per ray. The adaptive step factor sits at its 0.3 floor for almost every step
             // with the default scatterer field, so range is about ray_steps * step_size * 0.3 (#47).
@@ -238,8 +239,8 @@ fn pcg_hash(input: u32) -> u32 {
     (word >> 22) ^ word
 }
 
-/// Uniform value in [0, 1) (never 1.0: 24 bits over 2^24) for scatterer `index` in an
-/// independent random `stream` at time `step`
+/// Uniform value in [0, 1) (never 1.0: 24 bits over 2^24) for `index` (a scatterer or a
+/// ray) in an independent random `stream` at `step`
 fn unit_random(index: u32, stream: u32, step: u32) -> f32 {
     let hash = pcg_hash(index ^ pcg_hash(stream.wrapping_add(pcg_hash(step))));
     (hash >> 8) as f32 * (1.0 / 16_777_216.0)
