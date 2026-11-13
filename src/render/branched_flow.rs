@@ -78,8 +78,11 @@ pub struct BranchedFlowParams {
     /// Output texture dimensions
     pub tex_width: u32,
     pub tex_height: u32,
-    /// Time for animation
-    pub time: f32,
+    /// Seeds the ray start positions ([`ray_seeds`]). It advances on every frame on which
+    /// film time moved, so a paused film re-traces the same rays ([`RaySeedClock`]).
+    /// [`BranchedFlowSimulator::update_params`] sets it; it takes the slot of the former
+    /// `time` field, which the shader never read.
+    pub ray_seed_index: u32,
     /// Converts the drainage thickness (metres) to micrometres, the unit of the shader's
     /// ln n_eff table: 1e6. Unused before #45, which left the GRIN force in metres.
     pub thickness_scale: f32,
@@ -120,9 +123,9 @@ impl Default for BranchedFlowParams {
             beam_dir: [0.0; 3],
             // Rays per frame. With 200 steps this is 8x fewer ray-steps than the earlier
             // 32768 x 400, chosen for the WSL CPU rasteriser (llvmpipe); the frame-time gain was
-            // not measured. Ray seeds depend only on ray_idx, so every frame restarts from the
-            // same positions (only scatterer drift varies the paths) and the 0.85 fade adds few
-            // new samples. Per-frame seeds: #47; ray count per adapter type: #37.
+            // not measured. Ray start positions change every frame (ray_seeds, #47), so the
+            // 0.85 fade accumulates rays from earlier frames' start positions too; how much
+            // that makes up for the cut was not measured. Ray count per adapter type: #37.
             num_rays: 8192,
             // Steps per ray. The adaptive step factor sits at its 0.3 floor for almost every step
             // with the default scatterer field, so range is about ray_steps * step_size * 0.3 (#47).
@@ -140,7 +143,7 @@ impl Default for BranchedFlowParams {
             // Higher resolution for smoother branches
             tex_width: 512,
             tex_height: 256,
-            time: 0.0,
+            ray_seed_index: 0,
             thickness_scale: 1e6,
             base_thickness_nm: 500.0,
             swirl_intensity: 1.0,
@@ -251,6 +254,45 @@ const STREAM_STRENGTH: u32 = 4;
 const STREAM_RADIUS: u32 = 5;
 const STREAM_DRIFT_RADIUS: u32 = 6;
 const STREAM_DRIFT_ANGLE: u32 = 7;
+/// Random streams for the ray start positions. `ray_seeds` in branched_flow_compute.wgsl
+/// writes them as the literals 8u and 9u.
+const STREAM_RAY_START_X: u32 = 8;
+const STREAM_RAY_START_Y: u32 = 9;
+
+/// The two start-position random numbers, each in [0, 1), of ray `ray_index` under seed
+/// `ray_seed_index`: across and along the beam in full-sphere mode, u and v in the patch.
+/// The compute shader's `ray_seeds` is a port of this function. The seed advances on
+/// every frame on which film time moved ([`RaySeedClock`]), so the 0.85 fade adds rays
+/// from new start positions while the film plays. Before #47 the shader seeded from
+/// `ray_index` alone, so every frame re-traced the same rays.
+pub fn ray_seeds(ray_index: u32, ray_seed_index: u32) -> [f32; 2] {
+    [
+        unit_random(ray_index, STREAM_RAY_START_X, ray_seed_index),
+        unit_random(ray_index, STREAM_RAY_START_Y, ray_seed_index),
+    ]
+}
+
+/// Picks the ray seed for each frame: it advances when film time differs from the
+/// previous frame's, so a paused film re-traces the same rays over the same (still)
+/// scatterers and the bubble stands still. A reset, film time going backwards, also
+/// advances it. The index wraps at u32::MAX.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct RaySeedClock {
+    index: u32,
+    /// Film time of the previous frame; `None` before the first
+    film_time: Option<f32>,
+}
+
+impl RaySeedClock {
+    /// The seed for a frame at `film_time`
+    pub fn seed_for(&mut self, film_time: f32) -> u32 {
+        if self.film_time.is_some_and(|previous| previous != film_time) {
+            self.index = self.index.wrapping_add(1);
+        }
+        self.film_time = Some(film_time);
+        self.index
+    }
+}
 
 /// Scatterer drift (#47). Each scatterer's velocity follows an Ornstein-Uhlenbeck process:
 /// zero mean, exponentially correlated, so it moves smoothly and changes direction over
@@ -575,6 +617,8 @@ pub struct BranchedFlowSimulator {
     /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
     /// at the current chart origin before every upload
     beam_angle_deg: f32,
+    /// Seed of the ray start positions, uploaded as `params.ray_seed_index`
+    ray_seed_clock: RaySeedClock,
 }
 
 /// Create a branched flow texture buffer (called early in pipeline init)
@@ -820,13 +864,19 @@ impl BranchedFlowSimulator {
             last_patch_half_size: params.patch_half_size,
             scatterer_field: ScattererField::default(),
             beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
+            ray_seed_clock: RaySeedClock::default(),
         }
     }
 
-    /// Update parameters buffer. Recomputes `beam_dir` first, because the chart origin it
-    /// is tangent to moves with the laser entry and the patch.
-    pub fn update_params(&mut self, queue: &wgpu::Queue) {
+    /// Update parameters buffer for a frame at `film_time`. Recomputes `beam_dir` first,
+    /// because the chart origin it is tangent to moves with the laser entry and the patch,
+    /// and picks the ray seed, which advances only if film time moved ([`RaySeedClock`]).
+    /// The write lands at the next queue submission, so call this once per frame before
+    /// [`Self::step`] and submit each frame on its own: two frames recorded into one
+    /// submission would both trace with the last value written.
+    pub fn update_params(&mut self, queue: &wgpu::Queue, film_time: f32) {
         self.update_beam_direction();
+        self.params.ray_seed_index = self.ray_seed_clock.seed_for(film_time);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[self.params]));
     }
 
@@ -1003,15 +1053,12 @@ impl BranchedFlowSimulator {
     pub fn step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        time: f32,
         clear_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         trace_timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         if !self.enabled {
             return;
         }
-
-        self.params.time = time;
 
         // Clear/fade pass
         {
@@ -1076,7 +1123,7 @@ mod tests {
         assert_eq!(offset_of!(BranchedFlowParams, bend_strength), 36);
         assert_eq!(offset_of!(BranchedFlowParams, tex_width), 48);
         assert_eq!(offset_of!(BranchedFlowParams, tex_height), 52);
-        assert_eq!(offset_of!(BranchedFlowParams, time), 56);
+        assert_eq!(offset_of!(BranchedFlowParams, ray_seed_index), 56);
         assert_eq!(offset_of!(BranchedFlowParams, thickness_scale), 60);
         assert_eq!(offset_of!(BranchedFlowParams, num_scatterers), 80);
         assert_eq!(offset_of!(BranchedFlowParams, patch_enabled), 96);
@@ -1244,6 +1291,35 @@ mod tests {
         thickness: &[f32],
         configure: impl FnOnce(&mut BranchedFlowSimulator),
     ) -> Vec<u32> {
+        let run = FrameRun {
+            film_times: vec![0.0],
+            clear_each_frame: true,
+        };
+        frame_deposits(device, queue, thickness, configure, run)
+            .pop()
+            .expect("one frame")
+    }
+
+    /// How [`frame_deposits`] runs its frames
+    struct FrameRun {
+        /// Film time of each frame; a repeated value is a paused film
+        film_times: Vec<f32>,
+        /// Zero the deposit texture before each frame, so each texture holds that frame's
+        /// rays only. Otherwise the 0.85 fade accumulates them, as in the app.
+        clear_each_frame: bool,
+    }
+
+    /// Deposit texture after each frame of a simulator set up by `configure`, over the
+    /// drainage thickness field `thickness` (metres, row-major, rows = theta). Each frame
+    /// runs in the app's order (update_params, update_scatterers, step) and is submitted on
+    /// its own, because the params write lands at submission.
+    fn frame_deposits(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        thickness: &[f32],
+        configure: impl FnOnce(&mut BranchedFlowSimulator),
+        run: FrameRun,
+    ) -> Vec<Vec<u32>> {
         assert_eq!(thickness.len(), THICKNESS_COLUMNS * THICKNESS_ROWS);
         let thickness_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
@@ -1270,21 +1346,32 @@ mod tests {
         let mut simulator = BranchedFlowSimulator::new(device, &thickness_buffer, &deposit_buffer);
         simulator.enabled = true;
         configure(&mut simulator);
-        simulator.update_params(queue);
-        simulator.update_scatterers(queue, 0.0);
-        let mut encoder = device.create_command_encoder(&Default::default());
-        simulator.step(&mut encoder, 0.0, None, None);
-        encoder.copy_buffer_to_buffer(&deposit_buffer, 0, &readback_buffer, 0, texture_bytes);
-        queue.submit(Some(encoder.finish()));
+        let mut textures = Vec::with_capacity(run.film_times.len());
+        for &film_time in &run.film_times {
+            simulator.update_params(queue, film_time);
+            simulator.update_scatterers(queue, film_time);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            if run.clear_each_frame {
+                encoder.clear_buffer(&deposit_buffer, 0, None);
+            }
+            simulator.step(&mut encoder, None, None);
+            encoder.copy_buffer_to_buffer(&deposit_buffer, 0, &readback_buffer, 0, texture_bytes);
+            queue.submit(Some(encoder.finish()));
+
+            readback_buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |result| result.expect("map deposits"));
+            device.poll(wgpu::Maintain::Wait);
+            textures.push(
+                bytemuck::cast_slice::<u8, u32>(&readback_buffer.slice(..).get_mapped_range())
+                    .to_vec(),
+            );
+            readback_buffer.unmap();
+        }
         if let Some(error) = pollster::block_on(device.pop_error_scope()) {
             panic!("branched flow frame failed validation: {error}");
         }
-
-        readback_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |result| result.expect("map deposits"));
-        device.poll(wgpu::Maintain::Wait);
-        bytemuck::cast_slice::<u8, u32>(&readback_buffer.slice(..).get_mapped_range()).to_vec()
+        textures
     }
 
     #[test]
@@ -1295,9 +1382,10 @@ mod tests {
         // current default (u = 0.75) the patch centre IS the laser entry, so a chart at the
         // wrong origin would go unnoticed. Measured on lavapipe, one frame: before #46 4.8%
         // of texels lit and none in the left half; chart centred on the patch but the old
-        // beam-line spawn, 14%; rays starting over the whole patch, 90% (halves 87-93%).
-        // This checks that rays REACH the whole patch, not that branching is visible:
-        // straight, unscattered rays of the same length score 94.5%.
+        // beam-line spawn, 14%; rays starting over the whole patch, 90% (halves 87-93%);
+        // with #47's ray seeds 89% (halves 86-92%). This checks that rays REACH the whole
+        // patch, not that branching is visible: straight, unscattered rays of the same
+        // length scored 94.5% with the earlier seeds.
         let Some((device, queue)) = test_device() else {
             panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
         };
@@ -1318,6 +1406,70 @@ mod tests {
                 "a half of the patch is mostly dark: {coverage:?}"
             );
         }
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn ray_start_positions_advance_with_film_time() {
+        // #47: the start positions used to depend on the ray index alone, so every frame
+        // re-traced the same rays. Straight rays (no scatterer force, uniform film) isolate
+        // the start positions: their deposits change only if the seeds do. Runs the app's
+        // call order, one submission per frame.
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let run = FrameRun {
+            film_times: vec![0.0, 1.0 / 60.0],
+            clear_each_frame: true,
+        };
+        let frames = frame_deposits(
+            &device,
+            &queue,
+            &uniform_thickness(),
+            |simulator| {
+                simulator.params.patch_center_u = 0.5;
+                simulator.params.particle_weight = 0.0;
+            },
+            run,
+        );
+        let lit = frames[0].iter().filter(|&&texel| texel > 0).count();
+        let changed = frames[0]
+            .iter()
+            .zip(&frames[1])
+            .filter(|(first, second)| first != second)
+            .count();
+        println!("straight rays: {lit} texels lit, {changed} changed between frames");
+        assert!(lit > 0, "no deposits");
+        assert!(
+            changed * 2 > lit,
+            "only {changed} of {lit} lit texels changed although film time moved"
+        );
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn a_paused_film_traces_the_same_rays() {
+        // A paused bubble stands still: the scatterers stop and the ray seed does not
+        // advance, so a frame at the same film time deposits exactly the same texture
+        // (integer atomic adds do not depend on their order). The first frame plays, so
+        // this also covers the first paused frame after playback.
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let run = FrameRun {
+            film_times: vec![0.0, 1.0 / 60.0, 1.0 / 60.0],
+            clear_each_frame: true,
+        };
+        let frames = frame_deposits(
+            &device,
+            &queue,
+            &uniform_thickness(),
+            |simulator| simulator.params.patch_center_u = 0.5,
+            run,
+        );
+        assert!(frames[1].iter().any(|&texel| texel > 0), "no deposits");
+        assert_ne!(frames[0], frames[1], "playing frames should differ");
+        assert_eq!(frames[1], frames[2], "the paused frame changed");
     }
 
     #[test]
@@ -2040,6 +2192,60 @@ mod tests {
         // Streams and steps give different values
         assert_ne!(unit_random(5, 1, 0), unit_random(5, 2, 0));
         assert_ne!(unit_random(5, 1, 0), unit_random(5, 1, 1));
+    }
+
+    #[test]
+    fn ray_seeds_give_every_ray_its_own_start_at_the_slider_maximum() {
+        // #47: the old float hash of the ray index repeated about a quarter of the start
+        // pairs at 65536 rays, the ray-count slider's maximum (ui_state.rs). A single
+        // 24-bit coordinate repeats by chance (about 128 times at 65536 rays), so this
+        // checks the (across, along) pairs, which decide the start position.
+        const SLIDER_MAX_RAYS: u32 = 65_536;
+        for seed in [0, 1, 1_000_000, u32::MAX] {
+            let pairs: std::collections::HashSet<(u32, u32)> = (0..SLIDER_MAX_RAYS)
+                .map(|ray| {
+                    let [across, along] = ray_seeds(ray, seed);
+                    (across.to_bits(), along.to_bits())
+                })
+                .collect();
+            assert_eq!(pairs.len(), SLIDER_MAX_RAYS as usize, "seed {seed}");
+        }
+        // The next seed moves every ray
+        let kept = (0..SLIDER_MAX_RAYS)
+            .filter(|&ray| ray_seeds(ray, 7) == ray_seeds(ray, 8))
+            .count();
+        assert_eq!(kept, 0, "rays that kept their start position");
+        // The two coordinates are uncorrelated (standard error about 0.004 here)
+        let samples: Vec<[f64; 2]> = (0..SLIDER_MAX_RAYS)
+            .map(|ray| ray_seeds(ray, 3).map(f64::from))
+            .collect();
+        let count = samples.len() as f64;
+        let mean = |axis: usize| samples.iter().map(|pair| pair[axis]).sum::<f64>() / count;
+        let (mean_across, mean_along) = (mean(0), mean(1));
+        let covariance = samples
+            .iter()
+            .map(|pair| (pair[0] - mean_across) * (pair[1] - mean_along))
+            .sum::<f64>()
+            / count;
+        let correlation = covariance / (1.0 / 12.0);
+        assert!(correlation.abs() < 0.02, "correlation {correlation}");
+    }
+
+    #[test]
+    fn ray_seed_clock_advances_only_when_film_time_moves() {
+        let mut clock = RaySeedClock::default();
+        assert_eq!(clock.seed_for(0.0), 0, "first frame");
+        assert_eq!(clock.seed_for(0.0), 0, "paused from the start");
+        assert_eq!(clock.seed_for(1.0 / 60.0), 1, "playing");
+        assert_eq!(clock.seed_for(1.0 / 60.0), 1, "paused");
+        assert_eq!(clock.seed_for(1.0 / 60.0), 1, "still paused");
+        assert_eq!(clock.seed_for(2.0 / 60.0), 2, "playing again");
+        assert_eq!(clock.seed_for(0.0), 3, "reset: film time went backwards");
+        let mut wrapping = RaySeedClock {
+            index: u32::MAX,
+            film_time: Some(0.0),
+        };
+        assert_eq!(wrapping.seed_for(1.0), 0, "wraps at u32::MAX");
     }
 
     #[test]

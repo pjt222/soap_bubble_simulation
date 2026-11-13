@@ -12,10 +12,14 @@
 //! on the sphere, which the GRIN force uses (#45): `periodic_columns` and
 //! `surface_gradient`.
 //!
+//! It also checks the ray start-position hash (`ray_seeds`, #47) against its Rust
+//! original bit for bit, so the CPU tests of that hash hold for the shader too.
+//!
 //! GPU tests are `#[ignore]`d; run them with `scripts/test-local.sh -- --ignored`
 //! (lavapipe works).
 
 use soap_bubble_sim::physics::geometry::{SpherePatch, unit_sphere_to_uv, uv_to_unit_sphere};
+use soap_bubble_sim::render::branched_flow::ray_seeds;
 use wgpu::util::DeviceExt;
 
 const SHADER_DIR: &str = "src/render/shaders";
@@ -53,6 +57,18 @@ fn run_wgsl_function(
     call: &str,
     inputs: &[[f32; 4]],
 ) -> Vec<[f32; 4]> {
+    run_wgsl_functions(shader_file, &[function], call, inputs)
+}
+
+/// [`run_wgsl_function`] for a function that calls others: `functions` lists it and every
+/// function it calls, each extracted from `shader_file`.
+fn run_wgsl_functions(
+    shader_file: &str,
+    functions: &[&str],
+    call: &str,
+    inputs: &[[f32; 4]],
+) -> Vec<[f32; 4]> {
+    let function = functions.join("+");
     let source = std::fs::read_to_string(format!("{SHADER_DIR}/{shader_file}"))
         .unwrap_or_else(|error| panic!("read {shader_file}: {error}"));
     let pi_line = source
@@ -70,7 +86,11 @@ fn run_wgsl_function(
              let input = inputs[id.x];\n\
              outputs[id.x] = {call};\n\
          }}\n",
-        function_source = extract_wgsl_function(&source, function),
+        function_source = functions
+            .iter()
+            .map(|name| extract_wgsl_function(&source, name))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -321,4 +341,43 @@ fn branched_flow_surface_gradient_is_the_gradient_on_the_unit_sphere() {
             expected[1]
         );
     }
+}
+
+#[test]
+#[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+fn branched_flow_ray_seeds_match_rust_bit_for_bit() {
+    // The CPU tests of `ray_seeds` (distinct start pairs at the slider's 65536 rays, a
+    // new start for every ray when the seed advances) hold for the shader only if its
+    // port computes the same bits. Ray indices and seeds below 2^24 pass through f32
+    // exactly; every output is a 24-bit integer times 2^-24, which f32 holds exactly.
+    const SLIDER_MAX_RAYS: u32 = 65_536;
+    let inputs: Vec<[f32; 4]> = [0u32, 1, 1_000_000]
+        .into_iter()
+        .flat_map(|seed| (0..SLIDER_MAX_RAYS).map(move |ray| [ray as f32, seed as f32, 0.0, 0.0]))
+        .collect();
+    let call = "vec4<f32>(ray_seeds(u32(input.x), u32(input.y)), 0.0, 0.0)";
+    let gpu_seeds = run_wgsl_functions(
+        "branched_flow_compute.wgsl",
+        &["pcg_hash", "unit_random", "ray_seeds"],
+        call,
+        &inputs,
+    );
+    let mismatches: Vec<_> = inputs
+        .iter()
+        .zip(&gpu_seeds)
+        .filter_map(|(input, gpu)| {
+            let (ray, seed) = (input[0] as u32, input[1] as u32);
+            let expected = ray_seeds(ray, seed);
+            let matches = gpu[0].to_bits() == expected[0].to_bits()
+                && gpu[1].to_bits() == expected[1].to_bits();
+            (!matches).then_some((ray, seed, [gpu[0], gpu[1]], expected))
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} seeds differ, first (ray, seed, gpu, rust): {:?}",
+        mismatches.len(),
+        inputs.len(),
+        mismatches.first()
+    );
 }

@@ -1367,7 +1367,8 @@ impl RenderPipeline {
         // Branched flow compute pass (ray tracing through film)
         if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
             // 1. Update params first (stages write for next submission)
-            self.branched_flow_simulator.update_params(&self.queue);
+            self.branched_flow_simulator
+                .update_params(&self.queue, self.bubble_uniform.film_time);
             // 2. Update scatterers (sorted by grid cell with prefix-sum offsets)
             self.branched_flow_simulator
                 .update_scatterers(&self.queue, self.bubble_uniform.film_time);
@@ -1386,12 +1387,8 @@ impl RenderPipeline {
             let trace_ts = self
                 .gpu_profiler
                 .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
-            self.branched_flow_simulator.step(
-                &mut encoder,
-                self.bubble_uniform.film_time,
-                clear_ts,
-                trace_ts,
-            );
+            self.branched_flow_simulator
+                .step(&mut encoder, clear_ts, trace_ts);
         }
 
         // Update egui buffers

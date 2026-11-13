@@ -35,8 +35,8 @@ struct BranchedFlowParams {
     // Output texture size
     tex_width: u32,
     tex_height: u32,
-    // Time for animation
-    time: f32,
+    // Seeds the ray start positions (ray_seeds); advances only while film time moves (#47)
+    ray_seed_index: u32,
     // Drainage thickness (metres) to micrometres, the unit of ln_neff_table (1e6)
     thickness_scale: f32,
     // Film dynamics parameters (synced from BubbleUniform but currently UNUSED).
@@ -228,25 +228,35 @@ fn uv_to_patch_local(uv: vec2<f32>) -> vec2<f32> {
 }
 
 // ============================================================================
-// Hash functions for deterministic pseudo-random numbers
+// Random numbers: a PCG integer hash, ported from `pcg_hash`, `unit_random` and
+// `ray_seeds` in branched_flow.rs. tests/wgsl_uv_convention.rs checks the port bit for
+// bit on the GPU. u32 arithmetic wraps, as Rust's wrapping_* calls do.
 // ============================================================================
 
-fn hash11(p: f32) -> f32 {
-    var p3 = fract(p * 0.1031);
-    p3 += p3 * (p3 + 33.33);
-    return fract((p3 + p3) * p3);
+fn pcg_hash(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
-fn hash21(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+// Uniform value in [0, 1) (24 bits over 2^24) for `index` in an independent random
+// `stream` at `step`
+fn unit_random(index: u32, stream: u32, step: u32) -> f32 {
+    let hash = pcg_hash(index ^ pcg_hash(stream + pcg_hash(step)));
+    return f32(hash >> 8u) * (1.0 / 16777216.0);
 }
 
-fn hash31(p: vec3<f32>) -> f32 {
-    var p3 = fract(p * 0.1031);
-    p3 += dot(p3, p3.zyx + 31.32);
-    return fract((p3.x + p3.y) * p3.z);
+// The two start-position random numbers of ray `ray_idx` under seed `ray_seed_index`:
+// across and along the beam in full-sphere mode, u and v in the patch. Streams 8 and 9
+// are STREAM_RAY_START_X and STREAM_RAY_START_Y in branched_flow.rs. The seed advances
+// on every frame on which film time moved (RaySeedClock), so while the film plays the
+// 0.85 fade adds rays from new start positions, and a paused film re-traces the same
+// rays. Before #47 the start positions depended on ray_idx alone.
+fn ray_seeds(ray_idx: u32, ray_seed_index: u32) -> vec2<f32> {
+    return vec2<f32>(
+        unit_random(ray_idx, 8u, ray_seed_index),
+        unit_random(ray_idx, 9u, ray_seed_index)
+    );
 }
 
 // ============================================================================
@@ -500,8 +510,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Only vary the STARTING POSITION (not direction)
     // This is how real branched flow experiments work - laser beam, not point source
 
-    let rand1 = hash21(vec2<f32>(f32(ray_idx) * 0.1, 0.0));
-    let rand2 = hash21(vec2<f32>(f32(ray_idx) * 0.1 + 100.0, 1.0));
+    let start_random = ray_seeds(ray_idx, params.ray_seed_index);
+    let rand1 = start_random.x;
+    let rand2 = start_random.y;
 
     // All rays have the same direction (collimated beam)
     var vel_2d = vec2<f32>(
@@ -525,8 +536,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // the patch centre have no usable chart coordinate, so those rays are not traced.
     // Larger patches lose their outer columns: the loop also stops rays beyond chart
     // radius 2.5 (68 degrees) after one deposit. Measured lit share, one frame, centre
-    // u = 0.5: half size 0.158 90%, 0.20 80%, 0.25 61%, 0.30 47%. Exponential-map
-    // propagation (#47) would remove both limits.
+    // u = 0.5: half size 0.158 89%, 0.18 86%, 0.20 78%, 0.25 59%, 0.30 46%.
+    // Exponential-map propagation (#47) would remove both limits.
     if (params.patch_enabled != 0u) {
         let start_3d = uv_to_sphere(map_to_patch(rand1, rand2));
         let cos_from_origin = dot(start_3d, entry_point);
