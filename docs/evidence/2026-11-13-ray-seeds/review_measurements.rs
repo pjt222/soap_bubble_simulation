@@ -1,5 +1,5 @@
 
-    // Review measurements for docs/evidence/2026-11-13-ray-seeds (run at f8d0998)
+    // Review measurements for docs/evidence/2026-11-13-ray-seeds (run at 33a1ca8)
 
     #[test]
     #[ignore]

@@ -8,16 +8,16 @@ functions, not maintained tools.
 - Paste a file into the `tests` module of `src/render/branched_flow.rs` at the commit named
   in the table, then run
   `scripts/test-local.sh --lib -- --ignored --nocapture <test name>` (lavapipe).
-- Most of them run at `f8d0998`, the branch before the trace schedule. There a paused film
+- Most of them run at `33a1ca8`, the branch before the trace schedule. There a paused film
   still traced and faded every frame, and the seed was picked by `RaySeedClock`, which the
   schedule replaced. They do not compile at later commits.
 
 | File | Test | Commit | Output | Time on lavapipe |
 |---|---|---|---|---|
-| `frame_to_frame_change.rs` | `measure_frame_to_frame_change` | `f8d0998` | `frame_to_frame_change.log` | most of a 302 s run |
-| `accumulation_error.rs` | `measure_accumulation_error` | `f8d0998` | `accumulation_error.log` | 247 s |
-| `patch_size_coverage.rs` | `measure_patch_size_coverage` | `f8d0998`, and `main` at `4216e34` | `patch_size_coverage.log`, `patch_size_coverage_main.log` | a few seconds |
-| `review_measurements.rs` | `review_measure_pause_transition`, `review_measure_coverage_seed_band` | `f8d0998` | `review_measurements.log` | 155 s for both |
+| `frame_to_frame_change.rs` | `measure_frame_to_frame_change` | `33a1ca8` | `frame_to_frame_change.log` | most of a 302 s run |
+| `accumulation_error.rs` | `measure_accumulation_error` | `33a1ca8` | `accumulation_error.log` | 247 s |
+| `patch_size_coverage.rs` | `measure_patch_size_coverage` | `33a1ca8`, and `main` at `4216e34` | `patch_size_coverage.log`, `patch_size_coverage_main.log` | a few seconds |
+| `review_measurements.rs` | `review_measure_pause_transition`, `review_measure_coverage_seed_band` | `33a1ca8` | `review_measurements.log` | 155 s for both |
 
 **Common setup.**
 - **Simulator.** The default `BranchedFlowSimulator`: 8192 rays, 400 scatterers, patch view
@@ -69,7 +69,7 @@ How close the faded deposit texture comes to the expected one.
   seeds 41–168, which neither faded run uses.
 - **Faded runs.** Each runs 40 frames under the 0.85 fade, and frames 30–39 are measured.
   - *Seed advancing* passes film time = frame number to `update_params`, which advanced the
-    seed every frame at `f8d0998`.
+    seed every frame at `33a1ca8`.
   - *Seed frozen* passes film time 0, so every frame uses seed 0. It stands in for `main`
     before #47.
 - **Distance.** Σ|T − R·ΣT/ΣR| / ΣT over raw texels (T is the texture, R the reference). The
@@ -101,7 +101,7 @@ measurement covers the sampling part only.
 ## Pausing a playing film, before the trace schedule
 
 The `review_measure_pause_transition` run covers 40 playing frames, then 60 paused ones, under
-the fade. It ran at `f8d0998`, where the paused frames kept fading and re-tracing seed 39.
+the fade. It ran at `33a1ca8`, where the paused frames kept fading and re-tracing seed 39.
 
 **What happened.**
 - **Change per frame.** The displayed layer changed by 0.0812 on the first paused frame,
