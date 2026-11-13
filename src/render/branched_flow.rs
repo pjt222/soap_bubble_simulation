@@ -666,6 +666,12 @@ pub struct BranchedFlowSimulator {
     /// Beam angle in degrees (see [`beam_direction`]); `params.beam_dir` is derived from it
     /// at the current chart origin before every upload
     beam_angle_deg: f32,
+    /// Laser azimuth and elevation in degrees, as last set; `params.entry_point` is derived
+    /// from them. Kept so the UI reads back exactly what it set: deriving the angles from
+    /// `entry_point` each frame and setting them again never settles at azimuth ±180° or
+    /// elevation ±90°, which made every paused frame an input change.
+    laser_azimuth_deg: f32,
+    laser_elevation_deg: f32,
     /// Whether each frame traces, and its seed (uploaded as `params.ray_seed_index`)
     trace_schedule: TraceSchedule,
     /// [`traced_inputs`] of the previous frame's params, to detect input changes
@@ -918,6 +924,10 @@ impl BranchedFlowSimulator {
             last_patch_half_size: params.patch_half_size,
             scatterer_field: ScattererField::default(),
             beam_angle_deg: DEFAULT_BEAM_ANGLE_DEG,
+            laser_azimuth_deg: params.entry_point[2]
+                .atan2(params.entry_point[0])
+                .to_degrees(),
+            laser_elevation_deg: params.entry_point[1].asin().to_degrees(),
             trace_schedule: TraceSchedule::default(),
             previous_inputs: None,
             trace_planned: true,
@@ -1107,6 +1117,8 @@ impl BranchedFlowSimulator {
 
     /// Set laser entry point (spherical coordinates: azimuth, elevation in degrees)
     pub fn set_entry_point(&mut self, azimuth_deg: f32, elevation_deg: f32) {
+        self.laser_azimuth_deg = azimuth_deg;
+        self.laser_elevation_deg = elevation_deg;
         let azimuth = azimuth_deg.to_radians();
         let elevation = elevation_deg.to_radians();
         self.params.entry_point = [
@@ -1114,6 +1126,12 @@ impl BranchedFlowSimulator {
             elevation.sin(),
             elevation.cos() * azimuth.sin(),
         ];
+    }
+
+    /// Laser azimuth and elevation in degrees, exactly as last set by
+    /// [`Self::set_entry_point`] (the UI reads them back every frame)
+    pub fn laser_angles_deg(&self) -> (f32, f32) {
+        (self.laser_azimuth_deg, self.laser_elevation_deg)
     }
 
     /// Set the beam angle in degrees, measured from east toward south at the chart origin
@@ -1566,6 +1584,54 @@ mod tests {
             frames[2], frames[4],
             "the second paused frame changed the picture"
         );
+    }
+
+    #[test]
+    #[ignore] // Requires GPU (lavapipe works: scripts/test-local.sh -- --ignored)
+    fn paused_picture_freezes_under_the_ui_round_trip_at_the_laser_end_stops() {
+        // Every frame the app reads the laser angles for the UI (snapshot_ui_state) and sets
+        // them again (apply_ui_changes). Derived from entry_point, that round trip never
+        // settled at azimuth 180 or elevation 90 (review of #47's ray seeds), so every
+        // paused frame counted as an input change and traced. With the angles kept in
+        // degrees, the picture freezes after the first settling period.
+        let Some((device, queue)) = test_device() else {
+            panic!("no GPU adapter (run via scripts/test-local.sh for lavapipe)");
+        };
+        let settle = PAUSED_SETTLE_FRAMES as usize;
+        for (azimuth, elevation) in [
+            (90.0f32, 0.0f32),
+            (180.0, 0.0),
+            (-180.0, 0.0),
+            (37.0, 90.0),
+            (37.0, -90.0),
+        ] {
+            let run = FrameRun {
+                film_times: vec![0.0; settle + 10],
+                clear_each_frame: false,
+            };
+            let frames = frame_deposits(
+                &device,
+                &queue,
+                &uniform_thickness(),
+                |frame, simulator| {
+                    simulator.params.particle_weight = 0.0;
+                    simulator.params.num_rays = 1024;
+                    if frame == 0 {
+                        simulator.set_entry_point(azimuth, elevation);
+                    }
+                    let (ui_azimuth, ui_elevation) = simulator.laser_angles_deg();
+                    simulator.set_entry_point(ui_azimuth, ui_elevation);
+                },
+                run,
+            );
+            let changed = (settle..frames.len())
+                .filter(|&frame| frames[frame] != frames[frame - 1])
+                .count();
+            assert_eq!(
+                changed, 0,
+                "laser at ({azimuth}, {elevation}): {changed} paused frames after settling changed the picture"
+            );
+        }
     }
 
     #[test]

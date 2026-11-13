@@ -1569,7 +1569,7 @@ impl RenderPipeline {
     }
     /// Create a snapshot of current pipeline state as UiState for the egui panel.
     fn snapshot_ui_state(&self) -> UiState {
-        let entry = self.branched_flow_simulator.params.entry_point;
+        let (laser_azimuth, laser_elevation) = self.branched_flow_simulator.laser_angles_deg();
         UiState {
             thickness: self.bubble_uniform.base_thickness_nm,
             refractive_index: self.bubble_uniform.refractive_index,
@@ -1613,8 +1613,8 @@ impl RenderPipeline {
             branched_flow_enabled: self.branched_flow_simulator.enabled,
             branched_flow_intensity: self.bubble_uniform.branched_flow_intensity,
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
-            laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
-            laser_elevation: entry[1].asin().to_degrees(),
+            laser_azimuth,
+            laser_elevation,
             beam_angle: self.branched_flow_simulator.beam_angle_deg(),
             beam_spread: self
                 .branched_flow_simulator
