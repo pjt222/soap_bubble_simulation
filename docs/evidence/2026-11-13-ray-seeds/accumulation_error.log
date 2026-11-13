@@ -1,0 +1,5 @@
+# stdout of measure_accumulation_error, lavapipe, 2026-11-13 (ACCUMULATION lines only)
+ACCUMULATION single frame (cleared), 4 frames: raw 0.4218, displayed 0.6385
+ACCUMULATION faded, seed advancing, frames 30-39: raw 0.1344, displayed 0.1806
+ACCUMULATION faded, seed frozen, frames 30-39: raw 0.4147, displayed 0.4746
+ACCUMULATION reference: mean of 128 cleared frames, seeds 41..168

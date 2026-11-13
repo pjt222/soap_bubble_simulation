@@ -1,0 +1,6 @@
+# stdout of measure_patch_size_coverage, lavapipe, 2026-11-13 (COVERAGE lines only)
+COVERAGE half size 0.158: DepositCoverage { lit: 0.8925247192382813, left_half: 0.889862060546875, right_half: 0.8951873779296875, top_half: 0.86468505859375, bottom_half: 0.9203643798828125 }
+COVERAGE half size 0.18: DepositCoverage { lit: 0.8596038818359375, left_half: 0.8531951904296875, right_half: 0.8660125732421875, top_half: 0.828521728515625, bottom_half: 0.89068603515625 }
+COVERAGE half size 0.2: DepositCoverage { lit: 0.7790985107421875, left_half: 0.7750701904296875, right_half: 0.7831268310546875, top_half: 0.74810791015625, bottom_half: 0.810089111328125 }
+COVERAGE half size 0.25: DepositCoverage { lit: 0.5885543823242188, left_half: 0.58221435546875, right_half: 0.5948944091796875, top_half: 0.5677490234375, bottom_half: 0.6093597412109375 }
+COVERAGE half size 0.3: DepositCoverage { lit: 0.456634521484375, left_half: 0.448333740234375, right_half: 0.464935302734375, top_half: 0.4403839111328125, bottom_half: 0.4728851318359375 }

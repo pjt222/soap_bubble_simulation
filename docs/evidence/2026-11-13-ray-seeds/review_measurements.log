@@ -1,0 +1,68 @@
+# stdout of review_measure_pause_transition and review_measure_coverage_seed_band at 33a1ca8, lavapipe, 2026-11-13 (result lines only)
+BAND half size 0.158: seeds 0-7 lit mean 0.8935 min 0.8912 max 0.8984 all [0.8925247192382813, 0.898406982421875, 0.892913818359375, 0.89385986328125, 0.8912277221679688, 0.8913803100585938, 0.894195556640625, 0.8938522338867188]
+BAND half size 0.18: seeds 0-7 lit mean 0.8645 min 0.8596 max 0.8680 all [0.8596038818359375, 0.8677520751953125, 0.86578369140625, 0.8656387329101563, 0.8603897094726563, 0.8647537231445313, 0.8636856079101563, 0.8680419921875]
+BAND half size 0.2: seeds 0-7 lit mean 0.7844 min 0.7791 max 0.7895 all [0.7790985107421875, 0.7895431518554688, 0.785491943359375, 0.7809677124023438, 0.7825393676757813, 0.78411865234375, 0.7855072021484375, 0.7879791259765625]
+BAND half size 0.25: seeds 0-7 lit mean 0.5944 min 0.5886 max 0.5969 all [0.5885543823242188, 0.5945663452148438, 0.5958251953125, 0.5948867797851563, 0.595001220703125, 0.5941314697265625, 0.59552001953125, 0.5969314575195313]
+BAND half size 0.3: seeds 0-7 lit mean 0.4602 min 0.4566 max 0.4652 all [0.456634521484375, 0.461212158203125, 0.46038055419921875, 0.45920562744140625, 0.460723876953125, 0.4605255126953125, 0.4652099609375, 0.45800018310546875]
+PAUSE frame 40 (paused frame 1): change raw 0.0627 displayed 0.0812, texels changed 120331
+PAUSE frame 41 (paused frame 2): change raw 0.0532 displayed 0.0660, texels changed 117920
+PAUSE frame 42 (paused frame 3): change raw 0.0451 displayed 0.0531, texels changed 115607
+PAUSE frame 43 (paused frame 4): change raw 0.0382 displayed 0.0427, texels changed 113248
+PAUSE frame 44 (paused frame 5): change raw 0.0323 displayed 0.0345, texels changed 110953
+PAUSE frame 45 (paused frame 6): change raw 0.0273 displayed 0.0279, texels changed 107829
+PAUSE frame 46 (paused frame 7): change raw 0.0230 displayed 0.0225, texels changed 103399
+PAUSE frame 47 (paused frame 8): change raw 0.0194 displayed 0.0183, texels changed 98893
+PAUSE frame 48 (paused frame 9): change raw 0.0164 displayed 0.0149, texels changed 93849
+PAUSE frame 49 (paused frame 10): change raw 0.0137 displayed 0.0121, texels changed 87669
+PAUSE frame 50 (paused frame 11): change raw 0.0114 displayed 0.0097, texels changed 80872
+PAUSE frame 51 (paused frame 12): change raw 0.0095 displayed 0.0077, texels changed 73147
+PAUSE frame 52 (paused frame 13): change raw 0.0078 displayed 0.0062, texels changed 65302
+PAUSE frame 53 (paused frame 14): change raw 0.0064 displayed 0.0047, texels changed 56321
+PAUSE frame 54 (paused frame 15): change raw 0.0050 displayed 0.0034, texels changed 46773
+PAUSE frame 55 (paused frame 16): change raw 0.0039 displayed 0.0024, texels changed 37477
+PAUSE frame 56 (paused frame 17): change raw 0.0029 displayed 0.0015, texels changed 28790
+PAUSE frame 57 (paused frame 18): change raw 0.0021 displayed 0.0009, texels changed 21027
+PAUSE frame 58 (paused frame 19): change raw 0.0015 displayed 0.0005, texels changed 14898
+PAUSE frame 59 (paused frame 20): change raw 0.0010 displayed 0.0003, texels changed 9965
+PAUSE frame 60 (paused frame 21): change raw 0.0006 displayed 0.0002, texels changed 6491
+PAUSE frame 61 (paused frame 22): change raw 0.0004 displayed 0.0001, texels changed 4078
+PAUSE frame 62 (paused frame 23): change raw 0.0002 displayed 0.0000, texels changed 2439
+PAUSE frame 63 (paused frame 24): change raw 0.0001 displayed 0.0000, texels changed 1470
+PAUSE frame 64 (paused frame 25): change raw 0.0001 displayed 0.0000, texels changed 835
+PAUSE frame 65 (paused frame 26): change raw 0.0000 displayed 0.0000, texels changed 489
+PAUSE frame 66 (paused frame 27): change raw 0.0000 displayed 0.0000, texels changed 278
+PAUSE frame 67 (paused frame 28): change raw 0.0000 displayed 0.0000, texels changed 164
+PAUSE frame 68 (paused frame 29): change raw 0.0000 displayed 0.0000, texels changed 91
+PAUSE frame 69 (paused frame 30): change raw 0.0000 displayed 0.0000, texels changed 62
+PAUSE frame 70 (paused frame 31): change raw 0.0000 displayed 0.0000, texels changed 31
+PAUSE frame 71 (paused frame 32): change raw 0.0000 displayed 0.0000, texels changed 18
+PAUSE frame 72 (paused frame 33): change raw 0.0000 displayed 0.0000, texels changed 11
+PAUSE frame 73 (paused frame 34): change raw 0.0000 displayed 0.0000, texels changed 6
+PAUSE frame 74 (paused frame 35): change raw 0.0000 displayed 0.0000, texels changed 3
+PAUSE frame 75 (paused frame 36): change raw 0.0000 displayed 0.0000, texels changed 2
+PAUSE frame 76 (paused frame 37): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 77 (paused frame 38): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 78 (paused frame 39): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 79 (paused frame 40): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 80 (paused frame 41): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 81 (paused frame 42): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 82 (paused frame 43): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 83 (paused frame 44): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 84 (paused frame 45): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 85 (paused frame 46): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 86 (paused frame 47): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 87 (paused frame 48): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 88 (paused frame 49): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 89 (paused frame 50): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 90 (paused frame 51): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 91 (paused frame 52): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 92 (paused frame 53): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 93 (paused frame 54): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 94 (paused frame 55): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 95 (paused frame 56): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 96 (paused frame 57): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 97 (paused frame 58): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 98 (paused frame 59): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE frame 99 (paused frame 60): change raw 0.0000 displayed 0.0000, texels changed 0
+PAUSE image at the pause instant vs settled paused image: raw 0.3818 displayed 0.4183; last frame that changed: Some(75)
+PAUSE lit texels: at pause 129810, settled 118476

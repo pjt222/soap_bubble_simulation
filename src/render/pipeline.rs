@@ -1367,7 +1367,8 @@ impl RenderPipeline {
         // Branched flow compute pass (ray tracing through film)
         if self.branched_flow_simulator.enabled && self.gpu_drainage_enabled {
             // 1. Update params first (stages write for next submission)
-            self.branched_flow_simulator.update_params(&self.queue);
+            self.branched_flow_simulator
+                .update_params(&self.queue, self.bubble_uniform.film_time);
             // 2. Update scatterers (sorted by grid cell with prefix-sum offsets)
             self.branched_flow_simulator
                 .update_scatterers(&self.queue, self.bubble_uniform.film_time);
@@ -1379,19 +1380,20 @@ impl RenderPipeline {
             );
             // 4. Dispatch compute passes with GPU timing. Requesting timestamps marks
             //    the passes as written, so request them only when step() will record
-            //    both passes: it returns early only when disabled, which this `if` excludes.
-            let clear_ts = self
-                .gpu_profiler
-                .compute_pass_timestamps(GpuPass::BranchedFlowClear);
-            let trace_ts = self
-                .gpu_profiler
-                .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
-            self.branched_flow_simulator.step(
-                &mut encoder,
-                self.bubble_uniform.film_time,
-                clear_ts,
-                trace_ts,
-            );
+            //    both passes. With the film paused it records nothing, which freezes the
+            //    picture (TraceSchedule).
+            if self.branched_flow_simulator.traces_this_frame() {
+                let clear_ts = self
+                    .gpu_profiler
+                    .compute_pass_timestamps(GpuPass::BranchedFlowClear);
+                let trace_ts = self
+                    .gpu_profiler
+                    .compute_pass_timestamps(GpuPass::BranchedFlowTrace);
+                self.branched_flow_simulator
+                    .step(&mut encoder, clear_ts, trace_ts);
+            }
+        } else {
+            self.branched_flow_simulator.skip_frame();
         }
 
         // Update egui buffers
@@ -1567,7 +1569,7 @@ impl RenderPipeline {
     }
     /// Create a snapshot of current pipeline state as UiState for the egui panel.
     fn snapshot_ui_state(&self) -> UiState {
-        let entry = self.branched_flow_simulator.params.entry_point;
+        let (laser_azimuth, laser_elevation) = self.branched_flow_simulator.laser_angles_deg();
         UiState {
             thickness: self.bubble_uniform.base_thickness_nm,
             refractive_index: self.bubble_uniform.refractive_index,
@@ -1611,8 +1613,8 @@ impl RenderPipeline {
             branched_flow_enabled: self.branched_flow_simulator.enabled,
             branched_flow_intensity: self.bubble_uniform.branched_flow_intensity,
             branched_flow_sharpness: self.bubble_uniform.branched_flow_sharpness,
-            laser_azimuth: entry[2].atan2(entry[0]).to_degrees(),
-            laser_elevation: entry[1].asin().to_degrees(),
+            laser_azimuth,
+            laser_elevation,
             beam_angle: self.branched_flow_simulator.beam_angle_deg(),
             beam_spread: self
                 .branched_flow_simulator

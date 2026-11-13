@@ -100,6 +100,32 @@ mode, so rays bend toward thicker film along `grad ln n_eff` (#45):
   `drainage_speed`, and `pattern_scale` fields in `BranchedFlowParams` are
   reserved but currently unused in the shader.
 
+**Ray start positions (#47):** `ray_seeds` in `branched_flow.rs` hashes the ray index
+with `params.ray_seed_index` (PCG via `unit_random`); the shader's `ray_seeds` is a
+port of it, checked bit for bit on the GPU in `tests/wgsl_uv_convention.rs`.
+`TraceSchedule` decides per frame whether the rays are traced, and every traced frame
+gets a new seed:
+- **Playing.** Every frame traces, so the 0.85 fade accumulates rays from different
+  start positions.
+- **Paused.** Film time stands still, so nothing is traced or faded. `step()` records no
+  pass, which freezes the picture at once at the accumulated image.
+- **Paused, but an input changed.** A change to a traced input (`traced_inputs`: the params
+  the shader reads), the first frame, or the first frame after frames the simulator
+  skipped (`skip_frame`) traces `PAUSED_SETTLE_FRAMES` (40) frames, then the picture
+  freezes again. The laser angles are stored in degrees (`laser_angles_deg`) because the
+  UI reads and sets them every frame: derived from `entry_point`, that round trip never
+  settled at azimuth ±180° or elevation ±90°, so the paused picture did not freeze there.
+
+Measurements on lavapipe, in the default patch view on a uniform film:
+- While playing at 60 fps, the displayed layer changes about 1.9× as much per frame (raw
+  texels 1.5×) as with seed 0 held fixed, a stand-in for `main` before #47.
+- On a still scatterer field, the faded image comes 3.1× closer to a many-seed reference
+  over raw texels (2.6× over displayed values).
+
+Evidence: `docs/evidence/2026-11-13-ray-seeds/`. The freeze holds while the GPU drainage
+field is static: `gpu_drainage.step` takes the wall-clock `last_dt`, so #43 must stop it
+while the film is paused.
+
 **Stale buffer prevention:** The GPU drainage simulator double-buffers thickness.
 The branched flow bind group is rebuilt each frame with the current thickness
 buffer via `rebuild_bind_group()` to prevent stale reads.
@@ -141,14 +167,18 @@ helpers (`#[ignore]`, lavapipe via `scripts/test-local.sh`; CI does not run it).
 - In patch mode every ray starts at a point of the patch UV rectangle (`map_to_patch`),
   converted to its gnomonic chart coordinate. The injection point and beam spread apply only
   to the full-sphere view; the beam angle (`set_beam_angle`, from east toward south at the
-  chart origin) applies to both. Measured on lavapipe, one frame, patch at u = 0.5: 90% of
-  the patch texture lit, against 4.8% (and none of the left half) before #46. The GPU tests
+  chart origin) applies to both. Measured on lavapipe, one frame, patch at u = 0.5: 89% of
+  the patch texture lit (90% with the seeds before #47), against 4.8% (and none of the left
+  half) before #46. The GPU tests
   keep the patch at u = 0.5 on purpose: at the default u = 0.75 the patch centre is the
   laser entry, so a wrong chart origin would not show. The test checks that rays reach the
-  whole patch, not that branching is visible (straight, unscattered rays score 94.5%)
+  whole patch, not that branching is visible (straight, unscattered rays scored 94.5%
+  with the seeds before #47)
 - Larger patches lose their outer columns: rays starting 84° or more from the patch centre
   are not traced, and the loop stops rays beyond chart radius 2.5 (68°). Lit share, one frame:
-  half size 0.158 → 90%, 0.20 → 80%, 0.25 → 61%, 0.30 → 47% (the slider goes to 0.3).
+  half size 0.158 → 89%, 0.18 → 86%, 0.20 → 78%, 0.25 → 59%, 0.30 → 46% (the slider goes
+  to 0.3; #47's seeds, seed 0; over seeds 0–7 each figure moves by up to 1 point, and
+  `main` before #47 read 90%, 87%, 79%, 60%, 46%).
   Exponential-map propagation (#47) would remove both limits
 - The default patch centre is u = 0.75, v = 0.5 (+z): it faces the default camera and holds
   the default laser entry. Visual check on Dozen (`probe-adapters.sh --app 45 --compute
